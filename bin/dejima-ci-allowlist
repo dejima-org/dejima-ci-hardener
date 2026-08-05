@@ -59,7 +59,15 @@ declare -A CFG=(
 
 read_config() {
     local file="$1" line key value
-    [ -r "$file" ] || die "no config at $file"
+    # -r alone conflates two different problems with one message. The config
+    # lives at a root-owned path, so "no config at ..." was what a non-root
+    # user saw for a file that was sitting right there - sending them to
+    # create something that already existed.
+    if [ ! -e "$file" ]; then
+        die "no config at $file - run install.sh to create it"
+    elif [ ! -r "$file" ]; then
+        die "$file exists but is not readable by $(id -un) - it is mode $(stat -c %a "$file" 2>/dev/null || echo '?') and owned by $(stat -c %U "$file" 2>/dev/null || echo '?'). Run this as root, or with sudo."
+    fi
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%%#*}"
         line="${line#"${line%%[![:space:]]*}"}"
