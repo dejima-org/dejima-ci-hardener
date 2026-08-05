@@ -1,0 +1,8 @@
+# Allowed regardless of any project declaration. Short on purpose.
+#
+# The forge itself, because a job that cannot fetch its own commit cannot run
+# at all, and the package mirror the job image needs. Nothing else belongs
+# here: a project's needs go in that project's .dejima/allowed-domains, where
+# adding one is a reviewable diff.
+gitea.example.com
+deb.debian.org

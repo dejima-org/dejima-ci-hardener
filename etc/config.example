@@ -1,0 +1,34 @@
+# dejima-ci-allowlist configuration. Install at /etc/dejima-ci/config.
+#
+# Parsed, never sourced: key = value, # starts a comment, unknown keys are a
+# hard error rather than a silent typo.
+
+# The forge's API root. Read-only access is all this needs.
+forge_api = https://gitea.example.com/api/v1
+
+# A token file, mode 0600, owned by root. Give it read access and nothing
+# else - this program only ever GETs one file per repository.
+token_file = /etc/dejima-ci/forge-token
+
+# One owner/repo per line. These are the repositories whose declarations are
+# allowed to widen this runner's allowlist, so the list is itself a grant:
+# adding a line here trusts that repository's main branch.
+repos_file = /etc/dejima-ci/repos
+
+# Names allowed regardless of any project declaration. Keep it short, and
+# keep it narrower than dejima's own built-in domains - a name judged
+# reasonable for a firewalled container is a different proposition on a host
+# on your network.
+base_file = /etc/dejima-ci/base-domains
+
+# Where allowed names are actually resolved. A resolver you run, ideally.
+upstream = 198.51.100.53
+
+# Rendered output, picked up by dnsmasq's conf-dir.
+out = /etc/dnsmasq.d/ci-allow.conf
+
+# The branch treated as operator-approved. Changing this to anything a
+# pull request can write gives up the entire point of this program.
+ref = main
+
+reload = systemctl reload dnsmasq

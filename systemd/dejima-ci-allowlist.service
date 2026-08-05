@@ -1,0 +1,19 @@
+[Unit]
+Description=Render the CI job network's DNS allowlist from main
+# Ordering only, not a dependency: if the resolver is down, rendering still
+# succeeds and the reload fails loudly, which is the useful direction.
+After=network-online.target dnsmasq.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dejima-ci-allowlist render
+
+# This reads a token and writes one file. It needs neither a home directory
+# nor the rest of the filesystem.
+User=root
+ProtectSystem=strict
+ReadWritePaths=/etc/dnsmasq.d
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

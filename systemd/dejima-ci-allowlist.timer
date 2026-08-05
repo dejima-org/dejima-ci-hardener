@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh the CI allowlist from main periodically
+
+[Timer]
+# Frequent enough that merging a domain does not mean waiting on a human to
+# notice, infrequent enough that the forge is not being polled for nothing.
+# A failed run leaves the previous allowlist in place, so a missed tick costs
+# freshness rather than availability.
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

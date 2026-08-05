@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# dejima-ci-allowlist - render a CI job network's DNS allowlist from the
+# .dejima/allowed-domains declarations of the repositories this runner serves,
+# read from the branch the operator controls.
+#
+# The value is entirely in where it reads from. `main` got its contents through
+# a pull request someone merged; a pull request branch got its contents from
+# whatever pushed it. A branch that can write its own allowlist does not have
+# one - so this reads over the forge API, by ref, and never from a checkout.
+#
+# The consequence: widening what CI can reach is a diff on main. Reviewed,
+# attributable, revertible, and made in the same file and by the same act that
+# widens what a sandbox session may reach.
+#
+# See README.md. Runs on a CI host. Never on a host that runs dejima.
+
+set -euo pipefail
+
+PROG=${0##*/}
+CONFIG=${DEJIMA_CI_CONFIG:-/etc/dejima-ci/config}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $PROG [render|check|show] [--config PATH]
+
+  render   fetch, validate and install the allowlist, reloading the resolver
+           only if it changed (the default; what the timer runs)
+  check    do everything render does except install - prints what would
+           change and exits 1 if it would, 0 if it would not
+  show     print the allowlist currently installed
+
+Reads $CONFIG unless --config or \$DEJIMA_CI_CONFIG says otherwise.
+EOF
+    exit 2
+}
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+
+# --- config -----------------------------------------------------------------
+# Parsed, never sourced. This file sits on a CI host and names a token path; a
+# config format that executes is a config format that runs whatever an
+# unexpected line contains.
+declare -A CFG=(
+    [forge_api]=""
+    [token_file]="/etc/dejima-ci/forge-token"
+    [repos_file]="/etc/dejima-ci/repos"
+    [base_file]="/etc/dejima-ci/base-domains"
+    [upstream]=""
+    [out]="/etc/dnsmasq.d/ci-allow.conf"
+    [ref]="main"
+    [reload]="systemctl reload dnsmasq"
+)
+
+read_config() {
+    local file="$1" line key value
+    [ -r "$file" ] || die "no config at $file"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        [[ "$line" == *=* ]] || die "malformed line in $file: $line"
+        key="${line%%=*}"; value="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        [[ -v CFG[$key] ]] || die "unknown key in $file: $key"
+        CFG[$key]="$value"
+    done < "$file"
+}
+
+# --- validation -------------------------------------------------------------
+# Every name below arrives from a file in a repository - a place agent-authored
+# code can write - so nothing reaches a resolver directive without matching
+# this first.
+#
+# An unexpected line is a hard failure rather than a skipped one. A silently
+# dropped entry reads as "that domain was never declared" and sends whoever
+# debugs it looking in the wrong repository.
+valid_domain() {
+    local d="$1"
+    [ ${#d} -le 253 ] || return 1
+    [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+# --- fetch ------------------------------------------------------------------
+fetch_repo() {
+    local repo="$1" token="$2" body http rc=0
+    body=$(mktemp)
+    # Cleaned up explicitly rather than with a RETURN trap: without
+    # `set -o functrace` such a trap is not scoped to the function that set
+    # it, so it fires again on the caller's return - by which point $body is
+    # out of scope and `set -u` turns a tidy-up into a failed run that has
+    # already done its work correctly.
+    #
+    # Read the status, not curl's exit code: --fail collapses every HTTP error
+    # into 22, and the difference decides whether this run may continue. A
+    # repository with no declaration is ordinary; a 401 means this run does not
+    # know what the allowlist is and must not render one.
+    http=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' \
+        -H "Authorization: token $token" \
+        "${CFG[forge_api]}/repos/$repo/raw/.dejima/allowed-domains?ref=${CFG[ref]}") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$body"
+        die "could not reach the forge for $repo"
+    fi
+    case "$http" in
+        200) cat "$body" ;;
+        404) ;;  # no declaration is a normal state, not an error
+        *)   rm -f "$body"; die "unexpected HTTP $http for $repo" ;;
+    esac
+    rm -f "$body"
+}
+
+collect() {
+    local token repo
+    token=$(< "${CFG[token_file]}")
+    [ -n "$token" ] || die "empty token in ${CFG[token_file]}"
+
+    # The base set first: what the runner needs regardless of any project.
+    # Keep it narrower than dejima's built-in domains - a name judged
+    # reasonable for a firewalled container is a different proposition on a
+    # host on your network.
+    [ -r "${CFG[base_file]}" ] && cat "${CFG[base_file]}"
+
+    while read -r repo || [ -n "$repo" ]; do
+        repo="${repo%%#*}"; repo="${repo//[[:space:]]/}"
+        [ -n "$repo" ] || continue
+        fetch_repo "$repo" "$token"
+    done < "${CFG[repos_file]}"
+}
+
+render() {
+    local raw domains d out
+    # Collected first, filtered second, so that the two failures stay
+    # distinguishable. Filtering in the same pipeline makes "the forge did not
+    # answer" and "every declaration is empty" arrive as the same error under
+    # pipefail - grep exits 1 on no matches - and they send whoever reads it
+    # to entirely different places.
+    raw=$(collect) || die "collection failed; leaving the existing allowlist in place"
+    domains=$(printf '%s\n' "$raw" | tr -d '\r' | tr -d '[:blank:]' | grep -v '^$' | sort -u || true)
+
+    # An empty render is refused rather than installed. This is the failure
+    # direction that matters: an allowlist of nothing looks identical to a
+    # working one until a job needs something.
+    [ -n "$domains" ] || die "collected an empty allowlist; refusing to install it"
+
+    out=$(mktemp)
+    printf '# Generated by %s. Do not edit: a hand-edit is a grant nobody merged.\n' "$PROG" > "$out"
+    while IFS= read -r d; do
+        valid_domain "$d" || die "refusing a malformed entry: $d"
+        printf 'server=/%s/%s\n' "$d" "${CFG[upstream]}" >> "$out"
+    done <<< "$domains"
+
+    # Only replace a working config with one that parses. dnsmasq exits on a
+    # bad config file, and a resolver that is down is a job network with no DNS
+    # at all - which fails every run rather than the one that caused it.
+    dnsmasq --test --conf-file="$out" >/dev/null 2>&1 \
+        || die "rendered config failed dnsmasq --test; leaving the existing one in place"
+    printf '%s\n' "$out"
+}
+
+# --- commands ---------------------------------------------------------------
+cmd=render
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        render|check|show) cmd="$1" ;;
+        --config) CONFIG="${2:?--config needs a path}"; shift ;;
+        -h|--help) usage ;;
+        *) args+=("$1") ;;
+    esac
+    shift
+done
+[ ${#args[@]} -eq 0 ] || usage
+
+read_config "$CONFIG"
+[ -n "${CFG[forge_api]}" ] || die "forge_api is not set in $CONFIG"
+[ -n "${CFG[upstream]}" ]  || die "upstream is not set in $CONFIG"
+
+case "$cmd" in
+    show)
+        [ -f "${CFG[out]}" ] || die "nothing installed at ${CFG[out]}"
+        cat "${CFG[out]}"
+        ;;
+    check)
+        new=$(render); trap 'rm -f "$new"' EXIT
+        if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
+            echo "up to date: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
+        else
+            echo "would change:"
+            diff -u "${CFG[out]:-/dev/null}" "$new" || true
+            exit 1
+        fi
+        ;;
+    render)
+        new=$(render); trap 'rm -f "$new"' EXIT
+        # Compare before writing: reloading on every timer tick drops the cache
+        # for no reason and makes the log useless for spotting when the
+        # allowlist actually changed.
+        if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
+            exit 0
+        fi
+        install -m 0644 "$new" "${CFG[out]}"
+        ${CFG[reload]}
+        echo "allowlist updated: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
+        ;;
+esac
