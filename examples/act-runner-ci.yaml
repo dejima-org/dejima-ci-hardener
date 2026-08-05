@@ -1,0 +1,115 @@
+# act_runner configuration for a runner that executes agent-authored code and
+# is granted nothing to execute it with. This is the ordinary tier: everything
+# except the one job that genuinely needs a Docker daemon belongs here.
+#
+# Written against act_runner v0.6.1. Check yours with `act_runner --version`,
+# and diff this against `act_runner generate-config` after an upgrade - the
+# defaults are what most of this is overriding, and a new release can change
+# one without anything in a job's output looking different.
+#
+# Not runnable as written: pick your own network name, subnet and label, and
+# see ci/README.md for the order things have to be created in.
+#
+# See docs/ci.md for why each of these is here.
+
+log:
+  level: info
+
+runner:
+  file: .runner
+
+  # One job at a time. Above one, concurrent jobs share the network below -
+  # so they can reach each other's service containers - and the whole point of
+  # a fixed network is that its occupants are known.
+  capacity: 1
+
+  # A label nothing else carries, so a job naming it cannot land on a runner
+  # that was never hardened for it. If no runner carries it, jobs queue: that
+  # is the intended failure, and a better one than a green run on a host that
+  # grants everything.
+  #
+  # Deliberately NOT ubuntu-latest or any other generic label. A generic label
+  # is an invitation for any repository on the instance to schedule work here.
+  labels:
+    - "dejima-ci:docker://node:20-bookworm"
+
+  # Register at REPOSITORY scope, not instance scope (that is a choice made at
+  # `act_runner register` time, not here): an unrelated repository should not
+  # be able to schedule work onto a runner hardened for this one.
+
+  # Nothing here. Extra environment variables reach agent-authored code.
+  envs: {}
+  env_file: ""
+
+  timeout: 1h
+  insecure: false
+
+cache:
+  # Off. act_runner's cache server binds on the runner host specifically so
+  # that job containers can reach it, which makes it an inbound service
+  # exposed to untrusted code. Turn it on only when something actually uses
+  # actions/cache, and know what you are exposing when you do.
+  enabled: false
+
+container:
+  # THE setting on this page. act_runner mounts the Docker daemon's socket
+  # into every job container unless this is exactly "-", and its own generated
+  # config says so:
+  #
+  #   If it's "-", act_runner will find an available docker host
+  #   automatically, but the docker host won't be mounted to the job
+  #   containers and service containers.
+  #
+  # An unset value is the default, and the default mounts. Access to that
+  # socket is root-equivalent on this host - `docker run -v /:/host` ends the
+  # argument - and nothing in a job's log mentions it being there.
+  #
+  # Note this is a property of the RUNNER, not of the job: a job asking for
+  # nothing unusual still receives whatever the runner grants everything it
+  # runs.
+  docker_host: "-"
+
+  # A network created ahead of time, with a named bridge, so that the
+  # interface name and gateway are stable enough to write firewall rules
+  # against. Left empty, act_runner creates one per job and there is nothing
+  # fixed to match on. See ci/iptables-ci.example.sh.
+  #
+  # NOT `host`: that would put jobs in this machine's network namespace, where
+  # no bridge-based filtering applies to them at all.
+  network: dejima-ci
+
+  privileged: false
+
+  # --init reaps zombies. --security-opt=no-new-privileges costs nothing and
+  # does not depend on getting a capability list right.
+  #
+  # On capabilities: --cap-drop=ALL is the reflex and it breaks apt-get, which
+  # needs CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID to unpack a package.
+  # Drop what your jobs demonstrably do not need rather than dropping
+  # everything and rediscovering that list one failure at a time.
+  # --dns pins the allowlisting resolver to the containers THIS runner
+  # starts, rather than setting it daemon-wide in daemon.json. That
+  # distinction is load-bearing on a host that also runs the privileged tier:
+  # its jobs create sibling containers over the Docker socket, and a
+  # daemon-wide resolver reaches those too. A dejima sandbox is one of them,
+  # and it allowlists exactly one host address - its own bridge gateway,
+  # taken from its default route - so a resolver on a different bridge is
+  # rejected by its own firewall and nothing inside it resolves at all.
+  #
+  # Must match listen-address in the dnsmasq config.
+  options: "--dns=203.0.113.1 --init --security-opt=no-new-privileges --cap-drop=NET_ADMIN --cap-drop=NET_RAW --cap-drop=SYS_ADMIN --cap-drop=SYS_MODULE --cap-drop=SYS_PTRACE --pids-limit=2048"
+
+  # Empty is the default and it is the right value: no host path can be
+  # mounted into a job container. Stated explicitly so that adding one has to
+  # be a deliberate edit rather than a default nobody looked at.
+  valid_volumes: []
+
+  force_pull: true
+  force_rebuild: false
+  require_docker: false
+
+host:
+  workdir_parent:
+
+metrics:
+  enabled: false

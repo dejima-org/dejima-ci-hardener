@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Deny-by-default egress for the job network.
+#
+# The one thing to get right here is that a job's traffic passes through two
+# different chains depending on where it is going, and filtering only the
+# obvious one leaves the DNS allowlist decorative:
+#
+#   job -> anywhere off the bridge   FORWARD, so DOCKER-USER
+#   job -> the resolver on the       INPUT, because the gateway address
+#          bridge gateway            belongs to this host
+#
+# A job that can reach any resolver it likes can resolve anything it likes, so
+# without the INPUT rules below it simply asks a public resolver and every
+# name is allowed again.
+#
+# Two more positions are NOT covered by this script, and should not be
+# confused with it:
+#
+#   - Pulling the job's own image is the Docker daemon's traffic, in this
+#     host's namespace: that is the host's OUTPUT chain.
+#   - Where a job has a daemon of its own, `docker build` steps run on that
+#     daemon's bridge under its own policy.
+#
+# Reads /etc/dejima-ci/config, the same file dejima-ci-allowlist uses, so the
+# bridge name is configured once rather than edited into a script. Run by
+# dejima-ci-firewall.service on every Docker start - see README.md.
+
+set -euo pipefail
+
+PROG=${0##*/}
+CONFIG=${DEJIMA_CI_CONFIG:-/etc/dejima-ci/config}
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+
+cfg_get() {
+    local key="$1" line
+    [ -r "$CONFIG" ] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        [[ "$line" == *=* ]] || continue
+        [ "$(echo "${line%%=*}" | tr -d '[:space:]')" = "$key" ] || continue
+        echo "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+        return 0
+    done < "$CONFIG"
+}
+
+# Checked by name, because the failure without it is not obvious. The first
+# real command below is `ipset create`, so on a host without ipset this script
+# aborts at line one under `set -e` - and the state that leaves behind looks
+# almost like a working one: DNS still refuses unlisted names, because that is
+# dnsmasq's doing and not the firewall's, while a job can reach any address it
+# likes. "command not found" scrolling past during setup is easy to miss; a
+# runner with no egress policy is not something to discover later.
+for tool in ipset iptables ip6tables; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "$tool is not installed - these rules cannot be applied." >&2
+        echo "On Debian/Ubuntu: apt-get install ipset iptables" >&2
+        echo "" >&2
+        echo "Without this, DNS allowlisting still appears to work (dnsmasq refuses" >&2
+        echo "unlisted names on its own) while jobs have unrestricted egress." >&2
+        exit 1
+    }
+done
+
+if [ ! -e "$CONFIG" ]; then
+    die "no config at $CONFIG - run install.sh to create it"
+elif [ ! -r "$CONFIG" ]; then
+    die "$CONFIG is not readable by $(id -un) - run this as root, or with sudo"
+fi
+
+BRIDGE=$(cfg_get bridge)
+SET=$(cfg_get ipset)
+: "${SET:=ci-allow}"
+[ -n "$BRIDGE" ] || die "bridge is not set in $CONFIG - the job network's bridge name, e.g. dejima-ci0"
+
+# The bridge has to exist before rules can name it. Applied at boot by a unit
+# ordered after docker.service, this is the case where the network has not
+# been created yet - which is a setup step that was missed rather than a
+# transient, so say which.
+ip link show "$BRIDGE" >/dev/null 2>&1 \
+    || die "no interface named $BRIDGE - create the job network first (README.md, step 1)"
+
+# hash:net, and created before any rule references it: an iptables rule naming
+# a set that does not exist fails to load, and a half-loaded ruleset is an
+# open one.
+ipset create "$SET" hash:net -exist
+
+# --- job egress: DOCKER-USER is the chain Docker jumps to first from FORWARD,
+# --- and the only one whose contents Docker will not rewrite underneath you.
+iptables -F DOCKER-USER
+
+# Return traffic for connections that were allowed on their way out.
+iptables -A DOCKER-USER -i "$BRIDGE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# The allowlist proper. Port-restricted: a name being allowed is not a reason
+# for every port on it to be reachable.
+iptables -A DOCKER-USER -i "$BRIDGE" -p tcp -m set --match-set "$SET" dst \
+    -m multiport --dports 80,443 -j ACCEPT
+
+# Uncomment for git-over-ssh to a forge. Prefer https where the forge offers
+# it, so that this stays closed.
+# iptables -A DOCKER-USER -i "$BRIDGE" -p tcp --dport 22 -m set --match-set "$SET" dst -j ACCEPT
+
+# REJECT rather than DROP: a job that cannot reach something should fail
+# immediately and say so, not hang until a timeout and read as a slow network.
+iptables -A DOCKER-USER -i "$BRIDGE" -j REJECT --reject-with icmp-port-unreachable
+
+# --- the resolver: addressed to this host, so it never reaches DOCKER-USER.
+iptables -A INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT
+iptables -A INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT
+
+# Everything else aimed at this host from the job network - the SSH daemon,
+# act_runner's cache server if you left it on, anything else listening - is
+# not part of running a job.
+iptables -A INPUT -i "$BRIDGE" -j REJECT --reject-with icmp-port-unreachable
+
+# --- IPv6: blocked outright, because none of the above has an IPv6 twin.
+# An address family with no allowlist is not a smaller hole than the one this
+# script just closed; on a host with IPv6 egress it is the same hole.
+ip6tables -F DOCKER-USER
+ip6tables -A DOCKER-USER -i "$BRIDGE" -j REJECT --reject-with icmp6-port-unreachable
+ip6tables -A INPUT -i "$BRIDGE" -j REJECT --reject-with icmp6-port-unreachable
+
+# These are not persistent. Reapply on boot, and after anything that reloads
+# the firewall - Docker recreates its own chains on daemon restart, and a
+# DOCKER-USER that came back empty is a runner with no egress policy at all.

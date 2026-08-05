@@ -47,6 +47,11 @@ die() { echo "$PROG: $*" >&2; exit 2; }
 # config format that executes is a config format that runs whatever an
 # unexpected line contains.
 declare -A CFG=(
+    [bridge]=""
+    [gateway]=""
+    [network]=""
+    [subnet]=""
+    [ipset]="ci-allow"
     [forge_api]=""
     [token_file]="/etc/dejima-ci/forge-token"
     [repos_file]="/etc/dejima-ci/repos"

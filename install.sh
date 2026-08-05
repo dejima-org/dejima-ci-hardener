@@ -102,11 +102,54 @@ detect_upstream() {
     printf '%s' "$ip"
 }
 
-say "dejima-ci-allowlist installer"
+# ipset in particular: the firewall's first command creates the set, so
+# without it that script aborts at line one - and what it leaves behind
+# resembles a working setup closely enough to pass a look. DNS still refuses
+# unlisted names, because that is the resolver's doing rather than the
+# firewall's, while every job has unrestricted egress.
+missing=""
+for tool in ipset iptables ip6tables dnsmasq docker; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+[ -z "$missing" ] || die "missing required commands:$missing
+On Debian/Ubuntu: apt-get install ipset iptables dnsmasq
+Without ipset the firewall cannot be applied, and a runner with no egress
+policy looks exactly like one with."
+
+say "dejima-ci-hardener installer"
 say
 say "This renders the CI job network's DNS allowlist from .dejima/allowed-domains"
 say "on each served repository's main branch. Press Enter to keep a value shown"
 say "in brackets."
+say
+
+# --- the job network --------------------------------------------------------
+say "The job network. Its bridge name is fixed rather than left for Docker to"
+say "generate, because the firewall rules match on it."
+ask network "Docker network name" "$(cfg_get network)"
+ask bridge  "Bridge interface name" "$(cfg_get bridge)"
+: "${network:=dejima-ci}"
+: "${bridge:=dejima-ci0}"
+
+say
+say "The bridge's gateway. The resolver listens here and job containers are"
+say "pointed at it by the runner's --dns. Use a PRIVATE range - dnsmasq's"
+say "stop-dns-rebind is keyed on the private ranges, so a reserved-but-not-"
+say "private subnet is one that check silently does not cover."
+ask gateway "Gateway address" "$(cfg_get gateway)"
+ask subnet  "Subnet" "$(cfg_get subnet)"
+: "${gateway:=10.89.0.1}"
+: "${subnet:=10.89.0.0/24}"
+say
+
+if docker network inspect "$network" >/dev/null 2>&1; then
+    say "  exists     docker network $network"
+else
+    docker network create \
+        --opt com.docker.network.bridge.name="$bridge" \
+        --subnet "$subnet" "$network" >/dev/null
+    say "  created    docker network $network ($bridge, $subnet)"
+fi
 say
 
 # --- forge ------------------------------------------------------------------
@@ -232,6 +275,7 @@ write_if_changed "$BASE_FILE" 0640 "$base"
 say
 
 # --- remaining settings -----------------------------------------------------
+ipset="$(cfg_get ipset)"; : "${ipset:=ci-allow}"
 ask out    "Generated allowlist path" "$(cfg_get out)"
 ask ref    "Branch treated as operator-approved" "$(cfg_get ref)"
 ask reload "Command that reloads the resolver" "$(cfg_get reload)"
@@ -242,6 +286,11 @@ say
 
 # --- write ------------------------------------------------------------------
 write_if_changed "$CONFIG" 0640 "# Written by $PROG. Re-run it to change a value.
+network = $network
+bridge = $bridge
+gateway = $gateway
+subnet = $subnet
+ipset = $ipset
 forge_api = $forge_api
 token_file = $TOKEN_FILE
 repos_file = $REPOS_FILE
@@ -251,15 +300,32 @@ out = $out
 ref = $ref
 reload = $reload"
 
-if cmp -s "$SRC/bin/dejima-ci-allowlist" "$BIN_DIR/dejima-ci-allowlist" 2>/dev/null; then
-    say "  unchanged  $BIN_DIR/dejima-ci-allowlist"
-else
-    install -m 0755 "$SRC/bin/dejima-ci-allowlist" "$BIN_DIR/dejima-ci-allowlist"
-    say "  installed  $BIN_DIR/dejima-ci-allowlist"
-fi
+for prog in dejima-ci-allowlist dejima-ci-firewall; do
+    if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
+        say "  unchanged  $BIN_DIR/$prog"
+    else
+        install -m 0755 "$SRC/bin/$prog" "$BIN_DIR/$prog"
+        say "  installed  $BIN_DIR/$prog"
+    fi
+done
+
+# The resolver's static half. Its generated half - the server= lines - is
+# written by dejima-ci-allowlist from origin/main, into a separate file in the
+# same directory. Keeping them apart is what stops a hand-edit drifting from
+# the list that is actually derived from a branch you control.
+forge_host="${instance#*://}"; forge_host="${forge_host%%/*}"; forge_host="${forge_host%%:*}"
+write_if_changed /etc/dnsmasq.d/dejima-ci.conf 0644 "# Written by $PROG. The allowed names live in the file
+# dejima-ci-allowlist renders; do not add server= lines here.
+listen-address=$gateway
+bind-interfaces
+no-hosts
+no-resolv
+ipset=/#/$ipset
+stop-dns-rebind
+rebind-domain-ok=/$forge_host/"
 
 if [ "$INSTALL_UNITS" -eq 1 ]; then
-    for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer; do
+    for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer dejima-ci-firewall.service; do
         write_if_changed "$UNIT_DIR/$unit" 0644 "$(cat "$SRC/systemd/$unit")"
     done
 else
@@ -274,6 +340,16 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
         systemctl enable --now dejima-ci-allowlist.timer
         say "  timer enabled"
     fi
+    # PartOf + WantedBy on docker.service, so the rules are reapplied whenever
+    # Docker starts. Docker recreates its own chains on every start and
+    # DOCKER-USER comes back empty, so "apply them once" is not an
+    # instruction that stays true.
+    ask enable_fw "Enable the firewall unit (reapplies rules on every Docker start)? (Y/n)" "y"
+    if [ "${enable_fw,,}" != n ] && [ "${enable_fw,,}" != no ]; then
+        systemctl enable --now dejima-ci-firewall.service
+        say "  firewall unit enabled"
+    fi
+    systemctl restart dnsmasq 2>/dev/null || say "  NOTE: could not restart dnsmasq - do it by hand"
 fi
 
 say

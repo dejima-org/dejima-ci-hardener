@@ -1,0 +1,42 @@
+# Reapplies the job network's egress rules whenever Docker starts.
+#
+# This exists because the rules are not persistent and Docker itself removes
+# them. Every daemon start recreates Docker's own iptables chains, and
+# DOCKER-USER comes back empty - so a `systemctl restart docker` for any
+# reason at all, days after the setup was verified, silently leaves the runner
+# with no egress policy. Nothing about it looks different: jobs still run,
+# DNS still refuses unlisted names because that is dnsmasq's doing rather than
+# the firewall's, and only a job actually reaching an off-list address reveals
+# it.
+#
+# PartOf + WantedBy on docker.service is what makes that automatic:
+# WantedBy starts this whenever docker starts, and PartOf restarts it whenever
+# docker restarts. A plain After= would only cover boot, which is the case
+# that was never the problem.
+#
+# Install as /etc/systemd/system/dejima-ci-firewall.service, then:
+#   systemctl daemon-reload
+#   systemctl enable --now dejima-ci-firewall
+#
+# Verify it actually rebinds, rather than assuming:
+#   systemctl restart docker && sudo iptables -S DOCKER-USER
+
+[Unit]
+Description=dejima CI job-network egress rules
+Documentation=https://gitbox.example.com/branderson/dejima/src/branch/main/ci/README.md
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dejima-ci-firewall
+
+# Failing to apply the rules must be loud. A runner that came up without them
+# is a runner with unrestricted egress, which is the state this whole setup
+# exists to prevent - so surface it rather than logging and carrying on.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=docker.service
