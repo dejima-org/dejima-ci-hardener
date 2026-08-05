@@ -26,7 +26,9 @@ Usage: $PROG [render|check|show] [--config PATH]
   render   fetch, validate and install the allowlist, reloading the resolver
            only if it changed (the default; what the timer runs)
   check    do everything render does except install - prints what would
-           change and exits 1 if it would, 0 if it would not
+           change and exits 1 if it would, 0 if it would not. Exit 2 is
+           always a fault - bad configuration, an unreachable forge, a
+           malformed entry - never "something would change"
   show     print the allowlist currently installed
 
 Reads $CONFIG unless --config or \$DEJIMA_CI_CONFIG says otherwise.
@@ -34,7 +36,11 @@ EOF
     exit 2
 }
 
-die() { echo "$PROG: $*" >&2; exit 1; }
+# Exit 2, not 1. `check` uses 1 for "there is a pending change" - an ordinary
+# answer, not a fault - so everything that IS a fault has to be distinguishable
+# from it, or a caller cannot tell "the allowlist moved" from "the forge is
+# unreachable".
+die() { echo "$PROG: $*" >&2; exit 2; }
 
 # --- config -----------------------------------------------------------------
 # Parsed, never sourced. This file sits on a CI host and names a token path; a
@@ -66,6 +72,61 @@ read_config() {
         [[ -v CFG[$key] ]] || die "unknown key in $file: $key"
         CFG[$key]="$value"
     done < "$file"
+}
+
+# --- preflight --------------------------------------------------------------
+# Every setting and every file this run depends on, checked before any of it is
+# used, and reported together.
+#
+# Reporting one problem at a time costs a run per problem, and the failures
+# that reach an operator this way are the least legible ones: a missing
+# token_file used to surface as bash's own "No such file or directory" with a
+# line number, followed by "empty token" (it was absent, not empty), followed
+# by "collection failed" - three messages, none of which named the setting
+# that pointed there or what to put in it.
+declare -A HINT=(
+    [forge_api]="your forge's API root, e.g. https://gitea.example.com/api/v1"
+    [upstream]="the resolver dnsmasq forwards ALLOWED queries to - the one that knows the answers, not this dnsmasq and not the bridge gateway. Whatever this host already resolves with: resolvectl status, or /etc/resolv.conf"
+    [out]="where the generated allowlist is written, e.g. /etc/dnsmasq.d/ci-allow.conf"
+    [ref]="the branch treated as operator-approved, normally main"
+    [reload]="the command that reloads the resolver, e.g. systemctl reload dnsmasq"
+    [token_file]="a file holding a READ-ONLY forge token, mode 0600"
+    [repos_file]="one owner/repo per line - the repositories allowed to widen this runner's allowlist"
+    [base_file]="names allowed regardless of any project declaration, one per line"
+)
+
+preflight() {
+    local problems=() key
+    for key in forge_api upstream out ref reload; do
+        [ -n "${CFG[$key]}" ] \
+            || problems+=("$key is empty or missing in $CONFIG - ${HINT[$key]}")
+    done
+    # base_file is genuinely optional; the other two are not.
+    for key in token_file repos_file; do
+        if [ -z "${CFG[$key]}" ]; then
+            problems+=("$key is empty or missing in $CONFIG - ${HINT[$key]}")
+        elif [ ! -e "${CFG[$key]}" ]; then
+            problems+=("$key points at ${CFG[$key]}, which does not exist - ${HINT[$key]}")
+        elif [ ! -r "${CFG[$key]}" ]; then
+            problems+=("$key points at ${CFG[$key]}, which is not readable by $(id -un)")
+        elif [ "$key" = token_file ] && [ ! -s "${CFG[$key]}" ]; then
+            problems+=("token_file ${CFG[$key]} is empty - ${HINT[token_file]}")
+        fi
+    done
+    if [ -n "${CFG[base_file]}" ] && [ -e "${CFG[base_file]}" ] && [ ! -r "${CFG[base_file]}" ]; then
+        problems+=("base_file points at ${CFG[base_file]}, which is not readable by $(id -un)")
+    fi
+
+    [ ${#problems[@]} -eq 0 ] && return 0
+    {
+        printf '%s: cannot run - %d problem(s) with the configuration:\n\n' "$PROG" "${#problems[@]}"
+        printf '  - %s\n' "${problems[@]}"
+        printf '\nFix all of them, or re-run install.sh, which prompts for each.\n'
+    } >&2
+    # 2, not 1: `check` uses 1 for "there is a pending change", which is an
+    # ordinary answer rather than a fault. A caller - install.sh, or a timer's
+    # alerting - has to be able to tell those apart.
+    exit 2
 }
 
 # --- validation -------------------------------------------------------------
@@ -165,7 +226,9 @@ args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         render|check|show) cmd="$1" ;;
-        --config) CONFIG="${2:?--config needs a path}"; shift ;;
+        --config)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die "--config needs a path"
+            CONFIG="$2"; shift ;;
         -h|--help) usage ;;
         *) args+=("$1") ;;
     esac
@@ -174,8 +237,9 @@ done
 [ ${#args[@]} -eq 0 ] || usage
 
 read_config "$CONFIG"
-[ -n "${CFG[forge_api]}" ] || die "forge_api is not set in $CONFIG"
-[ -n "${CFG[upstream]}" ]  || die "upstream is not set in $CONFIG"
+# `show` only reads the already-rendered file, so it stays useful for
+# diagnosis on a host whose configuration is exactly what is being diagnosed.
+[ "$cmd" = show ] || preflight
 
 case "$cmd" in
     show)
