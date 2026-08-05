@@ -21,7 +21,19 @@ repos_file = /etc/dejima-ci/repos
 # on your network.
 base_file = /etc/dejima-ci/base-domains
 
-# Where allowed names are actually resolved. A resolver you run, ideally.
+# The resolver dnsmasq forwards ALLOWED queries to - the one that actually
+# knows the answers.
+#
+# It is NOT the dnsmasq this configures (that would loop), and NOT the job
+# bridge gateway. It is whatever this host already resolves with:
+#
+#   resolvectl status | grep 'DNS Servers'    # systemd-resolved
+#   grep nameserver /etc/resolv.conf          # otherwise
+#
+# It has to be able to resolve everything on the allowlist, INCLUDING your
+# forge - so if that name is internal, this has to be your internal DNS.
+# `no-resolv` in the dnsmasq config means it will not read /etc/resolv.conf
+# itself, which is why this has to be named explicitly.
 upstream = 198.51.100.53
 
 # Rendered output, picked up by dnsmasq's conf-dir.

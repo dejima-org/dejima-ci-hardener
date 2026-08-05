@@ -183,3 +183,72 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -eq 1 ]
     [ ! -f "$T/out/ci-allow.conf" ]
 }
+
+# --- preflight and exit codes ------------------------------------------------
+#
+# The first version reported configuration problems one at a time, and the
+# worst of them not at all: a missing token_file surfaced as bash's own "No
+# such file or directory" with a line number, then "empty token" (it was
+# absent, not empty), then "collection failed" - three messages, none naming
+# the setting that pointed there.
+
+@test "a missing token file names the setting, the path, and what belongs there" {
+    rm -f "$T/token"
+    run_tool check
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"token_file points at $T/token"* ]]
+    [[ "$output" == *"does not exist"* ]]
+    [[ "$output" == *"READ-ONLY forge token"* ]]
+}
+
+@test "every configuration problem is reported in one run, not one per run" {
+    rm -f "$T/token" "$T/repos"
+    sed -i 's|^upstream = .*|upstream =|' "$T/config"
+    run_tool check
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"token_file"* ]]
+    [[ "$output" == *"repos_file"* ]]
+    [[ "$output" == *"upstream"* ]]
+    [[ "$output" == *"3 problem(s)"* ]]
+}
+
+# The upstream setting is the one an operator is most likely to fill in wrongly,
+# so its hint has to say what it is rather than only that it is missing.
+@test "the upstream hint says which resolver is meant" {
+    sed -i 's|^upstream = .*|upstream =|' "$T/config"
+    run_tool check
+    [[ "$output" == *"forwards ALLOWED queries"* ]]
+    [[ "$output" == *"not the bridge gateway"* ]]
+}
+
+@test "an empty token file is reported as empty, not as missing" {
+    : > "$T/token"
+    run_tool check
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is empty"* ]]
+}
+
+# 1 means "there is a pending change" and is an ordinary answer; everything
+# that is a fault has to be distinguishable from it, or a timer's alerting
+# cannot tell "the allowlist moved" from "the forge is unreachable".
+@test "a fault exits 2 and a pending change exits 1" {
+    mkdir -p "$STUB_DIR/owner"; echo example.com > "$STUB_DIR/owner/repo.body"
+    run_tool check
+    [ "$status" -eq 1 ]
+
+    echo 500 > "$STUB_DIR/owner/repo.status"
+    run_tool check
+    [ "$status" -eq 2 ]
+}
+
+# `show` reads only what is already rendered, so it has to keep working on the
+# host whose configuration is the thing being diagnosed.
+@test "show still works when the configuration is unusable" {
+    mkdir -p "$STUB_DIR/owner"; echo example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    rm -f "$T/token"
+    run_tool show
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"server=/example.com/"* ]]
+}

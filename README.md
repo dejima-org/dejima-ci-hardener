@@ -46,24 +46,46 @@ bounds where that code can reach, not whether it executes.
 ## Install
 
 ```sh
-install -m 0755 bin/dejima-ci-allowlist /usr/local/bin/
-install -d -m 0750 /etc/dejima-ci
-install -m 0640 etc/config.example      /etc/dejima-ci/config
-install -m 0640 etc/repos.example       /etc/dejima-ci/repos
-install -m 0640 etc/base-domains.example /etc/dejima-ci/base-domains
-install -m 0600 /dev/null               /etc/dejima-ci/forge-token   # then write the token
-
-install -m 0644 systemd/dejima-ci-allowlist.* /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now dejima-ci-allowlist.timer
+sudo ./install.sh
 ```
 
-Edit `/etc/dejima-ci/config` first — `forge_api` and `upstream` have no
-defaults, and the program refuses to run without them.
+It prompts for each value, offering what is already configured as the default,
+and installs the program, the systemd units and the timer. **Idempotent:**
+re-running and pressing Enter at every prompt changes nothing, so it is also
+how to change one setting later. `--non-interactive` re-installs using the
+existing configuration without prompting.
+
+What it asks for:
+
+| | |
+| --- | --- |
+| Forge URL | `https://gitea.example.com` — the API root is derived |
+| Upstream resolver | see below; it offers what this host already uses |
+| Forge token | read access only, never echoed, kept if one is already installed |
+| Repositories | `owner/repo` per line — adding one trusts that repository's `main` |
+| Base domains | allowed regardless of any project declaration |
 
 The token needs read access and nothing else. This program only ever GETs one
 file per repository, and a token that can do more is a token handed to a
 machine that runs untrusted code.
+
+### The upstream resolver
+
+The one setting that is genuinely ambiguous, so: it is the resolver **dnsmasq
+forwards allowed queries to** — the one that actually knows the answers.
+
+It is *not* the dnsmasq this configures (that would loop), and *not* the job
+bridge gateway. It is whatever this host already resolves with:
+
+```sh
+resolvectl status | grep 'DNS Servers'    # systemd-resolved
+grep nameserver /etc/resolv.conf          # otherwise
+```
+
+It has to resolve everything on the allowlist, **including your forge** — so
+if that name is internal, this has to be your internal DNS. `no-resolv` in the
+dnsmasq config means it will not read `/etc/resolv.conf` itself, which is why
+it must be named explicitly.
 
 ## Use
 
@@ -75,6 +97,19 @@ dejima-ci-allowlist show     # what is installed right now
 
 `check` is the one to reach for after merging a domain: it tells you whether
 the runner has picked it up yet without waiting for the timer.
+
+Exit codes are distinguishable on purpose, because a timer's alerting has to
+tell "the allowlist moved" from "the forge is unreachable":
+
+| | |
+| --- | --- |
+| `0` | nothing to do |
+| `1` | `check` only — there is a pending change |
+| `2` | a fault: bad configuration, an unreachable forge, a malformed entry |
+
+A configuration problem lists **every** problem at once, each naming the
+setting, the path it points at, and what belongs there. Reporting one at a
+time costs a run per problem.
 
 ## How it fails
 
