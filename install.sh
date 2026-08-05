@@ -134,10 +134,31 @@ say "on - those are usually named <project>_<network> and are a different thing"
 say "entirely. It is also not needed by the privileged runner at all, whose"
 say "jobs run in the host network namespace."
 say
+# Listed with the bridge each one uses, because that is what actually
+# distinguishes the job network from a compose project's own: the job network
+# has the fixed bridge the firewall rules name.
+#
+# The whole block is guarded. A grep that matches nothing exits 1, and under
+# `set -euo pipefail` inside a command substitution that ends the installer
+# with no message at all - which is what an earlier version of this did on a
+# host where every network name happened to be filtered out. Nothing here is
+# load-bearing enough to stop an install.
 if command -v docker >/dev/null 2>&1; then
-    existing=$(docker network ls --format '{{.Name}}' 2>/dev/null \
-        | grep -vE '^(bridge|host|none)$' | grep -vE '_' | tr '\n' ' ')
-    [ -z "$existing" ] || say "  candidates on this host: $existing"
+    net_list=$(docker network ls --format '{{.Name}}' 2>/dev/null \
+        | grep -vxE 'bridge|host|none' || true)
+    if [ -n "$net_list" ]; then
+        say "  networks on this host, and the bridge each uses:"
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            b=$(docker network inspect "$n" \
+                -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+            if [ -z "$b" ]; then
+                nid=$(docker network inspect "$n" -f '{{.Id}}' 2>/dev/null || true)
+                [ -z "$nid" ] || b="br-${nid:0:12} (generated)"
+            fi
+            printf '    %-40s %s\n' "$n" "${b:-?}" >&2
+        done <<< "$net_list"
+    fi
 fi
 ask network "Job network name" "$(cfg_get network)"
 : "${network:=dejima-ci}"
