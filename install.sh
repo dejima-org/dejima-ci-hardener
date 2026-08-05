@@ -124,11 +124,46 @@ say "in brackets."
 say
 
 # --- the job network --------------------------------------------------------
-say "The job network. Its bridge name is fixed rather than left for Docker to"
-say "generate, because the firewall rules match on it."
-ask network "Docker network name" "$(cfg_get network)"
-ask bridge  "Bridge interface name" "$(cfg_get bridge)"
+say "The JOB network: the one job containers attach to, named by"
+say "container.network in the runner's config.yaml. The firewall rules match on"
+say "its bridge, which is why the bridge name is fixed rather than left for"
+say "Docker to generate."
+say
+say "This is NOT the compose network the act_runner containers themselves sit"
+say "on - those are usually named <project>_<network> and are a different thing"
+say "entirely. It is also not needed by the privileged runner at all, whose"
+say "jobs run in the host network namespace."
+say
+if command -v docker >/dev/null 2>&1; then
+    existing=$(docker network ls --format '{{.Name}}' 2>/dev/null \
+        | grep -vE '^(bridge|host|none)$' | grep -vE '_' | tr '\n' ' ')
+    [ -z "$existing" ] || say "  candidates on this host: $existing"
+fi
+ask network "Job network name" "$(cfg_get network)"
 : "${network:=dejima-ci}"
+
+# Read the bridge off the network rather than asking twice and letting the two
+# disagree - a firewall matching a bridge that is not the one jobs are on is
+# the failure this whole tool exists to prevent, and it looks identical to a
+# working setup.
+detected_bridge=""
+if docker network inspect "$network" >/dev/null 2>&1; then
+    detected_bridge=$(docker network inspect "$network" \
+        -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)
+    if [ -z "$detected_bridge" ]; then
+        # Docker generates br-<first 12 of the network id> when the option was
+        # not set at creation. Derived rather than asked for, because nobody
+        # knows it off hand and getting it wrong fails silently.
+        netid=$(docker network inspect "$network" -f '{{.Id}}' 2>/dev/null)
+        [ -z "$netid" ] || detected_bridge="br-${netid:0:12}"
+        say "  NOTE: $network has no fixed bridge name, so Docker generated"
+        say "  ${detected_bridge:-one}. That works, but it changes if the network is"
+        say "  recreated - and the rules would then match nothing. Consider"
+        say "  recreating it with --opt com.docker.network.bridge.name=."
+    fi
+    say "  bridge for $network: ${detected_bridge:-<unknown>}"
+fi
+ask bridge "Bridge interface name(s), space-separated" "${detected_bridge:-$(cfg_get bridge)}"
 : "${bridge:=dejima-ci0}"
 
 say
