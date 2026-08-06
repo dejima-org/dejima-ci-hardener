@@ -166,10 +166,37 @@ is_private() {
     return 1
 }
 
+# Docker decides the gateway, so ask it first - but do not stake the install on
+# one template expression. When a network is created with --subnet and no
+# explicit --gateway, some daemons record no Gateway in IPAM.Config at all and
+# only ever put the address on the bridge. Reading it back is right; reading it
+# back from exactly one place is not.
+#
+# Sets: gateway, gw_src. Requires: $1 network, $2 bridge, $3 subnet.
+read_gateway() {
+    gateway=$(docker network inspect "$1" \
+        -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    gw_src="docker"
+    if [ -z "$gateway" ] && [ -n "$2" ]; then
+        # The address actually on the bridge - as true as Docker's answer, and
+        # true for the same reason: it is what containers route to.
+        gateway=$(ip -4 -o addr show "$2" 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 | head -1)
+        gw_src="bridge $2"
+    fi
+    if [ -z "$gateway" ] && [ -n "$3" ]; then
+        # Last resort: the subnet's first usable address, which is what Docker
+        # picks when nothing says otherwise.
+        IFS=./ read -r o1 o2 o3 o4 _pfx <<< "$3"
+        gateway="$o1.$o2.$o3.$((o4 + 1))"
+        gw_src="derived from $3"
+    fi
+    [ -n "$gateway" ]
+}
+
 if docker network inspect "$network" >/dev/null 2>&1; then
     # Already there: read what it actually is rather than asking and hoping.
     subnet=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
-    gateway=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
     bridge=$(docker network inspect "$network" \
         -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
     if [ -z "$bridge" ]; then
@@ -180,9 +207,11 @@ if docker network inspect "$network" >/dev/null 2>&1; then
         say "  recreated - and the firewall rules would then match nothing."
         say
     fi
+    read_gateway "$network" "$bridge" "$subnet" \
+        || die "$network exists but its gateway cannot be determined by any means"
     say "  $network already exists:"
     say "    subnet   $subnet"
-    say "    gateway  $gateway"
+    say "    gateway  $gateway   ($gw_src - the resolver listens here)"
     say "    bridge   $bridge"
     say
     say "  Of these, only the NAME goes in a runner's config (container.network),"
@@ -216,17 +245,12 @@ else
         --subnet "$subnet" "$network" >/dev/null \
         || die "could not create the network - is $subnet already in use? (docker network ls)"
 
-    # Read the gateway back rather than computing it. Docker decides it, and a
-    # value derived here would be a second opinion that can differ - which for
-    # the resolver's listen-address and the runner's --dns is the difference
-    # between working and silently not.
-    gateway=$(docker network inspect "$network" \
-        -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-    [ -n "$gateway" ] || die "created $network but could not read its gateway back"
+    read_gateway "$network" "$bridge" "$subnet" \
+        || die "created $network but its gateway cannot be determined by any means"
 
     say "  created    docker network $network"
     say "    subnet   $subnet"
-    say "    gateway  $gateway"
+    say "    gateway  $gateway   ($gw_src - the resolver listens here)"
     say "    bridge   $bridge"
     say
     say "  Only the NAME goes in a runner's config (container.network), and the"
