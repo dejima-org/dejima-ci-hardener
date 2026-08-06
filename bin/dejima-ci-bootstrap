@@ -4,7 +4,7 @@
 # Runs INSIDE the VM. The firewall that keeps this machine off your LAN is not
 # here - it is on the Proxmox node, applied to this VM's tap device, because
 # the premise of the privileged tier is that a compromised job reaches root
-# here, and root can flush anything it can see. See proxmox/dejima-ci-vm.
+# here, and root can flush anything it can see. See proxmox/README.md.
 #
 # What this does install is real, and defends against a compromised job that
 # has NOT escaped its container - which is the ordinary case, and the one the
@@ -227,13 +227,12 @@ cat >&2 <<EOF
                      container.network / --dns at what install.sh printed
      - role runtime: this is the privileged tier - socket and host netns
 
-3. On the Proxmox node, take the clean snapshot:
+3. In the Proxmox console, snapshot this VM clean, BEFORE the first job runs:
 
-     qm snapshot <vmid> clean --description 'bootstrapped, before any job ran'
+     VM -> Snapshots -> Take Snapshot, named 'clean'
 
-   and roll back to it on a cadence, and after anything suspicious:
-
-     qm rollback <vmid> clean
+   Roll back from that same tab on a cadence, and after anything suspicious.
+   A snapshot taken later preserves whatever the job that worried you left.
 
 Remember what is and is not enforced here. The node's firewall keeps this
 machine off your LAN and cannot be reached from inside it. Everything this

@@ -15,23 +15,25 @@ it to follow this.
 
 ## The runner host itself
 
-`install.sh` hardens the runners on a machine you already have.
-`proxmox/dejima-ci-vm` builds the machine, for the case where you would rather
-not hand an existing one to a compromised job.
+`install.sh` hardens the runners on a machine you already have. For the
+privileged tier that is the wrong starting point - its jobs get the Docker
+socket, so the assumption has to be that a compromised job gets root on that
+host, and handing an existing machine to that assumption is not a decision
+many people would make deliberately.
+
+**[proxmox/README.md](proxmox/README.md)** builds one instead: a runbook for
+the Proxmox web console, then one script inside the VM.
 
 ```sh
-# on the Proxmox node
-./proxmox/dejima-ci-vm --vmid 910 --role runtime \
-  --ip 192.0.2.61/24 --gateway 192.0.2.1 \
-  --forge <forge-ip> --resolver <resolver-ip> --mgmt <your-ip>
-
-# then inside the VM
+# inside the new VM, once the console steps are done
 sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-ip>
 ```
 
-`--dry-run` on the first one prints the firewall it would install without
-touching anything, and works off-node so you can read the rules somewhere
-other than the machine that applies them.
+The node half is a runbook rather than a script on purpose. Something that
+runs `qm create` and writes into `/etc/pve/firewall/` is exactly what gets
+pasted into a root shell unread, and the blast radius is every VM on the node.
+The in-VM half is a script, because running that one blind costs you a machine
+built to be lost.
 
 ### The boundary is on the node, not in the VM
 
@@ -56,19 +58,20 @@ reaches the internet, and not your network.
 
 One thing to check rather than assume, because its absence looks exactly like
 it working: **the datacenter firewall must be enabled** (Datacenter → Firewall
-→ Options → Firewall: Yes). Without it, a per-VM firewall file is read and
-enforced nowhere. `dejima-ci-vm` warns if it can tell, and
-`pve-firewall compile` on the node is the check.
+→ Options → Firewall: Yes), and the VM's network device must have its own
+**Firewall** checkbox ticked. Without either, the per-VM rules apply to
+nothing. `pve-firewall compile` on the node is the check, and
+[proxmox/README.md](proxmox/README.md) has a from-inside-the-VM check that
+does not rely on reading configuration at all.
 
 ### Snapshot, and roll back on a cadence
 
 The VM is worth losing, which is only true if losing it is cheap. Snapshot it
 the moment it is bootstrapped and before any job has run:
 
-```sh
-qm snapshot <vmid> clean --description 'bootstrapped, before any job ran'
-qm rollback <vmid> clean        # whenever you want it clean again
-```
+**VM → Snapshots → Take Snapshot**, named `clean`, taken **before the first
+job runs** — one taken later preserves whatever that job left. Roll back from
+the same tab.
 
 Rolling back on a schedule bounds how long a foothold can live without needing
 the VM rebuilt each time. Weekly is a reasonable starting point; after

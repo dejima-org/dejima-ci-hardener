@@ -1,6 +1,13 @@
-# Proxmox VM firewall for a dejima CI runner. Rendered by
-# proxmox/dejima-ci-vm and installed as /etc/pve/firewall/<vmid>.fw on the
-# Proxmox node.
+# Proxmox VM firewall for a dejima CI runner, as the file Proxmox itself
+# writes to /etc/pve/firewall/<vmid>.fw.
+#
+# REFERENCE, not something to install. proxmox/README.md builds this through
+# the web console instead, one rule at a time - a runbook you can check as you
+# follow it beats a file to drop onto a hypervisor. This exists because eleven
+# rules are easier to review in one piece than in eleven table rows, and
+# because it says plainly what the console cannot: why each rule is there.
+#
+# Substitute the three placeholders if you do use it directly.
 #
 # THIS FILE IS THE BOUNDARY. Everything dejima-ci-hardener installs inside the
 # VM - the job network's allowlist, the DOCKER-USER rules - is defence in
