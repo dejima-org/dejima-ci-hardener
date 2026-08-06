@@ -56,7 +56,7 @@ before you flip it rather than after.
 
 | Tab | Setting | Value |
 | --- | --- | --- |
-| General | Name | `oubliettebox` (or whatever you called it) |
+| General | Name | `oubliette`, or whatever you prefer |
 | OS | ISO | Debian netinst, latest stable |
 | System | Qemu Agent | ✓ |
 | Disks | Size | 64 GB is comfortable for image builds |
@@ -131,11 +131,40 @@ Nothing follows rule 8. The public internet is reached by the default policy.
 
 ### Check it, rather than assuming it
 
-On the node:
+On the node, with the VM **running** — Proxmox builds these chains around the
+VM's tap device, so a stopped VM has none and their absence would tell you
+nothing:
 
 ```sh
-pve-firewall compile | grep -A30 "vm-<vmid>"
+# what is actually loaded right now
+iptables -S | grep "tap<vmid>i0"
+
+# what Proxmox would generate from the current config
+pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
+
+**What you are looking for.** Proxmox names the per-VM chains after the tap
+interface — `tap<vmid>i0-IN` and `tap<vmid>i0-OUT` for the first NIC — and
+your rules appear inside them, in the order you added them. In the `-OUT`
+chain that means the three pinhole ACCEPTs first, then the four LAN DROPs,
+then whatever Proxmox appends for the policy.
+
+**What each failure looks like.**
+
+| What you see | What it means |
+| --- | --- |
+| No `tap<vmid>i0` chains at all | The firewall is not applied to this VM. The NIC's Firewall checkbox, the VM's Firewall option, or the datacenter switch — check all three, in that order |
+| Chains exist but hold none of your rules | The rules are on a different VM id, or were added at datacenter or node level rather than to this VM |
+| A LAN DROP above a pinhole ACCEPT | The ordering trap. The runner will not reach the forge or resolve anything; drag the pinholes above the DROPs |
+
+`pve-firewall status` is the quicker sanity check of whether the service is
+running and enabled at all, but it says nothing about *these* rules — it is
+the datacenter switch it reports on, not your eight lines.
+
+**Both commands describe configuration.** They are worth reading, and they are
+not proof: a rule that is loaded and a rule that does what you meant are
+different claims. The checks from inside the VM below are the ones that test
+behaviour, which is why they follow rather than replace this.
 
 and from inside the VM, once it is up. Two of these must fail and two must
 succeed, which is what makes the set diagnostic rather than reassuring:
