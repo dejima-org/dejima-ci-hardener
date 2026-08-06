@@ -64,11 +64,43 @@ say "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    docker.io docker-compose-v2 \
+    docker.io \
     openssh-server \
     ipset iptables dnsmasq \
     ca-certificates curl git jq \
     unattended-upgrades
+
+# Compose is named differently depending on how old this Debian is, and on
+# bookworm it is not packaged at all. Detected rather than assumed: naming it
+# in the list above aborted the whole bootstrap on Debian 12 over a package
+# that is only needed later, when the runner is started.
+#
+# v1 (the `docker-compose` package) is not a fallback. The compose files here
+# use a top-level `name:`, which is compose-spec v2 and which v1 rejects.
+have_compose() { docker compose version >/dev/null 2>&1; }
+if have_compose; then
+    say "  compose    already present"
+else
+    for pkg in docker-compose-v2 docker-compose-plugin; do
+        if apt-cache show "$pkg" 2>/dev/null | grep -q '^Package:'; then
+            apt-get install -y -qq --no-install-recommends "$pkg" && break
+        fi
+    done
+fi
+if have_compose; then
+    say "  compose    $(docker compose version 2>/dev/null | head -1)"
+else
+    say ""
+    say "  NOTE: no docker compose v2 on this system, and no package for it."
+    say "  Everything else here still installed; you need it to START a runner,"
+    say "  not to harden this host. On Debian 12 either:"
+    say "    - enable backports and apt-get install -t bookworm-backports docker-compose-v2"
+    say "    - or add Docker's own repository and install docker-compose-plugin"
+    say "  Debian 13 and later package it as docker-compose-v2 directly."
+    say "  The v1 'docker-compose' package will NOT work: the compose files here"
+    say "  use a top-level name:, which v1 rejects."
+    say ""
+fi
 
 # --- services this host has no business running -----------------------------
 # Every listener is a way in, and a CI runner needs none of these. avahi in

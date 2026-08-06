@@ -57,7 +57,7 @@ before you flip it rather than after.
 | Tab | Setting | Value |
 | --- | --- | --- |
 | General | Name | `oubliette`, or whatever you prefer |
-| OS | ISO | Debian netinst, latest stable |
+| OS | ISO | Debian netinst — **13 (trixie) or newer** if you have the choice; see the compose note below |
 | System | Qemu Agent | ✓ |
 | Disks | Size | 64 GB is comfortable for image builds |
 | CPU | Cores | 4 |
@@ -73,6 +73,14 @@ Install Debian normally, with two things to get right.
 
 **Static addressing**, not DHCP. The firewall names this VM by address, and a
 lease that moves is a rule that no longer describes it.
+
+**Debian 13 or newer, if you get to choose.** Docker Compose v2 is packaged
+as `docker-compose-v2` from trixie onward. Debian 12 does not package it at
+all, and the v1 `docker-compose` package is not a substitute — the compose
+files here use a top-level `name:`, which is compose-spec v2 and which v1
+rejects. On 12 you can still get there with backports or Docker's own
+repository; the bootstrapper says so if it finds neither, and continues,
+since compose is needed to *start* a runner rather than to harden the host.
 
 **Leave the root password blank.** Debian reads an empty root password as
 "use sudo", installs it, and puts your first user in the `sudo` group. Set a
