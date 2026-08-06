@@ -126,8 +126,8 @@ Then **VM → Firewall → Add**, in this order:
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | in | ACCEPT | tcp | 22 | **Source:** your management IP | The only way in |
 | 2 | out | ACCEPT | tcp | 443 | **Dest:** forge IP | Fetch jobs, report results |
-| 3 | out | ACCEPT | udp | 53 | **Dest:** resolver IP | The forge's name is internal |
-| 4 | out | ACCEPT | tcp | 53 | **Dest:** resolver IP | Same, over TCP |
+| 3 | out | ACCEPT | udp | 53 | **Dest:** nameserver IP | The forge's name is internal |
+| 4 | out | ACCEPT | tcp | 53 | **Dest:** nameserver IP | Same, over TCP |
 | 5 | out | DROP | — | — | **Dest:** `10.0.0.0/8` | |
 | 6 | out | DROP | — | — | **Dest:** `172.16.0.0/12` | |
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
@@ -146,6 +146,30 @@ access" is not literally true. Both destinations are pinned to one host and
 one port.
 
 Nothing follows rule 8. The public internet is reached by the default policy.
+
+### Values that must agree
+
+Three pairs here are entered in two places each, and each pair is silent when
+the halves disagree. Read the real value off the machine rather than
+recalling it — that is the whole of the advice, and every one of these has
+been got wrong at least once.
+
+| This | Must equal this | Read the truth from |
+| --- | --- | --- |
+| Rules 3–4's destination | The VM's **nameserver** | `grep nameserver /etc/resolv.conf` on the VM |
+| Rule 2's destination | The forge's address | `getent hosts <forge-hostname>` |
+| Rule 1's source | The host you SSH from | wherever you are sitting |
+
+**Rules 3–4 want the nameserver, not the gateway.** They are the same address
+on plenty of networks, which is exactly what makes this worth saying: using
+the gateway works for some people and, for everyone else, blocks DNS while
+leaving every other check passing. `ip route` gives you the gateway;
+`/etc/resolv.conf` gives you the nameserver, and it is the second one that
+belongs in these rules.
+
+There is a fourth pair inside the VM, once `install.sh` has run: the
+resolver's `listen-address` and the runner's `--dns=`. Same shape, same
+silence. `install.sh` derives both from one answer for that reason.
 
 ### Check it, rather than assuming it
 
@@ -174,6 +198,7 @@ then whatever Proxmox appends for the policy.
 | No `tap<vmid>i0` chains at all | The firewall is not applied to this VM. The NIC's Firewall checkbox, the VM's Firewall option, or the datacenter switch — check all three, in that order |
 | Chains exist but hold none of your rules | The rules are on a different VM id, or were added at datacenter or node level rather than to this VM |
 | A LAN DROP above a pinhole ACCEPT | The ordering trap. The runner will not reach the forge or resolve anything; drag the pinholes above the DROPs |
+| Rules present and correct, DNS still failing | The address in rules 3–4 is not the VM's nameserver. The gateway is the usual wrong answer — see "Values that must agree" |
 
 `pve-firewall status` is the quicker sanity check of whether the service is
 running and enabled at all, but it says nothing about *these* rules — it is
