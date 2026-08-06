@@ -12,6 +12,11 @@ doing while you do it.
 The in-VM half **is** a script: [`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap).
 Running that blind costs you a VM built to be lost.
 
+One step on the node is not console work, because it cannot be: Proxmox
+schedules backups but not rollbacks, so §6 is a three-command cron entry. It
+is printed in full and each part of it is explained, which is the standard the
+rest of this page is held to as well.
+
 ---
 
 ## What you are building
@@ -272,9 +277,13 @@ Two ways this stalls, both from choices made during the install:
   during the install, so Debian did not add you. See "Leave the root password
   blank" above for the fix, or just run these as root from the console.
 
-`--role ci` for the ordinary tier. That script installs packages, hardens
-sshd, removes listeners a runner has no use for, sets up unattended security
-upgrades, and runs `install.sh` for the allowlist, resolver and job firewall.
+`--role ci` for the ordinary tier. Either way the script installs packages,
+hardens sshd, removes listeners a runner has no use for, and sets up
+unattended security upgrades. On `--role ci` it then runs `install.sh` for the
+job allowlist, its resolver and its firewall; on `--role runtime` it
+deliberately does not, because those work by sitting in front of job traffic
+on a bridge and this tier's jobs are in the host's network namespace, where
+there is no bridge to sit on.
 
 It does not register the runner — that needs a token from your forge — and it
 does not enable the host's own egress policy until you have filled in
@@ -283,21 +292,120 @@ off from the forge.
 
 ---
 
-## 5. Snapshot it clean
+## 5. Register the runner, then snapshot it clean
 
 The VM is worth losing, which is only true if losing it is cheap.
 
-**VM → Snapshots → Take Snapshot**, named `clean`, described *bootstrapped,
-before any job ran*. Take it **before** the first job — a snapshot taken later
-preserves whatever that job left.
+**Register the runner first**, and confirm it shows *Online* in the forge. The
+registration lives on disk, in the runner's `.runner` file. A snapshot taken
+before that does not contain it, and every later rollback drops the runner off
+the forge — or, if the registration token is still in its environment, has it
+re-register as a *new* runner, accumulating a dead entry per rollback. Neither
+announces itself; you find out when a job sits queued.
 
-Roll back from the same tab whenever you want it clean again. Two triggers:
+Then **VM → Snapshots → Take Snapshot**, named `clean`, described
+*bootstrapped and registered, before any job ran*. Two things about it:
 
-- **On a cadence.** Weekly is a reasonable starting point. This bounds how
-  long a foothold can live without needing the VM rebuilt each time.
-- **After anything suspicious.** This one is not optional, and it is the
-  reason to keep the snapshot current enough that rolling back costs you
-  nothing you mind losing.
+- **Before the first job.** One taken afterwards preserves whatever that job
+  left, which is precisely the thing you want to be able to throw away.
+- **Without RAM.** Leave *Include RAM* unticked. A snapshot with RAM restores
+  the guest's clock along with everything else, so a VM rolled back to last
+  month believes it is last month: TLS verification fails, apt rejects Release
+  files as not yet valid, and every timestamp a job writes is wrong. Nothing
+  in this VM's memory is worth resuming, and a rollback without RAM is smaller
+  and faster besides.
 
-Re-running `dejima-ci-bootstrap` after a rollback is safe — it is idempotent —
-but should not be necessary, since the snapshot is taken after it ran.
+Roll back from the same tab whenever you want it clean again. The snapshot
+survives being rolled back to, so `clean` stays usable indefinitely —
+`qm listsnapshot <vmid>` on the node shows it still there afterwards.
+
+Two triggers:
+
+- **After anything suspicious.** Not optional, and the reason to keep `clean`
+  current enough that rolling back costs you nothing you mind losing.
+- **On a cadence.** This is what bounds how long a foothold can live *without
+  your having noticed it* — which is the case the first trigger cannot cover,
+  and the reason the next section exists.
+
+---
+
+## 6. Automate the cadence
+
+The reactive trigger depends on you noticing. The scheduled one does not, which
+makes it the more valuable of the two — and the one that quietly stops
+happening after the third week of remembering to do it by hand. Automate it now
+or accept that it will not happen.
+
+Proxmox schedules backups, not rollbacks, so there is no checkbox for this. It
+is a cron entry on **the node** — which is also the only place it can live.
+Nothing inside the VM can be relied on to revert the VM; that is the same
+reason the firewall is on the node.
+
+Create `/etc/cron.d/dejima-ci-rollback` on the node, substituting your VMID:
+
+```
+# Roll the runner VM back to its clean snapshot. Sundays, 04:00.
+SHELL=/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+0 4 * * 0 root qm shutdown <vmid> --timeout 180 --forceStop 1 && qm rollback <vmid> clean && qm start <vmid>
+```
+
+Three things in that line are deliberate:
+
+- **`qm shutdown` first, not `qm rollback` alone.** A snapshot without RAM
+  cannot be rolled back into a running VM — Proxmox will not swap the disk out
+  from under a live QEMU — and after the rollback the VM is left stopped, so
+  the `qm start` is required rather than tidy. `--forceStop 1` pulls the plug
+  if the guest has not gone down within the timeout, which is the correct
+  outcome for a machine whose state you are about to discard anyway.
+- **`&&`, not `;`.** If the rollback fails, the VM stays off. That is a CI
+  outage, and it is the right one: the alternative is a VM that keeps taking
+  untrusted-code jobs from a state you had decided to throw away. Fail closed
+  and go look.
+- **The `PATH` line.** `qm` lives in `/usr/sbin`, which is not on cron's
+  default path. Without it the job fails every week with `qm: not found`.
+
+**Pick an hour when nothing is running.** A rollback mid-job kills the job,
+which shows up as a failed run and is re-runnable — annoying, not harmful, but
+there is no reason to schedule it into the working day.
+
+### Check that it is actually running
+
+Belief that this is happening is worth nothing; the whole point is that it
+happens while you are not watching.
+
+- The node's **Tasks** pane at the bottom of the web console lists a
+  `qmrollback` entry after each run. That is the check, and it needs no shell.
+- `qm listsnapshot <vmid>` still shows `clean` — rollback does not consume it.
+- If a run was interrupted the VM can be left locked, and every subsequent run
+  fails on the lock. `qm unlock <vmid>` clears it.
+- A rollback failing with the VM still running means `qm shutdown` returned
+  before the guest was down. Put a `&& sleep 30` after it.
+
+**Do not do this with a hookscript.** `qm set --hookscript` looks like the
+right tool and is a trap: the pre-start and post-stop phases already hold the
+VM's configuration lock, so a rollback from inside one deadlocks against
+itself and times out. Cron, outside the VM's lifecycle, is the way.
+
+### Refresh the baseline every month or two
+
+A rollback reverts *everything* since the snapshot, including security updates.
+`unattended-upgrades` catches up within a day of each boot, so the VM does not
+stay unpatched — but the baseline it starts from is a week further behind every
+week, and each rollback reopens whatever has been fixed since, until the timer
+next runs.
+
+So periodically: let it roll back, let it patch, reboot, confirm the runner is
+*Online*, then **VM → Snapshots**, remove `clean` and take a fresh one under
+the same name. That is also the moment to re-run `dejima-ci-bootstrap` if this
+repository has moved on. (If a window with no snapshot at all bothers you, name
+them by date instead and update the cron line — one more thing to keep in step,
+which is why it is not the default suggestion here.)
+
+Re-running `dejima-ci-bootstrap` after any rollback is safe — it is idempotent
+— but should not be necessary, since the snapshot is taken after it ran. On a
+`ci`-role host the allowlist is the same story from the other direction: it
+reverts too, and `dejima-ci-allowlist.timer` pulls it current again on its own.
+
+Whatever else reverts is cheap: Docker images have to be pulled again, so the
+first job after a rollback is slower than the rest.

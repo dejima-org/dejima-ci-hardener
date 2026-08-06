@@ -372,12 +372,24 @@ cat >&2 <<EOF
                      Give it one label that nothing else carries, and grant
                      it to as few repositories as you can stand.
 
-3. In the Proxmox console, snapshot this VM clean, BEFORE the first job runs:
+3. In the Proxmox console, once step 2 shows the runner Online, snapshot this
+   VM - BEFORE the first job runs, and with 'Include RAM' UNTICKED:
 
      VM -> Snapshots -> Take Snapshot, named 'clean'
 
-   Roll back from that same tab on a cadence, and after anything suspicious.
-   A snapshot taken later preserves whatever the job that worried you left.
+   Order matters. Snapshot before registering and every rollback drops the
+   runner off the forge. Snapshot after a job and you have preserved whatever
+   worried you. Include RAM and the guest's clock comes back with it, so a
+   rolled-back VM cannot verify a certificate.
+
+4. Schedule the rollback on the NODE - nothing in here can be trusted to
+   revert this VM, and a cadence you perform by hand is one you stop
+   performing. Proxmox schedules backups, not rollbacks, so it is cron:
+
+     /etc/cron.d/dejima-ci-rollback  on the Proxmox node
+
+   proxmox/README.md section 6 has the line and what each part of it is for.
+   Roll back after anything suspicious too; that one is not optional.
 
 Remember what is and is not enforced here. The node's firewall keeps this
 machine off your LAN and cannot be reached from inside it. Everything this
