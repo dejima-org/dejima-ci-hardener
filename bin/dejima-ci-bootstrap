@@ -69,10 +69,21 @@ apt-get update -qq
 # from the daemon, and --no-install-recommends - which is otherwise right on a
 # machine whose value is a small surface - drops it. apt then reports success,
 # the daemon is installed, and there is no `docker` binary at all.
+#
+# ipset and dnsmasq belong to install.sh, which only runs on the ordinary
+# tier. The runtime tier's jobs are in the host network namespace, where a job
+# network's resolver and its ipset have nothing to sit in front of - so on that
+# role these install an unused listener on port 53, on the machine this same
+# script strips listeners from forty lines below. iptables stays either way:
+# the host's own egress policy uses it on both roles.
+tier_packages=""
+if [ "$ROLE" = ci ]; then
+    tier_packages="ipset dnsmasq"
+fi
 apt-get install -y -qq --no-install-recommends \
     docker.io docker-cli \
     openssh-server \
-    ipset iptables dnsmasq \
+    iptables $tier_packages \
     ca-certificates curl git jq \
     unattended-upgrades
 
@@ -181,7 +192,15 @@ fi
 # Every listener is a way in, and a CI runner needs none of these. avahi in
 # particular announces the machine to the LAN it is meant to be isolated from.
 say "Removing services a runner does not need..."
-for svc in avahi-daemon cups bluetooth modemmanager rpcbind; do
+unwanted="avahi-daemon cups bluetooth modemmanager rpcbind"
+# dnsmasq is not installed on a runtime host any more, but it was by earlier
+# runs of this script, and an upgrade that leaves the old listener running is
+# not an upgrade. Disabled rather than purged: someone co-locating both tiers
+# on one machine still needs the package.
+if [ "$ROLE" = runtime ]; then
+    unwanted="$unwanted dnsmasq"
+fi
+for svc in $unwanted; do
     if systemctl list-unit-files "$svc.service" >/dev/null 2>&1 \
        && systemctl is-enabled "$svc" >/dev/null 2>&1; then
         systemctl disable --now "$svc" >/dev/null 2>&1 || true
