@@ -63,12 +63,32 @@ say
 say "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# docker-cli named explicitly alongside docker.io. Debian splits the client
+# from the daemon, and --no-install-recommends - which is otherwise right on a
+# machine whose value is a small surface - drops it. apt then reports success,
+# the daemon is installed, and there is no `docker` binary at all.
 apt-get install -y -qq --no-install-recommends \
-    docker.io \
+    docker.io docker-cli \
     openssh-server \
     ipset iptables dnsmasq \
     ca-certificates curl git jq \
     unattended-upgrades
+
+# Verify what was just installed is usable, rather than trusting apt's exit
+# code. It reported success for a set that contained no `docker` binary, and
+# everything after this point assumes one - including the compose check, which
+# then blamed the network for a client that was never there.
+if ! command -v docker >/dev/null 2>&1; then
+    {
+        printf '%s: docker installed but there is no `docker` command.\n\n' "$PROG"
+        printf 'What dpkg has:\n'
+        dpkg -l 2>/dev/null | awk '/docker/ {printf "  %s %s %s\n", $1, $2, $3}'
+        printf '\nDebian splits the client from the daemon. If docker.io is installed\n'
+        printf 'and docker-cli is not, that is this - install it and re-run.\n'
+    } >&2
+    exit 1
+fi
+say "  docker     $(docker --version 2>&1 | head -1)"
 
 # Compose, by whatever route this release actually offers.
 #
