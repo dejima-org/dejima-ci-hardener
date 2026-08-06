@@ -69,10 +69,28 @@ That last one is easy to miss and easy to uncheck later without noticing. If
 it is off, the per-VM rules do not apply to the interface and the VM is simply
 on your LAN.
 
-Install Debian normally. **Static addressing**, not DHCP: the firewall names
-this VM by address, and a lease that moves is a rule that no longer describes
-it. Minimal install — no desktop, no print server, and you can leave the SSH
-server out since `dejima-ci-bootstrap` configures it.
+Install Debian normally, with two things to get right.
+
+**Static addressing**, not DHCP. The firewall names this VM by address, and a
+lease that moves is a rule that no longer describes it.
+
+**The software selection screen.** This is the one that bites, because it is
+a checklist where the defaults are wrong for this machine and clearing them
+all is worse. Navigate with the arrow keys and toggle with **space** — typing
+does nothing useful, and clearing every entry leaves you without the tools the
+next section assumes.
+
+| Entry | Set it to |
+| --- | --- |
+| Debian desktop environment (and any desktop under it) | **off** |
+| web server | off |
+| **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
+| **standard system utilities** | **on** — without it you have no `git`, no `sudo`, and very little else |
+
+Leave SSH server *on*. An earlier version of this runbook said to leave it out
+on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
+configuring is not installing, so following that left a VM with no way in
+except the Proxmox console.
 
 ---
 
@@ -169,15 +187,18 @@ behaviour, which is why they follow rather than replace this.
 and from inside the VM, once it is up. Two of these must fail and two must
 succeed, which is what makes the set diagnostic rather than reassuring:
 
+Nothing here needs installing: `bash` can open a TCP connection on its own and
+`getent` is part of libc, which matters on a machine you have not finished
+setting up yet.
+
 ```sh
-# a LAN host that is not the forge or the resolver - must NOT connect
-timeout 5 nc -vz <some-other-lan-ip> 22 ; echo "rc=$?"
-# the forge - must connect
-timeout 5 nc -vz <forge-ip> 443 ; echo "rc=$?"
-# name resolution, which goes through the resolver pinhole
-getent hosts deb.debian.org ; echo "rc=$?"
-# the public internet, which the default policy allows
-timeout 5 nc -vz deb.debian.org 80 ; echo "rc=$?"
+try() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null \
+        && echo "  CONNECTED  $1:$2" || echo "  blocked    $1:$2"; }
+
+try <some-other-lan-ip> 22     # must be blocked - any LAN host but the two
+try <forge-ip> 443             # must connect
+try deb.debian.org 80          # must connect - the public internet
+getent hosts deb.debian.org && echo "  resolved" || echo "  DNS FAILED"
 ```
 
 Read them together, because the pattern says which thing is wrong:
@@ -195,10 +216,15 @@ Read them together, because the pattern says which thing is wrong:
 
 ```sh
 ssh <you>@<vm-ip>
+sudo apt-get update && sudo apt-get install -y git   # if the install left it out
 git clone https://gitbox.example.com/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
 sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-management-ip>
 ```
+
+If `ssh` refuses the connection, the SSH server task was not selected during
+the install. Log in at the Proxmox console instead — it needs no network — and
+`apt-get install -y openssh-server git`, then `systemctl enable --now ssh`.
 
 `--role ci` for the ordinary tier. That script installs packages, hardens
 sshd, removes listeners a runner has no use for, sets up unattended security

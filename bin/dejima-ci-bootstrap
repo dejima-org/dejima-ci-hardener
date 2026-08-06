@@ -65,6 +65,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     docker.io docker-compose-v2 \
+    openssh-server \
     ipset iptables dnsmasq \
     ca-certificates curl git jq \
     unattended-upgrades
@@ -83,6 +84,10 @@ done
 apt-get purge -y -qq avahi-daemon >/dev/null 2>&1 || true
 
 # --- sshd -------------------------------------------------------------------
+# Installed above as well as configured here. Configuring an sshd that is not
+# present writes a file nothing reads, and on a VM whose only other way in is
+# the hypervisor console that is a bad way to find out.
+#
 # Keys only, no root. The node firewall already restricts the source; this is
 # the same restriction stated where a reader of this host will see it, and it
 # survives the firewall being wrong.
