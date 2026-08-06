@@ -29,7 +29,9 @@ Usage: sudo $PROG --role ci|runtime [--mgmt IP] [--skip-hardener]
   --role runtime   the privileged tier: its jobs get the socket and the host
                    network namespace. This host is the one to treat as lost
   --mgmt IP        restrict sshd to this source as well as the node firewall
-  --skip-hardener  do the host hardening only, not the allowlist install
+  --skip-hardener  do the host hardening only, not the allowlist install.
+                   Implied by --role runtime, where the allowlist has nothing
+                   to attach to
 EOF
     exit 2
 }
@@ -63,12 +65,32 @@ say
 say "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# docker-cli named explicitly alongside docker.io. Debian splits the client
+# from the daemon, and --no-install-recommends - which is otherwise right on a
+# machine whose value is a small surface - drops it. apt then reports success,
+# the daemon is installed, and there is no `docker` binary at all.
 apt-get install -y -qq --no-install-recommends \
-    docker.io \
+    docker.io docker-cli \
     openssh-server \
     ipset iptables dnsmasq \
     ca-certificates curl git jq \
     unattended-upgrades
+
+# Verify what was just installed is usable, rather than trusting apt's exit
+# code. It reported success for a set that contained no `docker` binary, and
+# everything after this point assumes one - including the compose check, which
+# then blamed the network for a client that was never there.
+if ! command -v docker >/dev/null 2>&1; then
+    {
+        printf '%s: docker installed but there is no `docker` command.\n\n' "$PROG"
+        printf 'What dpkg has:\n'
+        dpkg -l 2>/dev/null | awk '/docker/ {printf "  %s %s %s\n", $1, $2, $3}'
+        printf '\nDebian splits the client from the daemon. If docker.io is installed\n'
+        printf 'and docker-cli is not, that is this - install it and re-run.\n'
+    } >&2
+    exit 1
+fi
+say "  docker     $(docker --version 2>&1 | head -1)"
 
 # Compose, by whatever route this release actually offers.
 #
@@ -97,13 +119,18 @@ else
 
     # 2. Backports, which is still Debian and still signed by Debian.
     if ! have_compose && [ -n "$codename" ]; then
-        say "  compose    not in $codename; trying $codename-backports"
+        say "  compose    no distribution package on $codename; trying backports"
         printf 'deb http://deb.debian.org/debian %s-backports main\n' "$codename" \
             > /etc/apt/sources.list.d/backports.list
         apt-get update -qq || true
         apt-get install -y -qq --no-install-recommends \
             -t "$codename-backports" docker-compose-v2 || true
-        have_compose || rm -f /etc/apt/sources.list.d/backports.list
+        if ! have_compose; then
+            # Remove the source AND refresh, or apt keeps a list referring to
+            # something that is no longer configured.
+            rm -f /etc/apt/sources.list.d/backports.list
+            apt-get update -qq || true
+        fi
     fi
 
     # 3. Docker's own repository. Last because it is a third-party apt source
@@ -128,11 +155,25 @@ else
         apt-get install -y -qq --no-install-recommends docker-compose-plugin || true
     fi
 
-    have_compose || die "could not install docker compose v2 by any route.
-Every rung failed: no distribution package, no backports, and Docker's own
-repository did not yield one either - which on a working network usually means
-this host cannot reach download.docker.com. Re-run once that is fixed; this
-script is idempotent and everything before this point has already been done."
+    if ! have_compose; then
+        {
+            printf '%s: docker compose v2 is not usable.\n\n' "$PROG"
+            printf 'What is on disk:\n'
+            for d in /usr/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins \
+                     /usr/local/lib/docker/cli-plugins /usr/local/libexec/docker/cli-plugins; do
+                [ -d "$d" ] && ls -1 "$d" 2>/dev/null | sed "s|^|  $d/|"
+            done
+            printf '  docker CLI: %s\n\n' "$(docker --version 2>&1 | head -1)"
+            printf 'If a docker-compose binary is listed above then the package did\n'
+            printf 'install, and the CLI searches these directories by default - so\n'
+            printf 'report what you see rather than assuming a download failure. If\n'
+            printf 'nothing is listed, no route produced one, which on a working network\n'
+            printf 'usually means this host cannot reach download.docker.com.\n\n'
+            printf 'Re-run once resolved; this script is idempotent and everything before\n'
+            printf 'this point is already done.\n'
+        } >&2
+        exit 1
+    fi
     say "  compose    $(docker compose version 2>/dev/null | head -1)"
 fi
 
@@ -270,7 +311,34 @@ say "Enabling unattended security upgrades..."
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 
 # --- the hardener itself ----------------------------------------------------
-if [ "$SKIP_HARDENER" -eq 0 ]; then
+# Only for the ordinary tier, and the reason is the same one this whole
+# arrangement rests on: the runtime tier's jobs run in the HOST network
+# namespace. No bridge sits in front of them, so a job network, its resolver
+# and its DOCKER-USER rules never see their traffic. Installing that machinery
+# here would take a working evening and protect nothing, and - worse - would
+# leave a runtime host that looks like it has an egress allowlist.
+#
+# What protects the runtime host is the node's firewall. That is the whole
+# list.
+if [ "$SKIP_HARDENER" -eq 1 ]; then
+    say
+    say "Skipping install.sh (--skip-hardener)."
+elif [ "$ROLE" = runtime ]; then
+    say
+    say "Not running install.sh on a runtime host, deliberately."
+    say
+    say "Its jobs run in the host network namespace - that is the grant the tier"
+    say "exists for - so no bridge is in front of them and a job network, its"
+    say "resolver and its DOCKER-USER rules would never see their traffic."
+    say "Installing them would leave this host looking like it has an egress"
+    say "allowlist while having nothing of the sort."
+    say
+    say "What protects this host is the Proxmox node's firewall, and that is the"
+    say "entire list. See proxmox/README.md."
+    say
+    say "If this machine also runs ordinary runners - not recommended, and not"
+    say "what the tiering is for - run ./install.sh by hand."
+else
     say
     say "Running install.sh for the allowlist, resolver and job firewall..."
     say
@@ -291,12 +359,18 @@ cat >&2 <<EOF
    Enabling it before that file is filled in will cut this host off from the
    forge, which is why it is not enabled for you.
 
+   On a runtime host this is the only egress control inside the VM, and it is
+   still not a boundary: root here can drop it. The node's firewall is the
+   boundary.
+
 2. Register the runner. This script does not, because it needs a token from
    your forge:
 
      - role ci:      label it something no other runner carries, and point
                      container.network / --dns at what install.sh printed
-     - role runtime: this is the privileged tier - socket and host netns
+     - role runtime: this is the privileged tier - socket and host netns.
+                     Give it one label that nothing else carries, and grant
+                     it to as few repositories as you can stand.
 
 3. In the Proxmox console, snapshot this VM clean, BEFORE the first job runs:
 
