@@ -400,7 +400,10 @@ forge_host="${instance#*://}"; forge_host="${forge_host%%/*}"; forge_host="${for
 write_if_changed "$DNSMASQ_DIR/dejima-ci.conf" 0644 "# Written by $PROG. The allowed names live in the file
 # dejima-ci-allowlist renders; do not add server= lines here.
 listen-address=$gateway
-bind-interfaces
+# bind-dynamic, not bind-interfaces: a Docker bridge is recreated whenever its
+# network is, and bind-interfaces would leave dnsmasq holding a socket on a
+# device that no longer exists - bound according to ss, answering nothing.
+bind-dynamic
 no-hosts
 no-resolv
 ipset=/#/$ipset
@@ -432,6 +435,9 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
         systemctl enable --now dejima-ci-firewall.service
         say "  firewall unit enabled"
     fi
+    # After the network, always. Even with bind-dynamic the config was just
+    # rewritten, and if the bridge was created moments ago this is what picks
+    # it up.
     systemctl restart dnsmasq 2>/dev/null || say "  NOTE: could not restart dnsmasq - do it by hand"
 fi
 
