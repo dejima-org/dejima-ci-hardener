@@ -13,6 +13,74 @@ For *why* any of this is necessary - what a CI run adds over a sandbox, and
 why no approval gate is offered - see dejima's `docs/ci.md`. You do not need
 it to follow this.
 
+## The runner host itself
+
+`install.sh` hardens the runners on a machine you already have. For the
+privileged tier that is the wrong starting point - its jobs get the Docker
+socket, so the assumption has to be that a compromised job gets root on that
+host, and handing an existing machine to that assumption is not a decision
+many people would make deliberately.
+
+**[proxmox/README.md](proxmox/README.md)** builds one instead: a runbook for
+the Proxmox web console, then one script inside the VM.
+
+```sh
+# inside the new VM, once the console steps are done
+sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-ip>
+```
+
+The node half is a runbook rather than a script on purpose. Something that
+runs `qm create` and writes into `/etc/pve/firewall/` is exactly what gets
+pasted into a root shell unread, and the blast radius is every VM on the node.
+The in-VM half is a script, because running that one blind costs you a machine
+built to be lost.
+
+### The boundary is on the node, not in the VM
+
+The privileged tier hands job containers the Docker socket, which is
+root-equivalent on their host. So the working assumption is that a compromised
+job **has root in that VM** — and root can flush any firewall it can see.
+
+Everything installed inside the VM is therefore defence in depth: real against
+a compromised job that has not escaped its container, which is the ordinary
+case, and worth nothing against one that has.
+
+What holds either way is the Proxmox firewall, applied to the VM's tap device
+and unreachable from the guest. It denies the VM every RFC1918 destination
+except two pinholes — the forge on 443 and a resolver on 53 — and those two
+are the entire remaining LAN exposure.
+
+Public egress is deliberately *not* restricted there - not by address and not
+by port. Job containers already have an allowlist, enforced inside the VM;
+duplicating it on the node would break on every CDN rotation and would not
+hold against VM root anyway. An earlier version allowed only tcp/80, tcp/443
+and udp/123 outbound, which broke apt on a first install and bought nothing:
+anyone who owns that box tunnels over 443 like everybody else.
+
+The guarantee is narrower and honest, and it is the one worth making: an
+attacker who owns that VM reaches the internet, and not your network.
+
+One thing to check rather than assume, because its absence looks exactly like
+it working: **the datacenter firewall must be enabled** (Datacenter → Firewall
+→ Options → Firewall: Yes), and the VM's network device must have its own
+**Firewall** checkbox ticked. Without either, the per-VM rules apply to
+nothing. `pve-firewall compile` on the node is the check, and
+[proxmox/README.md](proxmox/README.md) has a from-inside-the-VM check that
+does not rely on reading configuration at all.
+
+### Snapshot, and roll back on a cadence
+
+The VM is worth losing, which is only true if losing it is cheap. Snapshot it
+the moment it is bootstrapped and before any job has run:
+
+**VM → Snapshots → Take Snapshot**, named `clean`, taken **before the first
+job runs** — one taken later preserves whatever that job left. Roll back from
+the same tab.
+
+Rolling back on a schedule bounds how long a foothold can live without needing
+the VM rebuilt each time. Weekly is a reasonable starting point; after
+anything suspicious is the other trigger, and that one is not optional.
+
 ## Do not install this next to dejima
 
 This runs on a machine whose job is to execute untrusted code. dejima runs on

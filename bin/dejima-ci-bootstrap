@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# Take a fresh Debian install to a hardened CI runner host.
+#
+# Runs INSIDE the VM. The firewall that keeps this machine off your LAN is not
+# here - it is on the Proxmox node, applied to this VM's tap device, because
+# the premise of the privileged tier is that a compromised job reaches root
+# here, and root can flush anything it can see. See proxmox/README.md.
+#
+# What this does install is real, and defends against a compromised job that
+# has NOT escaped its container - which is the ordinary case, and the one the
+# job-network allowlist exists for.
+#
+# Idempotent: re-running changes only what differs.
+
+set -euo pipefail
+
+PROG=${0##*/}
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+ROLE=""
+MGMT=""
+SKIP_HARDENER=0
+
+usage() {
+    cat >&2 <<EOF
+Usage: sudo $PROG --role ci|runtime [--mgmt IP] [--skip-hardener]
+
+  --role ci        the ordinary tier: no Docker socket in job containers,
+                   deny-by-default job egress
+  --role runtime   the privileged tier: its jobs get the socket and the host
+                   network namespace. This host is the one to treat as lost
+  --mgmt IP        restrict sshd to this source as well as the node firewall
+  --skip-hardener  do the host hardening only, not the allowlist install
+EOF
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --role) ROLE="${2:?}"; shift ;;
+        --mgmt) MGMT="${2:?}"; shift ;;
+        --skip-hardener) SKIP_HARDENER=1 ;;
+        -h|--help) usage ;;
+        *) echo "$PROG: unknown argument: $1" >&2; usage ;;
+    esac
+    shift
+done
+case "$ROLE" in ci|runtime) ;; *) usage ;; esac
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+say() { printf '%s\n' "$*" >&2; }
+[ "$(id -u)" -eq 0 ] || die "run as root"
+
+say "=============================================================="
+say " dejima CI runner bootstrap - role: $ROLE"
+say "=============================================================="
+say
+
+# --- packages ---------------------------------------------------------------
+# docker.io from Debian rather than Docker's own repository: one less
+# third-party apt source on a machine whose whole point is a small, known
+# surface, and the daemon's version matters less here than what it is allowed
+# to do.
+say "Installing packages..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
+    docker.io docker-compose-v2 \
+    openssh-server \
+    ipset iptables dnsmasq \
+    ca-certificates curl git jq \
+    unattended-upgrades
+
+# --- services this host has no business running -----------------------------
+# Every listener is a way in, and a CI runner needs none of these. avahi in
+# particular announces the machine to the LAN it is meant to be isolated from.
+say "Removing services a runner does not need..."
+for svc in avahi-daemon cups bluetooth modemmanager rpcbind; do
+    if systemctl list-unit-files "$svc.service" >/dev/null 2>&1 \
+       && systemctl is-enabled "$svc" >/dev/null 2>&1; then
+        systemctl disable --now "$svc" >/dev/null 2>&1 || true
+        say "  disabled  $svc"
+    fi
+done
+apt-get purge -y -qq avahi-daemon >/dev/null 2>&1 || true
+
+# --- sshd -------------------------------------------------------------------
+# Installed above as well as configured here. Configuring an sshd that is not
+# present writes a file nothing reads, and on a VM whose only other way in is
+# the hypervisor console that is a bad way to find out.
+#
+# Keys only, no root. The node firewall already restricts the source; this is
+# the same restriction stated where a reader of this host will see it, and it
+# survives the firewall being wrong.
+say "Hardening sshd..."
+sshd_drop=/etc/ssh/sshd_config.d/60-dejima-ci.conf
+new_sshd="# Written by $PROG.
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no"
+[ -z "$MGMT" ] || new_sshd="$new_sshd
+# Belt and braces with the node firewall, which is the enforcing copy.
+ListenAddress 0.0.0.0
+Match Address $MGMT
+    PermitTTY yes
+Match all"
+if [ -f "$sshd_drop" ] && [ "$new_sshd" = "$(cat "$sshd_drop")" ]; then
+    say "  unchanged  $sshd_drop"
+else
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    printf '%s\n' "$new_sshd" > "$sshd_drop"
+    sshd -t || die "sshd config rejected - not restarting, $sshd_drop is bad"
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    say "  written    $sshd_drop"
+fi
+
+# --- the VM's own egress ----------------------------------------------------
+# Defence in depth, and labelled as such. A job that escapes its container
+# reaches root here and can flush this in one command; what it cannot flush is
+# the node's firewall. This exists for the case that does NOT escape, and to
+# make an escape's first move visible rather than free.
+say "Installing the host's own egress policy..."
+cat > /etc/systemd/system/dejima-ci-host-egress.service <<'UNIT'
+[Unit]
+Description=dejima CI host egress policy (defence in depth; the node firewall is the boundary)
+After=network-online.target docker.service
+PartOf=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dejima-ci-host-egress
+
+[Install]
+WantedBy=multi-user.target docker.service
+UNIT
+
+cat > /usr/local/sbin/dejima-ci-host-egress <<'EGRESS'
+#!/usr/bin/env bash
+# The VM's own outbound policy, in a chain this script owns.
+#
+# NOT the boundary. Root on this host can remove it; the Proxmox node's
+# firewall is what actually keeps this machine off the LAN. This narrows what
+# a contained process can reach and makes an escape's first outbound move
+# something that had to step over a rule rather than something free.
+set -euo pipefail
+CHAIN=DEJIMA-HOST-OUT
+iptables -N "$CHAIN" 2>/dev/null || true
+iptables -F "$CHAIN"
+iptables -C OUTPUT -j "$CHAIN" 2>/dev/null || iptables -I OUTPUT -j "$CHAIN"
+
+# Anything already established, and the machine talking to itself.
+iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A "$CHAIN" -o lo -j ACCEPT
+
+# Docker's own bridges: container traffic is filtered in DOCKER-USER by
+# dejima-ci-firewall, not here, and duplicating it would mean two places to
+# keep in step.
+iptables -A "$CHAIN" -o docker0 -j ACCEPT
+for b in $(ip -o link show type bridge | awk -F': ' '{print $2}' | cut -d@ -f1); do
+    iptables -A "$CHAIN" -o "$b" -j ACCEPT
+done
+
+# The LAN, minus whatever /etc/dejima-ci/host-egress-allow lists as
+# host:port pairs. The node firewall enforces the same thing; a divergence
+# between them is worth noticing, not worth relying on.
+if [ -r /etc/dejima-ci/host-egress-allow ]; then
+    while read -r host port proto; do
+        case "${host:-}" in ''|'#'*) continue ;; esac
+        iptables -A "$CHAIN" -d "$host" -p "${proto:-tcp}" --dport "$port" -j ACCEPT
+    done < /etc/dejima-ci/host-egress-allow
+fi
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+    iptables -A "$CHAIN" -d "$net" -j REJECT --reject-with icmp-admin-prohibited
+done
+EGRESS
+chmod 755 /usr/local/sbin/dejima-ci-host-egress
+
+install -d -m 0750 /etc/dejima-ci
+if [ ! -f /etc/dejima-ci/host-egress-allow ]; then
+    cat > /etc/dejima-ci/host-egress-allow <<'ALLOW'
+# host port [proto] - LAN destinations this VM may reach. Keep it to the two
+# the runner cannot work without: the forge, and a resolver. The Proxmox
+# node's firewall enforces the same list; this copy is defence in depth.
+#
+# 192.0.2.20 443 tcp
+# 192.0.2.11 53 udp
+# 192.0.2.11 53 tcp
+ALLOW
+    chmod 640 /etc/dejima-ci/host-egress-allow
+    say "  created    /etc/dejima-ci/host-egress-allow - fill it in before enabling"
+fi
+
+systemctl daemon-reload
+say "  installed  dejima-ci-host-egress.service (not enabled yet - see below)"
+
+# --- automatic security updates ---------------------------------------------
+# A machine that exists to run untrusted code should not also be behind on
+# kernel and container-runtime fixes.
+say "Enabling unattended security upgrades..."
+dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+
+# --- the hardener itself ----------------------------------------------------
+if [ "$SKIP_HARDENER" -eq 0 ]; then
+    say
+    say "Running install.sh for the allowlist, resolver and job firewall..."
+    say
+    "$SRC/install.sh" || die "install.sh did not complete"
+fi
+
+cat >&2 <<EOF
+
+=============================================================
+ What is left
+=============================================================
+
+1. Fill in /etc/dejima-ci/host-egress-allow with the forge and resolver
+   addresses, then enable the host's own egress policy:
+
+     systemctl enable --now dejima-ci-host-egress
+
+   Enabling it before that file is filled in will cut this host off from the
+   forge, which is why it is not enabled for you.
+
+2. Register the runner. This script does not, because it needs a token from
+   your forge:
+
+     - role ci:      label it something no other runner carries, and point
+                     container.network / --dns at what install.sh printed
+     - role runtime: this is the privileged tier - socket and host netns
+
+3. In the Proxmox console, snapshot this VM clean, BEFORE the first job runs:
+
+     VM -> Snapshots -> Take Snapshot, named 'clean'
+
+   Roll back from that same tab on a cadence, and after anything suspicious.
+   A snapshot taken later preserves whatever the job that worried you left.
+
+Remember what is and is not enforced here. The node's firewall keeps this
+machine off your LAN and cannot be reached from inside it. Everything this
+script installed can be removed by root on this host - which, on the runtime
+role, is what a compromised job is assumed to get.
+EOF
