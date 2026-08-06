@@ -29,6 +29,12 @@ the Proxmox web console, then one script inside the VM.
 sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-ip>
 ```
 
+On `--role runtime` that deliberately stops short of running `install.sh`. The
+job network, its resolver and its DOCKER-USER rules all work by sitting in
+front of job traffic on a bridge, and this tier's jobs are in the host's
+network namespace where no bridge is. Installing them would cost an evening
+and leave a host that looks like it has an egress allowlist.
+
 The node half is a runbook rather than a script on purpose. Something that
 runs `qm create` and writes into `/etc/pve/firewall/` is exactly what gets
 pasted into a root shell unread, and the blast radius is every VM on the node.
@@ -51,11 +57,16 @@ except two pinholes — the forge on 443 and a resolver on 53 — and those two
 are the entire remaining LAN exposure.
 
 Public egress is deliberately *not* restricted there - not by address and not
-by port. Job containers already have an allowlist, enforced inside the VM;
-duplicating it on the node would break on every CDN rotation and would not
-hold against VM root anyway. An earlier version allowed only tcp/80, tcp/443
-and udp/123 outbound, which broke apt on a first install and bought nothing:
-anyone who owns that box tunnels over 443 like everybody else.
+by port. An address allowlist on the node would break on every CDN rotation,
+and a port allowlist buys nothing: an earlier version permitted only tcp/80,
+tcp/443 and udp/123, which broke apt on a first install, and anyone who owns
+that box tunnels over 443 like everybody else. Neither would hold against VM
+root in any case.
+
+Note what that leaves. On this tier there is no egress allowlist in front of
+job containers either - they are in the host's network namespace, so nothing
+is in front of them. A privileged job reaches the whole public internet by
+design. What it does not reach is your LAN.
 
 The guarantee is narrower and honest, and it is the one worth making: an
 attacker who owns that VM reaches the internet, and not your network.

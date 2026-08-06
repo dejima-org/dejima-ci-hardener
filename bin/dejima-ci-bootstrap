@@ -29,7 +29,9 @@ Usage: sudo $PROG --role ci|runtime [--mgmt IP] [--skip-hardener]
   --role runtime   the privileged tier: its jobs get the socket and the host
                    network namespace. This host is the one to treat as lost
   --mgmt IP        restrict sshd to this source as well as the node firewall
-  --skip-hardener  do the host hardening only, not the allowlist install
+  --skip-hardener  do the host hardening only, not the allowlist install.
+                   Implied by --role runtime, where the allowlist has nothing
+                   to attach to
 EOF
     exit 2
 }
@@ -309,7 +311,34 @@ say "Enabling unattended security upgrades..."
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 
 # --- the hardener itself ----------------------------------------------------
-if [ "$SKIP_HARDENER" -eq 0 ]; then
+# Only for the ordinary tier, and the reason is the same one this whole
+# arrangement rests on: the runtime tier's jobs run in the HOST network
+# namespace. No bridge sits in front of them, so a job network, its resolver
+# and its DOCKER-USER rules never see their traffic. Installing that machinery
+# here would take a working evening and protect nothing, and - worse - would
+# leave a runtime host that looks like it has an egress allowlist.
+#
+# What protects the runtime host is the node's firewall. That is the whole
+# list.
+if [ "$SKIP_HARDENER" -eq 1 ]; then
+    say
+    say "Skipping install.sh (--skip-hardener)."
+elif [ "$ROLE" = runtime ]; then
+    say
+    say "Not running install.sh on a runtime host, deliberately."
+    say
+    say "Its jobs run in the host network namespace - that is the grant the tier"
+    say "exists for - so no bridge is in front of them and a job network, its"
+    say "resolver and its DOCKER-USER rules would never see their traffic."
+    say "Installing them would leave this host looking like it has an egress"
+    say "allowlist while having nothing of the sort."
+    say
+    say "What protects this host is the Proxmox node's firewall, and that is the"
+    say "entire list. See proxmox/README.md."
+    say
+    say "If this machine also runs ordinary runners - not recommended, and not"
+    say "what the tiering is for - run ./install.sh by hand."
+else
     say
     say "Running install.sh for the allowlist, resolver and job firewall..."
     say
@@ -330,12 +359,18 @@ cat >&2 <<EOF
    Enabling it before that file is filled in will cut this host off from the
    forge, which is why it is not enabled for you.
 
+   On a runtime host this is the only egress control inside the VM, and it is
+   still not a boundary: root here can drop it. The node's firewall is the
+   boundary.
+
 2. Register the runner. This script does not, because it needs a token from
    your forge:
 
      - role ci:      label it something no other runner carries, and point
                      container.network / --dns at what install.sh printed
-     - role runtime: this is the privileged tier - socket and host netns
+     - role runtime: this is the privileged tier - socket and host netns.
+                     Give it one label that nothing else carries, and grant
+                     it to as few repositories as you can stand.
 
 3. In the Proxmox console, snapshot this VM clean, BEFORE the first job runs:
 
