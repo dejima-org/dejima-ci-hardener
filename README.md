@@ -81,16 +81,21 @@ does not rely on reading configuration at all.
 
 ### Snapshot, and roll back on a cadence
 
-The VM is worth losing, which is only true if losing it is cheap. Snapshot it
-the moment it is bootstrapped and before any job has run:
+The VM is worth losing, which is only true if losing it is cheap. Register the
+runner, then snapshot — **VM → Snapshots → Take Snapshot**, named `clean`,
+**before the first job runs** and with *Include RAM* unticked. One taken later
+preserves whatever that job left; one taken before registration drops the
+runner off the forge on every rollback; one with RAM restores the guest's clock
+along with it, and a VM that thinks it is last month cannot verify a
+certificate.
 
-**VM → Snapshots → Take Snapshot**, named `clean`, taken **before the first
-job runs** — one taken later preserves whatever that job left. Roll back from
-the same tab.
-
-Rolling back on a schedule bounds how long a foothold can live without needing
-the VM rebuilt each time. Weekly is a reasonable starting point; after
-anything suspicious is the other trigger, and that one is not optional.
+Rolling back after anything suspicious is not optional. Rolling back *on a
+schedule* is the more valuable of the two, because it does not depend on your
+having noticed — and it is the one that stops happening once doing it by hand
+gets old. Proxmox schedules backups, not rollbacks, so it is a cron entry on
+the node; [proxmox/README.md](proxmox/README.md) §6 has the line, why each part
+of it is what it is, how to confirm it is still running, and why the baseline
+needs refreshing every month or two.
 
 ## Do not install this next to dejima
 
