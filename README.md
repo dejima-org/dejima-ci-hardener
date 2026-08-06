@@ -83,8 +83,41 @@ they need:
 | `examples/docker-daemon.json` | `/etc/docker/daemon.json` - merge, do not overwrite |
 
 Set `--dns=<your gateway>` in the ordinary runner's `container.options`, and
-register at **repository** scope so an unrelated repository cannot schedule
-work onto a runner you hardened for this one.
+register at **repository or organization** scope. That last part is not
+housekeeping — see below.
+
+### Register scope is the boundary; the label is not
+
+A dedicated label routes honest jobs to the runner you prepared. It stops
+nothing else, because `runs-on:` lives in the workflow file and the workflow
+file lives in the branch. A branch can name any label it likes, so a session
+that changes `runs-on: dejima-ci` to `runs-on: ubuntu-latest` and opens a pull
+request has stepped outside everything this tool installs — provided some
+runner answering that label will take the job.
+
+Whether one will depends on where your runners are registered:
+
+| Registered at | Which repositories it serves |
+| --- | --- |
+| Instance | **every repository on the instance** |
+| Organization | that organization's repositories |
+| Repository | that repository |
+
+Gitea has no per-repository runner ACL; its FAQ points at registration scope
+as the control instead, and gitea.com registers its own runners for a single
+organization so they will not run other repositories' jobs.
+
+**A repository's CI posture is that of the weakest runner it can reach, not
+the one its workflow names.** So if the instance hosting these repositories
+also offers general-purpose instance-level runners, hardening this one buys
+less than it appears to. In rough order of preference:
+
+1. Do not register general-purpose runners at instance level on an instance
+   that hosts repositories receiving agent-authored branches.
+2. Harden every runner that repository can reach, so landing elsewhere changes
+   nothing that matters.
+3. Move the repository to an instance or organization whose reachable runners
+   are all hardened.
 
 ## Verify
 
