@@ -14,6 +14,7 @@ PROG=${0##*/}
 BIN_DIR=${BIN_DIR:-/usr/local/sbin}
 CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
+DNSMASQ_DIR=${DNSMASQ_DIR:-/etc/dnsmasq.d}
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG="$CONF_DIR/config"
@@ -70,7 +71,11 @@ write_if_changed() {
         chmod "$mode" "$path"
         return 0
     fi
-    install -d -m 0750 "$(dirname "$path")"
+    # Only create a missing parent, and never re-mode an existing one. This
+    # writes into /etc/dnsmasq.d as well as its own directory, and tightening
+    # a system directory that other tools read is not this installer's call to
+    # make - as root it would have succeeded silently.
+    [ -d "$(dirname "$path")" ] || install -d -m 0750 "$(dirname "$path")"
     printf '%s\n' "$content" > "$path.new"
     chmod "$mode" "$path.new"
     mv "$path.new" "$path"
@@ -132,8 +137,12 @@ say "A Docker network for job containers to run on, which this installer will"
 say "create. Name it whatever you like - it only has to match container.network"
 say "in each ordinary runner's config.yaml."
 say
-say "The privileged runner needs none: its jobs run in the host network"
-say "namespace, which is the grant they exist for."
+say "A runner configured for host networking (container.network: host) needs"
+say "no job network - its jobs are in the host's own namespace, so no bridge"
+say "sits in front of them and the rules below never apply to those jobs. If"
+say "you have such a runner, the egress it gets is the host's own: give that"
+say "machine a firewall of its own, or treat it as one you are willing to lose."
+say "Set this up for the runners that do use a bridge, and skip it for those."
 say
 
 ask network "Job network name (e.g. dejima-ci)" "$(cfg_get network)"
@@ -175,6 +184,10 @@ if docker network inspect "$network" >/dev/null 2>&1; then
     say "    subnet   $subnet"
     say "    gateway  $gateway"
     say "    bridge   $bridge"
+    say
+    say "  Of these, only the NAME goes in a runner's config (container.network),"
+    say "  and the gateway goes in its --dns. The bridge is used by the firewall"
+    say "  rules here and appears in no runner configuration."
 else
     say "Its subnet. Must be PRIVATE - dnsmasq's stop-dns-rebind is keyed on the"
     say "private ranges, so a reserved-but-not-private subnet is one that check"
@@ -213,8 +226,12 @@ else
 
     say "  created    docker network $network"
     say "    subnet   $subnet"
-    say "    gateway  $gateway   (Docker's, read back - the resolver listens here)"
-    say "    bridge   $bridge   (fixed, so the firewall rules can name it)"
+    say "    gateway  $gateway"
+    say "    bridge   $bridge"
+    say
+    say "  Only the NAME goes in a runner's config (container.network), and the"
+    say "  gateway goes in its --dns. The bridge is what the firewall rules match"
+    say "  on and appears in no runner configuration - nothing to copy."
 fi
 say
 
@@ -380,7 +397,7 @@ done
 # same directory. Keeping them apart is what stops a hand-edit drifting from
 # the list that is actually derived from a branch you control.
 forge_host="${instance#*://}"; forge_host="${forge_host%%/*}"; forge_host="${forge_host%%:*}"
-write_if_changed /etc/dnsmasq.d/dejima-ci.conf 0644 "# Written by $PROG. The allowed names live in the file
+write_if_changed "$DNSMASQ_DIR/dejima-ci.conf" 0644 "# Written by $PROG. The allowed names live in the file
 # dejima-ci-allowlist renders; do not add server= lines here.
 listen-address=$gateway
 bind-interfaces
@@ -418,6 +435,66 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
     systemctl restart dnsmasq 2>/dev/null || say "  NOTE: could not restart dnsmasq - do it by hand"
 fi
 
+say
+say "=============================================================="
+say " What is left to do"
+say "=============================================================="
+say
+say "This installer cannot configure or register your runners - that needs a"
+say "token from your forge, and the config file lives wherever your runner's"
+say "compose mounts it from. Everything below is on you."
+say
+say "1. In the config.yaml of every runner whose jobs should be filtered:"
+say
+say "     container:"
+say "       network: $network"
+say "       docker_host: \"-\""
+say "       options: \"--dns=$gateway --init --security-opt=no-new-privileges\""
+say "       valid_volumes: []"
+say "       privileged: false"
+say
+say "   network must be exactly \"$network\" - the name, not the bridge."
+say "   --dns must be exactly $gateway, matching the resolver's listen-address."
+say "   docker_host: \"-\" is the one value that stops the Docker socket being"
+say "   mounted into job containers; unset is the default and the default mounts."
+say
+say "2. Give that runner a label no other runner carries, so a job naming it"
+say "   cannot land somewhere unhardened:"
+say
+say "     runner:"
+say "       labels:"
+say "         - \"your-label:docker://node:20-bookworm\""
+say "       capacity: 1"
+say "     cache:"
+say "       enabled: false"
+say
+say "3. Make sure CONFIG_FILE=/config.yaml is in that runner's environment."
+say "   Without it the file is not read at all and every default applies -"
+say "   including the socket reaching every job - with nothing saying so."
+say
+say "4. Restart the runner, then confirm it took:"
+say
+say "     docker compose restart      # wherever your runner lives"
+say
+say "5. Verify from inside a job, rather than from this host. dejima ships"
+say "   test/ci-runner.bats for exactly this; a job on the hardened runner"
+say "   should show the Docker socket absent, an off-list name not resolving,"
+say "   and an off-list address unreachable. If the DNS checks pass while the"
+say "   egress checks fail, the resolver is fine and the firewall is not:"
+say
+say "     $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
+say
+say "For a runner using host networking, none of steps 1-2 apply: its jobs are"
+say "in the host's namespace, no bridge is in front of them, and the rules"
+say "installed here do not filter them. Its egress is that machine's own."
+say
+say "Files this installer owns, for later reference:"
+say "  config       $CONFIG"
+say "  allowlist    $out            (generated - do not hand-edit)"
+say "  resolver     $DNSMASQ_DIR/dejima-ci.conf"
+say "  firewall     $BIN_DIR/dejima-ci-firewall (unit: dejima-ci-firewall.service)"
+say
+say "=============================================================="
 say
 say "Checking the configuration..."
 rc=0
