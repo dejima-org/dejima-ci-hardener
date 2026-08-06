@@ -254,8 +254,63 @@ say "the resolver that actually knows the answers. It is NOT the dnsmasq this"
 say "configures, and NOT the job bridge gateway. It must be able to resolve"
 say "your forge, so if that name is internal this has to be your internal DNS."
 existing_upstream="$(cfg_get upstream)"
-ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
-[ -n "$upstream" ] || die "an upstream resolver is required"
+# Detection is a guess and has to be checked. resolvectl reports the first
+# server it lists, which on a host with several - or with a local stub in
+# front - can be one that does not actually answer. The host still resolves,
+# because it falls through to another; dnsmasq points at exactly one and gets
+# silence. That surfaces as every job failing at apt with "Temporary failure
+# resolving", four layers away from the setting that caused it.
+upstream_answers() {
+    python3 - "$1" "$2" <<'PROBE'
+import socket, struct, sys
+q = b''.join(bytes([len(p)]) + p.encode() for p in sys.argv[2].split('.')) + b'\x00'
+pkt = struct.pack('>HHHHHH', 0x5a5a, 0x0100, 1, 0, 0, 0) + q + struct.pack('>HH', 1, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4)
+try:
+    s.sendto(pkt, (sys.argv[1], 53))
+    d, _ = s.recvfrom(512)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if (d[3] & 0xf) == 0 and struct.unpack('>H', d[6:8])[0] > 0 else 1)
+PROBE
+}
+
+# The forge, because that is the name an upstream most plausibly cannot
+# resolve: a public resolver handles deb.debian.org and would pass this check
+# while leaving every job unable to reach the forge it checks out from.
+probe_name="${instance#*://}"; probe_name="${probe_name%%/*}"; probe_name="${probe_name%%:*}"
+: "${probe_name:=deb.debian.org}"
+
+while :; do
+    ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
+    [ -n "$upstream" ] || die "an upstream resolver is required"
+    if ! command -v python3 >/dev/null 2>&1; then
+        say "  (python3 absent - cannot check that $upstream answers; verify by hand)"
+        break
+    fi
+    if upstream_answers "$upstream" "$probe_name"; then
+        say "  $upstream resolves $probe_name - good."
+        break
+    fi
+    say
+    say "  $upstream did not answer a query for $probe_name."
+    say
+    say "  This host resolving names is not the same thing: it may be using a"
+    say "  different server, or a local stub that falls through to one. dnsmasq"
+    say "  will point at this address and nothing else, so if it is silent every"
+    say "  job fails at apt with 'Temporary failure resolving' and nothing names"
+    say "  this setting."
+    say
+    say "  Servers this host has configured:"
+    { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p'
+      sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null; } | sort -u >&2
+    say
+    ask retry_upstream "Try a different address? (Y/n)" "y"
+    case "${retry_upstream,,}" in
+        n|no) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
+    esac
+    existing_upstream=""
+done
 case "$upstream" in
     127.0.0.53|127.0.0.1|::1)
         say
