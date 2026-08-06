@@ -1,0 +1,74 @@
+# The privileged runner, on its own, in its own file.
+#
+# One service, deliberately. This runner is handed the Docker daemon and the
+# host's network namespace, because one job cannot work without them, and
+# neither grant can be reduced without breaking that job. A job on this runner
+# can take the machine it runs on.
+#
+# So the machine it runs on should be one that exists for that and holds
+# nothing else: no other service, no route to a LAN or management network, no
+# credentials beyond its own registration token, rebuilt from a snapshot on a
+# schedule. That is why this is a separate file rather than another service
+# alongside the ordinary runners - a separate host is the intended
+# arrangement, and a compose file that assumes it is harder to drift away from
+# than one that has to be split later.
+#
+# Where the two tiers do share a machine, be clear about what that is: label
+# tiering, not host separation. A job denied the socket still shares a kernel
+# with a runner that has it. That is a real reduction over granting everything
+# to everything, and it is not isolation between the tiers.
+#
+# Pair with ci/act-runner-runtime.example.yaml. Not runnable as written:
+# substitute your own instance URL and image tag.
+
+name: dejima-runtime
+
+services:
+  runtime:
+    # Pin the tag. This process executes untrusted code on every pull request,
+    # and :latest means the thing doing that can change without you deciding
+    # it should.
+    image: gitea/act_runner:0.6.1
+    restart: unless-stopped
+    container_name: dejima-runtime
+    networks: [runners]
+
+    environment:
+      # Without this the config file is not read AT ALL - the runner starts on
+      # built-in defaults instead, and on this tier the defaults happen to
+      # resemble the intended configuration closely enough that the mistake is
+      # invisible. Check it first when an edit appears to do nothing.
+      CONFIG_FILE: /config.yaml
+      GITEA_INSTANCE_URL: https://gitea.example.com
+      GITEA_RUNNER_NAME: dejima-runtime
+      # Needed only until registration completes; the identity then lives in
+      # the volume below. Comes from a .env file beside this one (chmod 600)
+      # so it is not in the file you commit, and is worth removing once
+      # registration succeeds - anyone holding a registration token can
+      # register a runner and start receiving jobs, secrets included.
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_REGISTRATION_TOKEN:-}
+
+    volumes:
+      # The runner's own access to the daemon, so it can create job
+      # containers. On this tier the config file ALSO passes the socket into
+      # those containers, which is the grant that makes this host sacrificial;
+      # on the ordinary tier it does not. Same bind, different consequence,
+      # decided entirely by container.docker_host in the config.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./act-runner-runtime.yaml:/config.yaml:ro
+      # Its own registration identity. Never shared with another runner.
+      - runtime-data:/data
+      # No bind for /tmp/dejima-ci. The job container gets that path because
+      # the workflow asks for it and container.valid_volumes permits it, and
+      # the host daemon resolves the source host-side. This container never
+      # sees it.
+
+networks:
+  # This runner's own network, for reaching your Gitea instance. The job
+  # network is deliberately absent here as well: jobs on this tier are in the
+  # host's network namespace, which is granted by container.network in the
+  # config file and is not something compose can express or restrain.
+  runners:
+
+volumes:
+  runtime-data:

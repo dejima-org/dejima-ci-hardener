@@ -1,0 +1,94 @@
+# act_runner configuration for the privileged tier: the one runner that hands
+# job containers a Docker daemon and this machine's network namespace, because
+# a job exists that cannot work without them.
+#
+# Read this first: a job on this runner can take this host. The socket below
+# is root-equivalent - `docker run -v /:/host` - and the host network
+# namespace puts the job on your network with no filtering in front of it.
+# Neither can be reduced without breaking the job they exist for. The design
+# does not pretend otherwise; it assumes owning this host is worth nothing.
+#
+# So this runner belongs on a machine that:
+#   - runs nothing else, and holds nothing else,
+#   - has no route to a LAN or management network,
+#   - holds no credentials beyond its own registration token,
+#   - is rebuilt from a snapshot on a schedule.
+#
+# Sharing a machine with the ordinary runner (ci/act-runner-ci.example.yaml)
+# gives you label tiering, not host separation: a job denied the socket still
+# shares a kernel and a network with a runner that has it. That is a real
+# reduction and worth doing if one machine is what you have - just do not read
+# it as isolation.
+#
+# Written against act_runner v0.6.1. Not runnable as written.
+# See docs/ci.md.
+
+log:
+  level: info
+
+runner:
+  file: .runner
+  capacity: 1
+
+  # Only this label. A generic one (ubuntu-latest and friends) would let any
+  # job on the instance land here and collect both grants below without ever
+  # asking for them - and a job that never asked is exactly the one nobody
+  # reviews for whether it should have them.
+  labels:
+    - "dejima-runtime:docker://node:20-bookworm"
+
+  envs: {}
+  env_file: ""
+  timeout: 2h
+  insecure: false
+
+cache:
+  enabled: false
+
+container:
+  # Left unset ON PURPOSE, which is the opposite of the ordinary runner. Unset
+  # means act_runner mounts /var/run/docker.sock into job containers, and the
+  # job here builds an image and boots real containers over it.
+  #
+  # This is the single line that makes this host sacrificial. If you ever find
+  # it unset on a runner you did not intend to be privileged, that runner is
+  # privileged anyway.
+  docker_host: ""
+
+  # This machine's own network namespace. Needed by exactly one assertion:
+  # that a host service bound to loopback is unreachable from inside a
+  # container while one bound to the bridge gateway is reachable. The positive
+  # control has the suite bind a listener on the test network's bridge gateway
+  # address, which lives on a host interface and cannot be bound from any
+  # other namespace - so the control would fail for a reason unrelated to what
+  # the test asserts.
+  #
+  # Gitea's act fork ignores `--network` in a workflow's container options, so
+  # this cannot be requested by a repository. It is granted here or not at all.
+  network: host
+
+  privileged: false
+  options: "--init"
+
+  # One path, and the job that needs it does not work without it: fixtures are
+  # built here and bind-mounted into containers the HOST daemon creates, so
+  # every -v source resolves against the host's filesystem rather than the job
+  # container's. A path that exists only inside the job does not resolve - and
+  # Docker's answer to a missing bind source is to create an empty directory
+  # and mount that, which fails tests obscurely and passes the ones an empty
+  # read-only directory happens to satisfy.
+  #
+  # A volume a workflow asks for and this list does not name is dropped
+  # silently, so this has to match what the workflow requests.
+  valid_volumes:
+    - /tmp/dejima-ci
+
+  force_pull: true
+  force_rebuild: false
+  require_docker: true
+
+host:
+  workdir_parent:
+
+metrics:
+  enabled: false

@@ -1,7 +1,25 @@
-# dejima-ci-allowlist configuration. Install at /etc/dejima-ci/config.
+# dejima-ci-hardener configuration. Install at /etc/dejima-ci/config.
+#
+# Read by dejima-ci-allowlist and dejima-ci-firewall both, so the job network
+# is described once rather than edited into each of them separately.
 #
 # Parsed, never sourced: key = value, # starts a comment, unknown keys are a
 # hard error rather than a silent typo.
+
+# --- the job network --------------------------------------------------------
+# Created by install.sh. The bridge name is fixed rather than left for Docker
+# to generate, because it is what the firewall rules match on.
+network = dejima-ci
+bridge = dejima-ci0
+
+# The bridge's gateway address. The resolver listens here, and job containers
+# are pointed at it by the runner's --dns. Use a PRIVATE range: dnsmasq's
+# stop-dns-rebind is keyed on the private ranges, so a reserved-but-not-private
+# subnet is one that check silently does not cover.
+gateway = 10.89.0.1
+
+# The set the resolver populates and the firewall matches on.
+ipset = ci-allow
 
 # The forge's API root. Read-only access is all this needs.
 forge_api = https://gitea.example.com/api/v1

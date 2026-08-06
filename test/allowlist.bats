@@ -252,3 +252,23 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"server=/example.com/"* ]]
 }
+
+# "no config at ..." was what a non-root user saw for a file sitting right
+# there at a root-owned path - sending them to create something that already
+# existed. The two cases need different messages because they need different
+# actions.
+@test "a missing config and an unreadable one are different messages" {
+    # Not run_tool: it appends its own --config, which would win over this one.
+    run "$BIN" check --config "$T/does-not-exist"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no config at"* ]]
+    [[ "$output" == *"install.sh"* ]]
+
+    chmod 000 "$T/config"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is not readable by"* ]]
+    [[ "$output" == *"sudo"* ]]
+    [[ "$output" != *"no config at"* ]]
+    chmod 644 "$T/config"
+}

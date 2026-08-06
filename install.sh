@@ -14,6 +14,7 @@ PROG=${0##*/}
 BIN_DIR=${BIN_DIR:-/usr/local/sbin}
 CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
+DNSMASQ_DIR=${DNSMASQ_DIR:-/etc/dnsmasq.d}
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG="$CONF_DIR/config"
@@ -70,7 +71,11 @@ write_if_changed() {
         chmod "$mode" "$path"
         return 0
     fi
-    install -d -m 0750 "$(dirname "$path")"
+    # Only create a missing parent, and never re-mode an existing one. This
+    # writes into /etc/dnsmasq.d as well as its own directory, and tightening
+    # a system directory that other tools read is not this installer's call to
+    # make - as root it would have succeeded silently.
+    [ -d "$(dirname "$path")" ] || install -d -m 0750 "$(dirname "$path")"
     printf '%s\n' "$content" > "$path.new"
     chmod "$mode" "$path.new"
     mv "$path.new" "$path"
@@ -102,11 +107,132 @@ detect_upstream() {
     printf '%s' "$ip"
 }
 
-say "dejima-ci-allowlist installer"
+# ipset in particular: the firewall's first command creates the set, so
+# without it that script aborts at line one - and what it leaves behind
+# resembles a working setup closely enough to pass a look. DNS still refuses
+# unlisted names, because that is the resolver's doing rather than the
+# firewall's, while every job has unrestricted egress.
+missing=""
+for tool in ipset iptables ip6tables dnsmasq docker; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+[ -z "$missing" ] || die "missing required commands:$missing
+On Debian/Ubuntu: apt-get install ipset iptables dnsmasq
+Without ipset the firewall cannot be applied, and a runner with no egress
+policy looks exactly like one with."
+
+say "dejima-ci-hardener installer"
 say
 say "This renders the CI job network's DNS allowlist from .dejima/allowed-domains"
 say "on each served repository's main branch. Press Enter to keep a value shown"
 say "in brackets."
+say
+
+# --- the job network --------------------------------------------------------
+say "=============================================================="
+say " The job network"
+say "=============================================================="
+say
+say "A Docker network for job containers to run on, which this installer will"
+say "create. Name it whatever you like - it only has to match container.network"
+say "in each ordinary runner's config.yaml."
+say
+say "A runner configured for host networking (container.network: host) needs"
+say "no job network - its jobs are in the host's own namespace, so no bridge"
+say "sits in front of them and the rules below never apply to those jobs. If"
+say "you have such a runner, the egress it gets is the host's own: give that"
+say "machine a firewall of its own, or treat it as one you are willing to lose."
+say "Set this up for the runners that do use a bridge, and skip it for those."
+say
+
+ask network "Job network name (e.g. dejima-ci)" "$(cfg_get network)"
+: "${network:=dejima-ci}"
+say
+
+# Derived, not asked. Docker takes the first usable address of the subnet as
+# the gateway, and the bridge is whatever name we give at creation - so two
+# more prompts would only be two more chances for the answers to disagree
+# with reality.
+valid_cidr() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    local o=("${BASH_REMATCH[@]:1:4}") pfx="${BASH_REMATCH[5]}"
+    for n in "${o[@]}"; do [ "$n" -le 255 ] || return 1; done
+    [ "$pfx" -ge 8 ] && [ "$pfx" -le 30 ]
+}
+is_private() {
+    [[ "$1" =~ ^10\. ]] && return 0
+    [[ "$1" =~ ^192\.168\. ]] && return 0
+    [[ "$1" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0
+    return 1
+}
+
+if docker network inspect "$network" >/dev/null 2>&1; then
+    # Already there: read what it actually is rather than asking and hoping.
+    subnet=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
+    gateway=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    bridge=$(docker network inspect "$network" \
+        -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+    if [ -z "$bridge" ]; then
+        nid=$(docker network inspect "$network" -f '{{.Id}}' 2>/dev/null || true)
+        bridge="br-${nid:0:12}"
+        say "  NOTE: $network was created without a fixed bridge name, so Docker"
+        say "  generated $bridge. That works, but it changes if the network is ever"
+        say "  recreated - and the firewall rules would then match nothing."
+        say
+    fi
+    say "  $network already exists:"
+    say "    subnet   $subnet"
+    say "    gateway  $gateway"
+    say "    bridge   $bridge"
+    say
+    say "  Of these, only the NAME goes in a runner's config (container.network),"
+    say "  and the gateway goes in its --dns. The bridge is used by the firewall"
+    say "  rules here and appears in no runner configuration."
+else
+    say "Its subnet. Must be PRIVATE - dnsmasq's stop-dns-rebind is keyed on the"
+    say "private ranges, so a reserved-but-not-private subnet is one that check"
+    say "silently does not cover. Pick one outside Docker's default pool"
+    say "(172.17-172.31, 192.168.x) so an unrelated network cannot collide."
+    say
+    while :; do
+        ask subnet "Subnet in CIDR form (e.g. 10.89.0.0/24)" "${subnet:-$(cfg_get subnet)}"
+        : "${subnet:=10.89.0.0/24}"
+        valid_cidr "$subnet" || { say "  not a CIDR block - it needs the form 10.89.0.0/24"; subnet=""; continue; }
+        is_private "$subnet" || { say "  $subnet is not a private range - use 10.x, 172.16-31.x or 192.168.x"; subnet=""; continue; }
+        break
+    done
+
+
+    # Interface names are capped at 15 characters by the kernel.
+    bridge="${network}0"
+    if [ ${#bridge} -gt 15 ]; then
+        bridge="${bridge:0:15}"
+        say "  NOTE: bridge name truncated to $bridge (interface names cap at 15)."
+    fi
+
+    say
+    docker network create \
+        --opt com.docker.network.bridge.name="$bridge" \
+        --subnet "$subnet" "$network" >/dev/null \
+        || die "could not create the network - is $subnet already in use? (docker network ls)"
+
+    # Read the gateway back rather than computing it. Docker decides it, and a
+    # value derived here would be a second opinion that can differ - which for
+    # the resolver's listen-address and the runner's --dns is the difference
+    # between working and silently not.
+    gateway=$(docker network inspect "$network" \
+        -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    [ -n "$gateway" ] || die "created $network but could not read its gateway back"
+
+    say "  created    docker network $network"
+    say "    subnet   $subnet"
+    say "    gateway  $gateway"
+    say "    bridge   $bridge"
+    say
+    say "  Only the NAME goes in a runner's config (container.network), and the"
+    say "  gateway goes in its --dns. The bridge is what the firewall rules match"
+    say "  on and appears in no runner configuration - nothing to copy."
+fi
 say
 
 # --- forge ------------------------------------------------------------------
@@ -128,8 +254,63 @@ say "the resolver that actually knows the answers. It is NOT the dnsmasq this"
 say "configures, and NOT the job bridge gateway. It must be able to resolve"
 say "your forge, so if that name is internal this has to be your internal DNS."
 existing_upstream="$(cfg_get upstream)"
-ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
-[ -n "$upstream" ] || die "an upstream resolver is required"
+# Detection is a guess and has to be checked. resolvectl reports the first
+# server it lists, which on a host with several - or with a local stub in
+# front - can be one that does not actually answer. The host still resolves,
+# because it falls through to another; dnsmasq points at exactly one and gets
+# silence. That surfaces as every job failing at apt with "Temporary failure
+# resolving", four layers away from the setting that caused it.
+upstream_answers() {
+    python3 - "$1" "$2" <<'PROBE'
+import socket, struct, sys
+q = b''.join(bytes([len(p)]) + p.encode() for p in sys.argv[2].split('.')) + b'\x00'
+pkt = struct.pack('>HHHHHH', 0x5a5a, 0x0100, 1, 0, 0, 0) + q + struct.pack('>HH', 1, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4)
+try:
+    s.sendto(pkt, (sys.argv[1], 53))
+    d, _ = s.recvfrom(512)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if (d[3] & 0xf) == 0 and struct.unpack('>H', d[6:8])[0] > 0 else 1)
+PROBE
+}
+
+# The forge, because that is the name an upstream most plausibly cannot
+# resolve: a public resolver handles deb.debian.org and would pass this check
+# while leaving every job unable to reach the forge it checks out from.
+probe_name="${instance#*://}"; probe_name="${probe_name%%/*}"; probe_name="${probe_name%%:*}"
+: "${probe_name:=deb.debian.org}"
+
+while :; do
+    ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
+    [ -n "$upstream" ] || die "an upstream resolver is required"
+    if ! command -v python3 >/dev/null 2>&1; then
+        say "  (python3 absent - cannot check that $upstream answers; verify by hand)"
+        break
+    fi
+    if upstream_answers "$upstream" "$probe_name"; then
+        say "  $upstream resolves $probe_name - good."
+        break
+    fi
+    say
+    say "  $upstream did not answer a query for $probe_name."
+    say
+    say "  This host resolving names is not the same thing: it may be using a"
+    say "  different server, or a local stub that falls through to one. dnsmasq"
+    say "  will point at this address and nothing else, so if it is silent every"
+    say "  job fails at apt with 'Temporary failure resolving' and nothing names"
+    say "  this setting."
+    say
+    say "  Servers this host has configured:"
+    { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p'
+      sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null; } | sort -u >&2
+    say
+    ask retry_upstream "Try a different address? (Y/n)" "y"
+    case "${retry_upstream,,}" in
+        n|no) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
+    esac
+    existing_upstream=""
+done
 case "$upstream" in
     127.0.0.53|127.0.0.1|::1)
         say
@@ -232,6 +413,7 @@ write_if_changed "$BASE_FILE" 0640 "$base"
 say
 
 # --- remaining settings -----------------------------------------------------
+ipset="$(cfg_get ipset)"; : "${ipset:=ci-allow}"
 ask out    "Generated allowlist path" "$(cfg_get out)"
 ask ref    "Branch treated as operator-approved" "$(cfg_get ref)"
 ask reload "Command that reloads the resolver" "$(cfg_get reload)"
@@ -242,6 +424,11 @@ say
 
 # --- write ------------------------------------------------------------------
 write_if_changed "$CONFIG" 0640 "# Written by $PROG. Re-run it to change a value.
+network = $network
+bridge = $bridge
+gateway = $gateway
+subnet = $subnet
+ipset = $ipset
 forge_api = $forge_api
 token_file = $TOKEN_FILE
 repos_file = $REPOS_FILE
@@ -251,15 +438,35 @@ out = $out
 ref = $ref
 reload = $reload"
 
-if cmp -s "$SRC/bin/dejima-ci-allowlist" "$BIN_DIR/dejima-ci-allowlist" 2>/dev/null; then
-    say "  unchanged  $BIN_DIR/dejima-ci-allowlist"
-else
-    install -m 0755 "$SRC/bin/dejima-ci-allowlist" "$BIN_DIR/dejima-ci-allowlist"
-    say "  installed  $BIN_DIR/dejima-ci-allowlist"
-fi
+for prog in dejima-ci-allowlist dejima-ci-firewall; do
+    if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
+        say "  unchanged  $BIN_DIR/$prog"
+    else
+        install -m 0755 "$SRC/bin/$prog" "$BIN_DIR/$prog"
+        say "  installed  $BIN_DIR/$prog"
+    fi
+done
+
+# The resolver's static half. Its generated half - the server= lines - is
+# written by dejima-ci-allowlist from origin/main, into a separate file in the
+# same directory. Keeping them apart is what stops a hand-edit drifting from
+# the list that is actually derived from a branch you control.
+forge_host="${instance#*://}"; forge_host="${forge_host%%/*}"; forge_host="${forge_host%%:*}"
+write_if_changed "$DNSMASQ_DIR/dejima-ci.conf" 0644 "# Written by $PROG. The allowed names live in the file
+# dejima-ci-allowlist renders; do not add server= lines here.
+listen-address=$gateway
+# bind-dynamic, not bind-interfaces: a Docker bridge is recreated whenever its
+# network is, and bind-interfaces would leave dnsmasq holding a socket on a
+# device that no longer exists - bound according to ss, answering nothing.
+bind-dynamic
+no-hosts
+no-resolv
+ipset=/#/$ipset
+stop-dns-rebind
+rebind-domain-ok=/$forge_host/"
 
 if [ "$INSTALL_UNITS" -eq 1 ]; then
-    for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer; do
+    for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer dejima-ci-firewall.service; do
         write_if_changed "$UNIT_DIR/$unit" 0644 "$(cat "$SRC/systemd/$unit")"
     done
 else
@@ -274,8 +481,81 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
         systemctl enable --now dejima-ci-allowlist.timer
         say "  timer enabled"
     fi
+    # PartOf + WantedBy on docker.service, so the rules are reapplied whenever
+    # Docker starts. Docker recreates its own chains on every start and
+    # DOCKER-USER comes back empty, so "apply them once" is not an
+    # instruction that stays true.
+    ask enable_fw "Enable the firewall unit (reapplies rules on every Docker start)? (Y/n)" "y"
+    if [ "${enable_fw,,}" != n ] && [ "${enable_fw,,}" != no ]; then
+        systemctl enable --now dejima-ci-firewall.service
+        say "  firewall unit enabled"
+    fi
+    # After the network, always. Even with bind-dynamic the config was just
+    # rewritten, and if the bridge was created moments ago this is what picks
+    # it up.
+    systemctl restart dnsmasq 2>/dev/null || say "  NOTE: could not restart dnsmasq - do it by hand"
 fi
 
+say
+say "=============================================================="
+say " What is left to do"
+say "=============================================================="
+say
+say "This installer cannot configure or register your runners - that needs a"
+say "token from your forge, and the config file lives wherever your runner's"
+say "compose mounts it from. Everything below is on you."
+say
+say "1. In the config.yaml of every runner whose jobs should be filtered:"
+say
+say "     container:"
+say "       network: $network"
+say "       docker_host: \"-\""
+say "       options: \"--dns=$gateway --init --security-opt=no-new-privileges\""
+say "       valid_volumes: []"
+say "       privileged: false"
+say
+say "   network must be exactly \"$network\" - the name, not the bridge."
+say "   --dns must be exactly $gateway, matching the resolver's listen-address."
+say "   docker_host: \"-\" is the one value that stops the Docker socket being"
+say "   mounted into job containers; unset is the default and the default mounts."
+say
+say "2. Give that runner a label no other runner carries, so a job naming it"
+say "   cannot land somewhere unhardened:"
+say
+say "     runner:"
+say "       labels:"
+say "         - \"your-label:docker://node:20-bookworm\""
+say "       capacity: 1"
+say "     cache:"
+say "       enabled: false"
+say
+say "3. Make sure CONFIG_FILE=/config.yaml is in that runner's environment."
+say "   Without it the file is not read at all and every default applies -"
+say "   including the socket reaching every job - with nothing saying so."
+say
+say "4. Restart the runner, then confirm it took:"
+say
+say "     docker compose restart      # wherever your runner lives"
+say
+say "5. Verify from inside a job, rather than from this host. dejima ships"
+say "   test/ci-runner.bats for exactly this; a job on the hardened runner"
+say "   should show the Docker socket absent, an off-list name not resolving,"
+say "   and an off-list address unreachable. If the DNS checks pass while the"
+say "   egress checks fail, the resolver is fine and the firewall is not:"
+say
+say "     $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
+say
+say "For a runner using host networking, none of steps 1-2 apply: its jobs are"
+say "in the host's namespace, no bridge is in front of them, and the rules"
+say "installed here do not filter them. Its egress is that machine's own."
+say
+say "Files this installer owns, for later reference:"
+say "  config       $CONFIG"
+say "  allowlist    $out            (generated - do not hand-edit)"
+say "  resolver     $DNSMASQ_DIR/dejima-ci.conf"
+say "  firewall     $BIN_DIR/dejima-ci-firewall (unit: dejima-ci-firewall.service)"
+say
+say "=============================================================="
 say
 say "Checking the configuration..."
 rc=0
