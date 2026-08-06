@@ -117,13 +117,18 @@ else
 
     # 2. Backports, which is still Debian and still signed by Debian.
     if ! have_compose && [ -n "$codename" ]; then
-        say "  compose    not in $codename; trying $codename-backports"
+        say "  compose    no distribution package on $codename; trying backports"
         printf 'deb http://deb.debian.org/debian %s-backports main\n' "$codename" \
             > /etc/apt/sources.list.d/backports.list
         apt-get update -qq || true
         apt-get install -y -qq --no-install-recommends \
             -t "$codename-backports" docker-compose-v2 || true
-        have_compose || rm -f /etc/apt/sources.list.d/backports.list
+        if ! have_compose; then
+            # Remove the source AND refresh, or apt keeps a list referring to
+            # something that is no longer configured.
+            rm -f /etc/apt/sources.list.d/backports.list
+            apt-get update -qq || true
+        fi
     fi
 
     # 3. Docker's own repository. Last because it is a third-party apt source
@@ -148,11 +153,25 @@ else
         apt-get install -y -qq --no-install-recommends docker-compose-plugin || true
     fi
 
-    have_compose || die "could not install docker compose v2 by any route.
-Every rung failed: no distribution package, no backports, and Docker's own
-repository did not yield one either - which on a working network usually means
-this host cannot reach download.docker.com. Re-run once that is fixed; this
-script is idempotent and everything before this point has already been done."
+    if ! have_compose; then
+        {
+            printf '%s: docker compose v2 is not usable.\n\n' "$PROG"
+            printf 'What is on disk:\n'
+            for d in /usr/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins \
+                     /usr/local/lib/docker/cli-plugins /usr/local/libexec/docker/cli-plugins; do
+                [ -d "$d" ] && ls -1 "$d" 2>/dev/null | sed "s|^|  $d/|"
+            done
+            printf '  docker CLI: %s\n\n' "$(docker --version 2>&1 | head -1)"
+            printf 'If a docker-compose binary is listed above then the package did\n'
+            printf 'install, and the CLI searches these directories by default - so\n'
+            printf 'report what you see rather than assuming a download failure. If\n'
+            printf 'nothing is listed, no route produced one, which on a working network\n'
+            printf 'usually means this host cannot reach download.docker.com.\n\n'
+            printf 'Re-run once resolved; this script is idempotent and everything before\n'
+            printf 'this point is already done.\n'
+        } >&2
+        exit 1
+    fi
     say "  compose    $(docker compose version 2>/dev/null | head -1)"
 fi
 
