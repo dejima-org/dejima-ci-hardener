@@ -70,36 +70,70 @@ apt-get install -y -qq --no-install-recommends \
     ca-certificates curl git jq \
     unattended-upgrades
 
-# Compose is named differently depending on how old this Debian is, and on
-# bookworm it is not packaged at all. Detected rather than assumed: naming it
-# in the list above aborted the whole bootstrap on Debian 12 over a package
-# that is only needed later, when the runner is started.
+# Compose, by whatever route this release actually offers.
 #
-# v1 (the `docker-compose` package) is not a fallback. The compose files here
-# use a top-level `name:`, which is compose-spec v2 and which v1 rejects.
+# The package is docker-compose-v2 from trixie onward and does not exist on
+# bookworm, so naming it in the list above aborted the whole bootstrap on
+# Debian 12. Detecting and shrugging is not much better: a runner host without
+# compose cannot start a runner. So try each route that exists, in order of
+# how much it adds to the machine, and stop at the first that works.
+#
+# v1 is not one of the routes. The compose files here use a top-level `name:`,
+# which is compose-spec v2 and which the `docker-compose` package rejects -
+# installing it would produce a working-looking host that fails at the first
+# `docker compose up`.
 have_compose() { docker compose version >/dev/null 2>&1; }
+. /etc/os-release
+codename="${VERSION_CODENAME:-}"
+
 if have_compose; then
     say "  compose    already present"
 else
-    for pkg in docker-compose-v2 docker-compose-plugin; do
-        if apt-cache show "$pkg" 2>/dev/null | grep -q '^Package:'; then
-            apt-get install -y -qq --no-install-recommends "$pkg" && break
-        fi
-    done
-fi
-if have_compose; then
+    # 1. The distribution's own package, where it exists.
+    if apt-cache show docker-compose-v2 2>/dev/null | grep -q '^Package:'; then
+        say "  compose    installing docker-compose-v2 from $codename"
+        apt-get install -y -qq --no-install-recommends docker-compose-v2 || true
+    fi
+
+    # 2. Backports, which is still Debian and still signed by Debian.
+    if ! have_compose && [ -n "$codename" ]; then
+        say "  compose    not in $codename; trying $codename-backports"
+        printf 'deb http://deb.debian.org/debian %s-backports main\n' "$codename" \
+            > /etc/apt/sources.list.d/backports.list
+        apt-get update -qq || true
+        apt-get install -y -qq --no-install-recommends \
+            -t "$codename-backports" docker-compose-v2 || true
+        have_compose || rm -f /etc/apt/sources.list.d/backports.list
+    fi
+
+    # 3. Docker's own repository. Last because it is a third-party apt source
+    #    on a machine whose value is a small, known surface - worth saying out
+    #    loud rather than adding quietly.
+    if ! have_compose; then
+        say ""
+        say "  compose    not available from Debian on $codename."
+        say "             Adding Docker's official apt repository to get"
+        say "             docker-compose-plugin. This is a third-party source on"
+        say "             a host built to have few of them; the alternative is"
+        say "             no compose, and no way to start a runner."
+        say ""
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+            -o /etc/apt/keyrings/docker.asc || die "could not fetch Docker's signing key"
+        chmod a+r /etc/apt/keyrings/docker.asc
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian %s stable\n' \
+            "$(dpkg --print-architecture)" "$codename" \
+            > /etc/apt/sources.list.d/docker.list
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends docker-compose-plugin || true
+    fi
+
+    have_compose || die "could not install docker compose v2 by any route.
+Every rung failed: no distribution package, no backports, and Docker's own
+repository did not yield one either - which on a working network usually means
+this host cannot reach download.docker.com. Re-run once that is fixed; this
+script is idempotent and everything before this point has already been done."
     say "  compose    $(docker compose version 2>/dev/null | head -1)"
-else
-    say ""
-    say "  NOTE: no docker compose v2 on this system, and no package for it."
-    say "  Everything else here still installed; you need it to START a runner,"
-    say "  not to harden this host. On Debian 12 either:"
-    say "    - enable backports and apt-get install -t bookworm-backports docker-compose-v2"
-    say "    - or add Docker's own repository and install docker-compose-plugin"
-    say "  Debian 13 and later package it as docker-compose-v2 directly."
-    say "  The v1 'docker-compose' package will NOT work: the compose files here"
-    say "  use a top-level name:, which v1 rejects."
-    say ""
 fi
 
 # --- services this host has no business running -----------------------------
