@@ -1,0 +1,64 @@
+# Proxmox VM firewall for a dejima CI runner. Rendered by
+# proxmox/dejima-ci-vm and installed as /etc/pve/firewall/<vmid>.fw on the
+# Proxmox node.
+#
+# THIS FILE IS THE BOUNDARY. Everything dejima-ci-hardener installs inside the
+# VM - the job network's allowlist, the DOCKER-USER rules - is defence in
+# depth and nothing more, because the premise of the privileged runner is that
+# a compromised job reaches root on that VM, and root can flush any rule set
+# it can see. These rules live on the hypervisor, applied to the VM's tap
+# device, and the guest cannot reach them.
+#
+# Requires the firewall enabled at datacenter level as well
+# (Datacenter -> Firewall -> Options -> Firewall: Yes). Without that, this
+# file is read and enforced nowhere - which looks exactly like it working.
+
+[OPTIONS]
+enable: 1
+# Deny by default in both directions, then enumerate. The inverse - allow with
+# a list of denies - fails open for anything the list forgot, which on this
+# box is the whole point.
+policy_in: DROP
+policy_out: DROP
+# Connection tracking, so a reply to something allowed out is not separately
+# allowed in.
+log_level_in: nolog
+log_level_out: nolog
+
+[RULES]
+
+# --- inbound ----------------------------------------------------------------
+# One management host. Everything else, including the rest of your LAN, is
+# dropped: this VM offers no service anyone should be reaching.
+IN ACCEPT -source __MGMT_IP__ -p tcp -dport 22 -log nolog
+
+# --- outbound, the two LAN exceptions ---------------------------------------
+# These are the entire remaining LAN exposure, and they are why "no LAN
+# access" is not literally true. Both are pinned to one host and one port.
+#
+# The forge, so the runner can fetch jobs and report results.
+OUT ACCEPT -dest __FORGE_IP__ -p tcp -dport 443 -log nolog
+# The resolver, because the forge's name has to resolve and it is internal.
+OUT ACCEPT -dest __RESOLVER_IP__ -p udp -dport 53 -log nolog
+OUT ACCEPT -dest __RESOLVER_IP__ -p tcp -dport 53 -log nolog
+
+# --- outbound, everything else on the LAN is denied -------------------------
+# Before the public allows below, because first match wins. These three lines
+# are what the whole VM exists to make true.
+OUT DROP -dest 10.0.0.0/8 -log nolog
+OUT DROP -dest 172.16.0.0/12 -log nolog
+OUT DROP -dest 192.168.0.0/16 -log nolog
+# Link-local, which includes cloud metadata services at 169.254.169.254.
+OUT DROP -dest 169.254.0.0/16 -log nolog
+
+# --- outbound, the public internet ------------------------------------------
+# Deliberately not an allowlist. Job containers already have one, enforced
+# inside the VM by dejima-ci-hardener; duplicating it here by IP would break
+# on every CDN rotation, and against an attacker who has root in the VM it
+# would not hold anyway. What these rules guarantee is that such an attacker
+# reaches the internet and not your network - which is the trade the
+# sacrificial VM exists to make.
+OUT ACCEPT -p tcp -dport 443 -log nolog
+OUT ACCEPT -p tcp -dport 80 -log nolog
+# Time, or TLS starts failing in ways nobody enjoys diagnosing.
+OUT ACCEPT -p udp -dport 123 -log nolog

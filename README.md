@@ -13,6 +13,67 @@ For *why* any of this is necessary - what a CI run adds over a sandbox, and
 why no approval gate is offered - see dejima's `docs/ci.md`. You do not need
 it to follow this.
 
+## The runner host itself
+
+`install.sh` hardens the runners on a machine you already have.
+`proxmox/dejima-ci-vm` builds the machine, for the case where you would rather
+not hand an existing one to a compromised job.
+
+```sh
+# on the Proxmox node
+./proxmox/dejima-ci-vm --vmid 910 --role runtime \
+  --ip 192.0.2.61/24 --gateway 192.0.2.1 \
+  --forge <forge-ip> --resolver <resolver-ip> --mgmt <your-ip>
+
+# then inside the VM
+sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-ip>
+```
+
+`--dry-run` on the first one prints the firewall it would install without
+touching anything, and works off-node so you can read the rules somewhere
+other than the machine that applies them.
+
+### The boundary is on the node, not in the VM
+
+The privileged tier hands job containers the Docker socket, which is
+root-equivalent on their host. So the working assumption is that a compromised
+job **has root in that VM** — and root can flush any firewall it can see.
+
+Everything installed inside the VM is therefore defence in depth: real against
+a compromised job that has not escaped its container, which is the ordinary
+case, and worth nothing against one that has.
+
+What holds either way is the Proxmox firewall, applied to the VM's tap device
+and unreachable from the guest. It denies the VM every RFC1918 destination
+except two pinholes — the forge on 443 and a resolver on 53 — and those two
+are the entire remaining LAN exposure.
+
+Public egress is deliberately *not* allowlisted there. Job containers already
+have an allowlist, enforced inside the VM; duplicating it by IP on the node
+would break on every CDN rotation and would not hold against VM root anyway.
+The guarantee is narrower and more honest: an attacker who owns that VM
+reaches the internet, and not your network.
+
+One thing to check rather than assume, because its absence looks exactly like
+it working: **the datacenter firewall must be enabled** (Datacenter → Firewall
+→ Options → Firewall: Yes). Without it, a per-VM firewall file is read and
+enforced nowhere. `dejima-ci-vm` warns if it can tell, and
+`pve-firewall compile` on the node is the check.
+
+### Snapshot, and roll back on a cadence
+
+The VM is worth losing, which is only true if losing it is cheap. Snapshot it
+the moment it is bootstrapped and before any job has run:
+
+```sh
+qm snapshot <vmid> clean --description 'bootstrapped, before any job ran'
+qm rollback <vmid> clean        # whenever you want it clean again
+```
+
+Rolling back on a schedule bounds how long a foothold can live without needing
+the VM rebuilt each time. Weekly is a reasonable starting point; after
+anything suspicious is the other trigger, and that one is not optional.
+
 ## Do not install this next to dejima
 
 This runs on a machine whose job is to execute untrusted code. dejima runs on
