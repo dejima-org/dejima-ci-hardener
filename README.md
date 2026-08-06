@@ -25,7 +25,8 @@ sandbox session.
 
 ```sh
 sudo apt-get install ipset iptables dnsmasq
-git clone <this repo> && cd dejima-ci-hardener
+git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
+cd dejima-ci-hardener
 sudo ./install.sh
 ```
 
