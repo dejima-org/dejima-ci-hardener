@@ -57,7 +57,7 @@ before you flip it rather than after.
 | Tab | Setting | Value |
 | --- | --- | --- |
 | General | Name | `oubliette`, or whatever you prefer |
-| OS | ISO | Debian netinst, latest stable |
+| OS | ISO | Debian netinst, current stable |
 | System | Qemu Agent | ✓ |
 | Disks | Size | 64 GB is comfortable for image builds |
 | CPU | Cores | 4 |
@@ -73,6 +73,22 @@ Install Debian normally, with two things to get right.
 
 **Static addressing**, not DHCP. The firewall names this VM by address, and a
 lease that moves is a rule that no longer describes it.
+
+**Leave the root password blank.** Debian reads an empty root password as
+"use sudo", installs it, and puts your first user in the `sudo` group. Set a
+root password instead and it does neither — your user has no `sudo` at all,
+and the bootstrap step below opens with two `sudo` commands that will tell you
+so.
+
+If you have already set one, fix it from the console as root:
+
+```sh
+apt-get install -y sudo
+usermod -aG sudo <your-user>
+```
+
+then log out and back in — group membership is read at login, so the shell you
+are already in will not have it.
 
 **The software selection screen.** This is the one that bites, because it is
 a checklist where the defaults are wrong for this machine and clearing them
@@ -247,9 +263,14 @@ cd dejima-ci-hardener
 sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-management-ip>
 ```
 
-If `ssh` refuses the connection, the SSH server task was not selected during
-the install. Log in at the Proxmox console instead — it needs no network — and
-`apt-get install -y openssh-server git`, then `systemctl enable --now ssh`.
+Two ways this stalls, both from choices made during the install:
+
+- **`ssh` refuses the connection** — the SSH server task was not selected. Log
+  in at the Proxmox console, which needs no network, and
+  `apt-get install -y openssh-server git`, then `systemctl enable --now ssh`.
+- **`sudo` says you are not in the sudoers file** — a root password was set
+  during the install, so Debian did not add you. See "Leave the root password
+  blank" above for the fix, or just run these as root from the console.
 
 `--role ci` for the ordinary tier. That script installs packages, hardens
 sshd, removes listeners a runner has no use for, sets up unattended security
