@@ -50,11 +50,15 @@ and unreachable from the guest. It denies the VM every RFC1918 destination
 except two pinholes — the forge on 443 and a resolver on 53 — and those two
 are the entire remaining LAN exposure.
 
-Public egress is deliberately *not* allowlisted there. Job containers already
-have an allowlist, enforced inside the VM; duplicating it by IP on the node
-would break on every CDN rotation and would not hold against VM root anyway.
-The guarantee is narrower and more honest: an attacker who owns that VM
-reaches the internet, and not your network.
+Public egress is deliberately *not* restricted there - not by address and not
+by port. Job containers already have an allowlist, enforced inside the VM;
+duplicating it on the node would break on every CDN rotation and would not
+hold against VM root anyway. An earlier version allowed only tcp/80, tcp/443
+and udp/123 outbound, which broke apt on a first install and bought nothing:
+anyone who owns that box tunnels over 443 like everybody else.
+
+The guarantee is narrower and honest, and it is the one worth making: an
+attacker who owns that VM reaches the internet, and not your network.
 
 One thing to check rather than assume, because its absence looks exactly like
 it working: **the datacenter firewall must be enabled** (Datacenter → Firewall

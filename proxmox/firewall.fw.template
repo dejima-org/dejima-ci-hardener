@@ -3,69 +3,81 @@
 #
 # REFERENCE, not something to install. proxmox/README.md builds this through
 # the web console instead, one rule at a time - a runbook you can check as you
-# follow it beats a file to drop onto a hypervisor. This exists because eleven
-# rules are easier to review in one piece than in eleven table rows, and
-# because it says plainly what the console cannot: why each rule is there.
+# follow it beats a file to drop onto a hypervisor. This exists because the
+# rules are easier to review in one piece than in a table, and because it can
+# say why each one is there.
 #
 # Substitute the three placeholders if you do use it directly.
 #
-# THIS FILE IS THE BOUNDARY. Everything dejima-ci-hardener installs inside the
-# VM - the job network's allowlist, the DOCKER-USER rules - is defence in
-# depth and nothing more, because the premise of the privileged runner is that
-# a compromised job reaches root on that VM, and root can flush any rule set
-# it can see. These rules live on the hypervisor, applied to the VM's tap
-# device, and the guest cannot reach them.
+# THIS IS THE BOUNDARY. Everything dejima-ci-hardener installs inside the VM -
+# the job network's allowlist, the DOCKER-USER rules - is defence in depth,
+# because the premise of the privileged runner is that a compromised job
+# reaches root on that VM, and root can flush any rule set it can see. These
+# rules live on the hypervisor, applied to the VM's tap device, and the guest
+# cannot reach them.
 #
 # Requires the firewall enabled at datacenter level as well
-# (Datacenter -> Firewall -> Options -> Firewall: Yes). Without that, this
-# file is read and enforced nowhere - which looks exactly like it working.
+# (Datacenter -> Firewall -> Options -> Firewall: Yes) AND the Firewall
+# checkbox on the VM's network device. Without either, this file is read and
+# enforced nowhere - which looks exactly like it working.
 
 [OPTIONS]
 enable: 1
-# Deny by default in both directions, then enumerate. The inverse - allow with
-# a list of denies - fails open for anything the list forgot, which on this
-# box is the whole point.
+
+# Inbound denies by default: this VM offers no service anyone should reach,
+# so the list of exceptions is short and knowable.
 policy_in: DROP
-policy_out: DROP
-# Connection tracking, so a reply to something allowed out is not separately
-# allowed in.
+
+# Outbound ACCEPTs by default, and the LAN is denied explicitly below.
+#
+# The earlier version of this file did the opposite - deny outbound, then
+# allow tcp/80, tcp/443 and udp/123 - and it was wrong twice over.
+#
+# It broke things: apt during a first install, and anything else that happens
+# to need a port nobody listed. Every such breakage looks like a network
+# fault rather than a firewall rule, and each one is found the hard way.
+#
+# And it bought almost nothing. This VM is assumed to be owned by an attacker
+# with root; the guarantee being made is "reaches the internet, not your
+# network", not "reaches only three ports". Someone who owns the box tunnels
+# over 443 like everyone else, so the port list constrained honest software
+# and not them.
+#
+# Deny-by-default still applies where the protected set is enumerable, which
+# is what the four DROPs below are. It does not apply to the internet, which
+# is not, and pretending otherwise produced a rule set that looked strict and
+# only got in the way.
+policy_out: ACCEPT
+
 log_level_in: nolog
 log_level_out: nolog
 
 [RULES]
 
 # --- inbound ----------------------------------------------------------------
-# One management host. Everything else, including the rest of your LAN, is
-# dropped: this VM offers no service anyone should be reaching.
+# One management host. Everything else, including the rest of your LAN.
 IN ACCEPT -source __MGMT_IP__ -p tcp -dport 22 -log nolog
 
-# --- outbound, the two LAN exceptions ---------------------------------------
-# These are the entire remaining LAN exposure, and they are why "no LAN
-# access" is not literally true. Both are pinned to one host and one port.
+# --- the two LAN exceptions -------------------------------------------------
+# ORDER MATTERS: these must come before the DROPs below, because first match
+# wins and both of these addresses are inside the ranges those DROPs cover.
+# The console appends new rules at the bottom, so adding them in this order is
+# the whole trick.
 #
-# The forge, so the runner can fetch jobs and report results.
+# These are the entire remaining LAN exposure, and they are why "no LAN
+# access" is not literally true: the runner cannot fetch jobs without the
+# forge, and the forge's name cannot resolve without a resolver.
 OUT ACCEPT -dest __FORGE_IP__ -p tcp -dport 443 -log nolog
-# The resolver, because the forge's name has to resolve and it is internal.
 OUT ACCEPT -dest __RESOLVER_IP__ -p udp -dport 53 -log nolog
 OUT ACCEPT -dest __RESOLVER_IP__ -p tcp -dport 53 -log nolog
 
-# --- outbound, everything else on the LAN is denied -------------------------
-# Before the public allows below, because first match wins. These three lines
-# are what the whole VM exists to make true.
+# --- everything else on your network ----------------------------------------
+# The four lines the whole VM exists to make true.
 OUT DROP -dest 10.0.0.0/8 -log nolog
 OUT DROP -dest 172.16.0.0/12 -log nolog
 OUT DROP -dest 192.168.0.0/16 -log nolog
 # Link-local, which includes cloud metadata services at 169.254.169.254.
 OUT DROP -dest 169.254.0.0/16 -log nolog
 
-# --- outbound, the public internet ------------------------------------------
-# Deliberately not an allowlist. Job containers already have one, enforced
-# inside the VM by dejima-ci-hardener; duplicating it here by IP would break
-# on every CDN rotation, and against an attacker who has root in the VM it
-# would not hold anyway. What these rules guarantee is that such an attacker
-# reaches the internet and not your network - which is the trade the
-# sacrificial VM exists to make.
-OUT ACCEPT -p tcp -dport 443 -log nolog
-OUT ACCEPT -p tcp -dport 80 -log nolog
-# Time, or TLS starts failing in ways nobody enjoys diagnosing.
-OUT ACCEPT -p udp -dport 123 -log nolog
+# Nothing follows. The public internet is reached by the default policy, not
+# by a list of ports - see the note on policy_out above.

@@ -56,7 +56,7 @@ before you flip it rather than after.
 
 | Tab | Setting | Value |
 | --- | --- | --- |
-| General | Name | `oubliette` (or whatever you called it) |
+| General | Name | `oubliettebox` (or whatever you called it) |
 | OS | ISO | Debian netinst, latest stable |
 | System | Qemu Agent | ✓ |
 | Disks | Size | 64 GB is comfortable for image builds |
@@ -84,15 +84,25 @@ server out since `dejima-ci-bootstrap` configures it.
 | --- | --- |
 | Firewall | `Yes` |
 | Input Policy | `DROP` |
-| Output Policy | `DROP` |
+| Output Policy | `ACCEPT` |
 
-Deny by default in both directions, then enumerate. The inverse — allow with a
-list of denies — fails open for whatever the list forgot, which on this box is
-the entire point.
+Inbound denies by default — this VM offers no service anyone should reach, so
+the exceptions are short and knowable. Outbound accepts by default, and the
+LAN is denied explicitly below.
 
-Then **VM → Firewall → Add**, in this order. **Order matters**: rules are
-evaluated top to bottom and the first match wins, so the two LAN pinholes have
-to come before the LAN denies, and the LAN denies before the public allows.
+That asymmetry is deliberate, and it is the opposite of what an earlier
+version of this runbook said. Denying outbound and then allowing tcp/80,
+tcp/443 and udp/123 breaks things — apt during a first install, and anything
+else needing a port nobody listed — and each breakage presents as a network
+fault rather than as a firewall rule. It also bought almost nothing: this VM
+is assumed to be owned by an attacker with root, and the guarantee is *reaches
+the internet, not your network*, not *reaches only three ports*. Anyone who
+owns the box tunnels over 443 like everybody else. Deny-by-default earns its
+keep where the protected set is enumerable, which is the LAN; the internet is
+not, and pretending otherwise produced a rule set that looked strict and only
+got in the way.
+
+Then **VM → Firewall → Add**, in this order:
 
 | # | Direction | Action | Protocol | Dest. port | Source / Dest | Why |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -104,25 +114,20 @@ to come before the LAN denies, and the LAN denies before the public allows.
 | 6 | out | DROP | — | — | **Dest:** `172.16.0.0/12` | |
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
 | 8 | out | DROP | — | — | **Dest:** `169.254.0.0/16` | Link-local, incl. metadata services |
-| 9 | out | ACCEPT | tcp | 443 | — | Public HTTPS |
-| 10 | out | ACCEPT | tcp | 80 | — | Public HTTP, for apt |
-| 11 | out | ACCEPT | udp | 123 | — | NTP, or TLS starts failing oddly |
 
-Rules 2–4 are **the entire remaining LAN exposure**, and they are why "no LAN
-access" is not literally true: the runner cannot work without reaching the
-forge, and the forge's name cannot resolve without a resolver. Both are pinned
-to one host and one port.
+**Order matters, and it is the one thing here that is easy to get wrong.**
+Rules are evaluated top to bottom and the first match wins. Your forge and
+your resolver are *inside* the ranges rules 5–8 drop, so if either pinhole
+ends up below them it is dead and the runner cannot reach the forge or resolve
+anything. The console appends new rules at the bottom, so adding them in the
+order above is all it takes — but check the list afterwards, and drag rows if
+they are out of sequence.
 
-Rules 9–11 are deliberately **not** an allowlist. Job containers already have
-one, enforced inside the VM; duplicating it by IP here would break on every
-CDN rotation, and against an attacker with root in the VM it would not hold
-anyway. The guarantee is narrower and honest: *an attacker who owns this VM
-reaches the internet, and not your network.*
+Rules 2–4 are the entire remaining LAN exposure, and they are why "no LAN
+access" is not literally true. Both destinations are pinned to one host and
+one port.
 
-`proxmox/firewall.fw.template` in this directory is the same rules as the file
-Proxmox writes, if you would rather read them in one piece than click through
-eleven rows. It is reference, not something to install — the console is the
-supported path here.
+Nothing follows rule 8. The public internet is reached by the default policy.
 
 ### Check it, rather than assuming it
 
@@ -132,17 +137,28 @@ On the node:
 pve-firewall compile | grep -A30 "vm-<vmid>"
 ```
 
-and from inside the VM, once it is up — each of these should hang and fail:
+and from inside the VM, once it is up. Two of these must fail and two must
+succeed, which is what makes the set diagnostic rather than reassuring:
 
 ```sh
-# a LAN host that is not the forge or the resolver
+# a LAN host that is not the forge or the resolver - must NOT connect
 timeout 5 nc -vz <some-other-lan-ip> 22 ; echo "rc=$?"
-# the forge, which should succeed
+# the forge - must connect
 timeout 5 nc -vz <forge-ip> 443 ; echo "rc=$?"
+# name resolution, which goes through the resolver pinhole
+getent hosts deb.debian.org ; echo "rc=$?"
+# the public internet, which the default policy allows
+timeout 5 nc -vz deb.debian.org 80 ; echo "rc=$?"
 ```
 
-If the first one connects, the firewall is not in force. Check the Network
-device's Firewall checkbox and the datacenter switch before anything else.
+Read them together, because the pattern says which thing is wrong:
+
+- **First one connects** → the firewall is not in force at all. Check the
+  Network device's Firewall checkbox and the datacenter switch.
+- **Second or third fails while the fourth works** → a pinhole is below the
+  LAN DROPs. Check the rule order.
+- **Everything fails** → the VM has no working route or DNS at all, which is
+  a networking problem rather than a firewall one.
 
 ---
 
