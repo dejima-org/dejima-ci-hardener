@@ -124,87 +124,97 @@ say "in brackets."
 say
 
 # --- the job network --------------------------------------------------------
-say "The JOB network: the one job containers attach to, named by"
-say "container.network in the runner's config.yaml. The firewall rules match on"
-say "its bridge, which is why the bridge name is fixed rather than left for"
-say "Docker to generate."
+say "=============================================================="
+say " The job network"
+say "=============================================================="
 say
-say "This is NOT the compose network the act_runner containers themselves sit"
-say "on - those are usually named <project>_<network> and are a different thing"
-say "entirely. It is also not needed by the privileged runner at all, whose"
-say "jobs run in the host network namespace."
+say "A Docker network for job containers to run on, which this installer will"
+say "create. Name it whatever you like - it only has to match container.network"
+say "in each ordinary runner's config.yaml."
 say
-# Listed with the bridge each one uses, because that is what actually
-# distinguishes the job network from a compose project's own: the job network
-# has the fixed bridge the firewall rules name.
-#
-# The whole block is guarded. A grep that matches nothing exits 1, and under
-# `set -euo pipefail` inside a command substitution that ends the installer
-# with no message at all - which is what an earlier version of this did on a
-# host where every network name happened to be filtered out. Nothing here is
-# load-bearing enough to stop an install.
-if command -v docker >/dev/null 2>&1; then
-    net_list=$(docker network ls --format '{{.Name}}' 2>/dev/null \
-        | grep -vxE 'bridge|host|none' || true)
-    if [ -n "$net_list" ]; then
-        say "  networks on this host, and the bridge each uses:"
-        while IFS= read -r n; do
-            [ -n "$n" ] || continue
-            b=$(docker network inspect "$n" \
-                -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
-            if [ -z "$b" ]; then
-                nid=$(docker network inspect "$n" -f '{{.Id}}' 2>/dev/null || true)
-                [ -z "$nid" ] || b="br-${nid:0:12} (generated)"
-            fi
-            printf '    %-40s %s\n' "$n" "${b:-?}" >&2
-        done <<< "$net_list"
-    fi
-fi
-ask network "Job network name" "$(cfg_get network)"
+say "The privileged runner needs none: its jobs run in the host network"
+say "namespace, which is the grant they exist for."
+say
+
+ask network "Job network name (e.g. dejima-ci)" "$(cfg_get network)"
 : "${network:=dejima-ci}"
+say
 
-# Read the bridge off the network rather than asking twice and letting the two
-# disagree - a firewall matching a bridge that is not the one jobs are on is
-# the failure this whole tool exists to prevent, and it looks identical to a
-# working setup.
-detected_bridge=""
+# Derived, not asked. Docker takes the first usable address of the subnet as
+# the gateway, and the bridge is whatever name we give at creation - so two
+# more prompts would only be two more chances for the answers to disagree
+# with reality.
+valid_cidr() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    local o=("${BASH_REMATCH[@]:1:4}") pfx="${BASH_REMATCH[5]}"
+    for n in "${o[@]}"; do [ "$n" -le 255 ] || return 1; done
+    [ "$pfx" -ge 8 ] && [ "$pfx" -le 30 ]
+}
+is_private() {
+    [[ "$1" =~ ^10\. ]] && return 0
+    [[ "$1" =~ ^192\.168\. ]] && return 0
+    [[ "$1" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0
+    return 1
+}
+
 if docker network inspect "$network" >/dev/null 2>&1; then
-    detected_bridge=$(docker network inspect "$network" \
-        -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)
-    if [ -z "$detected_bridge" ]; then
-        # Docker generates br-<first 12 of the network id> when the option was
-        # not set at creation. Derived rather than asked for, because nobody
-        # knows it off hand and getting it wrong fails silently.
-        netid=$(docker network inspect "$network" -f '{{.Id}}' 2>/dev/null)
-        [ -z "$netid" ] || detected_bridge="br-${netid:0:12}"
-        say "  NOTE: $network has no fixed bridge name, so Docker generated"
-        say "  ${detected_bridge:-one}. That works, but it changes if the network is"
-        say "  recreated - and the rules would then match nothing. Consider"
-        say "  recreating it with --opt com.docker.network.bridge.name=."
+    # Already there: read what it actually is rather than asking and hoping.
+    subnet=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
+    gateway=$(docker network inspect "$network" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    bridge=$(docker network inspect "$network" \
+        -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+    if [ -z "$bridge" ]; then
+        nid=$(docker network inspect "$network" -f '{{.Id}}' 2>/dev/null || true)
+        bridge="br-${nid:0:12}"
+        say "  NOTE: $network was created without a fixed bridge name, so Docker"
+        say "  generated $bridge. That works, but it changes if the network is ever"
+        say "  recreated - and the firewall rules would then match nothing."
+        say
     fi
-    say "  bridge for $network: ${detected_bridge:-<unknown>}"
-fi
-ask bridge "Bridge interface name(s), space-separated" "${detected_bridge:-$(cfg_get bridge)}"
-: "${bridge:=dejima-ci0}"
-
-say
-say "The bridge's gateway. The resolver listens here and job containers are"
-say "pointed at it by the runner's --dns. Use a PRIVATE range - dnsmasq's"
-say "stop-dns-rebind is keyed on the private ranges, so a reserved-but-not-"
-say "private subnet is one that check silently does not cover."
-ask gateway "Gateway address" "$(cfg_get gateway)"
-ask subnet  "Subnet" "$(cfg_get subnet)"
-: "${gateway:=10.89.0.1}"
-: "${subnet:=10.89.0.0/24}"
-say
-
-if docker network inspect "$network" >/dev/null 2>&1; then
-    say "  exists     docker network $network"
+    say "  $network already exists:"
+    say "    subnet   $subnet"
+    say "    gateway  $gateway"
+    say "    bridge   $bridge"
 else
+    say "Its subnet. Must be PRIVATE - dnsmasq's stop-dns-rebind is keyed on the"
+    say "private ranges, so a reserved-but-not-private subnet is one that check"
+    say "silently does not cover. Pick one outside Docker's default pool"
+    say "(172.17-172.31, 192.168.x) so an unrelated network cannot collide."
+    say
+    while :; do
+        ask subnet "Subnet in CIDR form (e.g. 10.89.0.0/24)" "${subnet:-$(cfg_get subnet)}"
+        : "${subnet:=10.89.0.0/24}"
+        valid_cidr "$subnet" || { say "  not a CIDR block - it needs the form 10.89.0.0/24"; subnet=""; continue; }
+        is_private "$subnet" || { say "  $subnet is not a private range - use 10.x, 172.16-31.x or 192.168.x"; subnet=""; continue; }
+        break
+    done
+
+
+    # Interface names are capped at 15 characters by the kernel.
+    bridge="${network}0"
+    if [ ${#bridge} -gt 15 ]; then
+        bridge="${bridge:0:15}"
+        say "  NOTE: bridge name truncated to $bridge (interface names cap at 15)."
+    fi
+
+    say
     docker network create \
         --opt com.docker.network.bridge.name="$bridge" \
-        --subnet "$subnet" "$network" >/dev/null
-    say "  created    docker network $network ($bridge, $subnet)"
+        --subnet "$subnet" "$network" >/dev/null \
+        || die "could not create the network - is $subnet already in use? (docker network ls)"
+
+    # Read the gateway back rather than computing it. Docker decides it, and a
+    # value derived here would be a second opinion that can differ - which for
+    # the resolver's listen-address and the runner's --dns is the difference
+    # between working and silently not.
+    gateway=$(docker network inspect "$network" \
+        -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    [ -n "$gateway" ] || die "created $network but could not read its gateway back"
+
+    say "  created    docker network $network"
+    say "    subnet   $subnet"
+    say "    gateway  $gateway   (Docker's, read back - the resolver listens here)"
+    say "    bridge   $bridge   (fixed, so the firewall rules can name it)"
 fi
 say
 
