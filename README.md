@@ -139,9 +139,14 @@ It is *not* the dnsmasq this configures (that would loop), and *not* the job
 bridge gateway. It is whatever this host already resolves with:
 
 ```sh
-resolvectl status | grep 'DNS Servers'    # systemd-resolved
-grep nameserver /etc/resolv.conf          # otherwise
+grep nameserver /etc/resolv.conf
 ```
+
+On a host running systemd-resolved that gives you `127.0.0.53`, the local
+stub, which is not an answer - `resolvectl status | grep 'DNS Servers'` is,
+and names the servers behind it. Anywhere else `resolvectl` is simply absent,
+including on a VM built by the runbook above. Do not install it to find this
+out; `/etc/resolv.conf` is the answer on that machine.
 
 It has to resolve everything on the allowlist, **including your forge** - so
 if that name is internal, this has to be your internal DNS. `no-resolv` in the
