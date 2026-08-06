@@ -99,7 +99,7 @@ read_config() {
 # that pointed there or what to put in it.
 declare -A HINT=(
     [forge_api]="your forge's API root, e.g. https://gitea.example.com/api/v1"
-    [upstream]="the resolver dnsmasq forwards ALLOWED queries to - the one that knows the answers, not this dnsmasq and not the bridge gateway. Whatever this host already resolves with: resolvectl status, or /etc/resolv.conf"
+    [upstream]="the resolver dnsmasq forwards ALLOWED queries to - the one that knows the answers, not this dnsmasq and not the bridge gateway. Whatever this host already resolves with: grep nameserver /etc/resolv.conf, or - if that says 127.0.0.53 - resolvectl status"
     [out]="where the generated allowlist is written, e.g. /etc/dnsmasq.d/ci-allow.conf"
     [ref]="the branch treated as operator-approved, normally main"
     [reload]="the command that reloads the resolver, e.g. systemctl reload dnsmasq"
