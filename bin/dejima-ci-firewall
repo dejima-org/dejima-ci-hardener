@@ -94,43 +94,66 @@ ipset create "$SET" hash:net -exist
 
 # --- job egress: DOCKER-USER is the chain Docker jumps to first from FORWARD,
 # --- and the only one whose contents Docker will not rewrite underneath you.
-iptables -F DOCKER-USER
-ip6tables -F DOCKER-USER
+# Own a chain per table rather than appending into shared ones. This script
+# runs on every Docker start (see dejima-ci-firewall.service), and appending
+# to INPUT meant a fresh copy of every rule each time - a chain that grows
+# without bound, and a listing nobody can read to check what is in force.
+# Flushing INPUT instead is not an option: it belongs to the host.
+#
+# DOCKER-USER gets the same treatment for a different reason: Docker owns it,
+# but so might another tool on the same box, and flushing it wholesale would
+# take their rules with ours.
+for ipt in iptables ip6tables; do
+    # DOCKER-USER is Docker's, and in the v6 table it exists only when Docker
+    # manages ip6tables. Creating it when absent keeps the jump below from
+    # aborting the script on a host where it is not there.
+    "$ipt" -N DOCKER-USER 2>/dev/null || true
+    for chain in DEJIMA-CI-FWD DEJIMA-CI-IN; do
+        "$ipt" -N "$chain" 2>/dev/null || true
+        "$ipt" -F "$chain"
+    done
+    # -C then -I: idempotent, and inserted at the head so these are evaluated
+    # before whatever else the host allows.
+    "$ipt" -C DOCKER-USER -j DEJIMA-CI-FWD 2>/dev/null \
+        || "$ipt" -I DOCKER-USER -j DEJIMA-CI-FWD
+    "$ipt" -C INPUT -j DEJIMA-CI-IN 2>/dev/null \
+        || "$ipt" -I INPUT -j DEJIMA-CI-IN
+done
 
 # Return traffic for connections that were allowed on their way out.
 # Every rule below is applied per bridge. The chain flushes above happen
 # once, outside this loop - flushing per bridge would delete the rules
 # added for the previous one.
 for b in "${BRIDGES[@]}"; do
-    iptables -A DOCKER-USER -i "$b" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A DEJIMA-CI-FWD -i "$b" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
     # The allowlist proper. Port-restricted: a name being allowed is not a reason
     # for every port on it to be reachable.
-    iptables -A DOCKER-USER -i "$b" -p tcp -m set --match-set "$SET" dst \
+    iptables -A DEJIMA-CI-FWD -i "$b" -p tcp -m set --match-set "$SET" dst \
         -m multiport --dports 80,443 -j ACCEPT
 
     # Uncomment for git-over-ssh to a forge. Prefer https where the forge offers
     # it, so that this stays closed.
-    # iptables -A DOCKER-USER -i "$b" -p tcp --dport 22 -m set --match-set "$SET" dst -j ACCEPT
+    # iptables -A DEJIMA-CI-FWD -i "$b" -p tcp --dport 22 -m set --match-set "$SET" dst -j ACCEPT
 
     # REJECT rather than DROP: a job that cannot reach something should fail
     # immediately and say so, not hang until a timeout and read as a slow network.
-    iptables -A DOCKER-USER -i "$b" -j REJECT --reject-with icmp-port-unreachable
+    iptables -A DEJIMA-CI-FWD -i "$b" -j REJECT --reject-with icmp-port-unreachable
 
     # --- the resolver: addressed to this host, so it never reaches DOCKER-USER.
-    iptables -A INPUT -i "$b" -p udp --dport 53 -j ACCEPT
-    iptables -A INPUT -i "$b" -p tcp --dport 53 -j ACCEPT
+    iptables -A DEJIMA-CI-IN -i "$b" -p udp --dport 53 -j ACCEPT
+    iptables -A DEJIMA-CI-IN -i "$b" -p tcp --dport 53 -j ACCEPT
 
     # Everything else aimed at this host from the job network - the SSH daemon,
     # act_runner's cache server if you left it on, anything else listening - is
     # not part of running a job.
-    iptables -A INPUT -i "$b" -j REJECT --reject-with icmp-port-unreachable
+    iptables -A DEJIMA-CI-IN -i "$b" -j REJECT --reject-with icmp-port-unreachable
 
     # --- IPv6: blocked outright, because none of the above has an IPv6 twin.
     # An address family with no allowlist is not a smaller hole than the one this
     # script just closed; on a host with IPv6 egress it is the same hole.
-    ip6tables -A DOCKER-USER -i "$b" -j REJECT --reject-with icmp6-port-unreachable
-    ip6tables -A INPUT -i "$b" -j REJECT --reject-with icmp6-port-unreachable
+    ip6tables -A DEJIMA-CI-FWD -i "$b" -j REJECT --reject-with icmp6-port-unreachable
+    ip6tables -A DEJIMA-CI-IN -i "$b" -j REJECT --reject-with icmp6-port-unreachable
 done
 
 # These are not persistent. Reapply on boot, and after anything that reloads
