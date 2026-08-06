@@ -242,7 +242,7 @@ Read them together, because the pattern says which thing is wrong:
 ```sh
 ssh <you>@<vm-ip>
 sudo apt-get update && sudo apt-get install -y git   # if the install left it out
-git clone https://gitbox.example.com/branderson/dejima-ci-hardener.git
+git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
 sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-management-ip>
 ```
