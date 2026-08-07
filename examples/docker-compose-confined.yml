@@ -12,10 +12,13 @@
 # service here to a network does not put its jobs there, and vice versa. See
 # docs/reference.md for what that means for isolating jobs from each other.
 #
-# Not runnable as written: substitute your own instance URL, image tag and
-# subnet, and create the job network first - install.sh does it for you.
+# @@NOTE_BEGIN@@
+# TEMPLATE. `dejima-ci-runners` renders this to ~/runners/docker-compose.yml,
+# substituting the @@MARKER@@ values and repeating the fenced service block
+# once per runner you asked for. This header is replaced in the rendered copy.
+# @@NOTE_END@@
 
-name: dejima-runners
+name: "@@PROJECT@@"
 
 # Shared by every confined runner. Volumes are per-service rather than here,
 # because each runner needs its own /data - and YAML merge keys merge mappings
@@ -25,7 +28,7 @@ x-ci-runner: &ci-runner
   # Pin the tag. These processes execute untrusted code on every pull request,
   # and :latest means the thing doing that can change without you deciding it
   # should.
-  image: gitea/act_runner:0.6.1
+  image: "@@IMAGE@@"
   restart: unless-stopped
   networks: [runners]
 
@@ -35,7 +38,7 @@ x-ci-env: &ci-env
   # every job container and nothing anywhere says so. If you change one thing
   # in a config file and see no effect, check this first.
   CONFIG_FILE: /config.yaml
-  GITEA_INSTANCE_URL: https://gitea.example.com
+  GITEA_INSTANCE_URL: "@@INSTANCE_URL@@"
   # Needed only until each runner has registered; the identity then lives in
   # that runner's own /data volume. Comes from a .env file beside this one
   # (chmod 600) so it is not in the file you commit, and is worth deleting
@@ -45,15 +48,17 @@ x-ci-env: &ci-env
 
 services:
   # --- confined runners -----------------------------------------------------
-  # All three share one config file, and therefore one label and one job
-  # network. That is what makes them a pool: a job naming dejima-ci lands on
-  # whichever is free. Only the name and the data volume differ.
-  ci-1:
+  # Every one of them shares this directory's config.yaml, and therefore one
+  # label and one job network. That is what makes them a pool: a job naming
+  # @@LABEL@@ lands on whichever is free. Only the name and the data volume
+  # differ.
+# @@SERVICE_BEGIN@@
+  "@@LABEL@@-@@N@@":
     <<: *ci-runner
-    container_name: dejima-ci-1
+    container_name: "@@LABEL@@-@@N@@"
     environment:
       <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-1
+      GITEA_RUNNER_NAME: "@@LABEL@@-@@N@@"
     volumes:
       # The runner's OWN access to the daemon, so it can create job
       # containers. NOT the same setting as container.docker_host, which
@@ -61,32 +66,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Read-only: a runner has no reason to rewrite the file deciding what
       # its jobs are granted.
-      - ./act-runner-confined.yaml:/config.yaml:ro
+      - ./config.yaml:/config.yaml:ro
       # Its registration identity. One per runner, never shared - two runners
       # cannot share a .runner.
-      - ci-1-data:/data
-
-  ci-2:
-    <<: *ci-runner
-    container_name: dejima-ci-2
-    environment:
-      <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-2
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-confined.yaml:/config.yaml:ro
-      - ci-2-data:/data
-
-  ci-3:
-    <<: *ci-runner
-    container_name: dejima-ci-3
-    environment:
-      <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-3
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-confined.yaml:/config.yaml:ro
-      - ci-3-data:/data
+      - "@@LABEL@@-@@N@@-data:/data"
+# @@SERVICE_END@@
 
 networks:
   # The runner containers' own network, and nothing else's. They need it only
@@ -104,6 +88,6 @@ networks:
   runners:
 
 volumes:
-  ci-1-data:
-  ci-2-data:
-  ci-3-data:
+# @@VOLUME_BEGIN@@
+  "@@LABEL@@-@@N@@-data":
+# @@VOLUME_END@@

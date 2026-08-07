@@ -18,6 +18,7 @@ BIN_DIR=${BIN_DIR:-/usr/local/sbin}
 CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
 DNSMASQ_DIR=${DNSMASQ_DIR:-/etc/dnsmasq.d}
+TEMPLATE_DIR=${TEMPLATE_DIR:-/usr/local/share/dejima-ci/templates}
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG="$CONF_DIR/config"
@@ -465,7 +466,7 @@ out = $out
 ref = $ref
 reload = $reload"
 
-for prog in dejima-ci-allowlist dejima-ci-firewall; do
+for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners; do
     if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
         say "  unchanged  $BIN_DIR/$prog"
     else
@@ -473,6 +474,24 @@ for prog in dejima-ci-allowlist dejima-ci-firewall; do
         say "  installed  $BIN_DIR/$prog"
     fi
 done
+
+# The templates dejima-ci-runners renders. Installed rather than read from the
+# checkout, because it is installed too and has to keep working once whatever
+# clone it came from is gone.
+if writable "$TEMPLATE_DIR"; then
+    for tpl in "$SRC"/examples/*; do
+        [ -f "$tpl" ] || continue
+        if cmp -s "$tpl" "$TEMPLATE_DIR/${tpl##*/}" 2>/dev/null; then
+            say "  unchanged  $TEMPLATE_DIR/${tpl##*/}"
+        else
+            install -m 0644 "$tpl" "$TEMPLATE_DIR/${tpl##*/}"
+            say "  installed  $TEMPLATE_DIR/${tpl##*/}"
+        fi
+    done
+else
+    say "  skipped    $TEMPLATE_DIR (not writable) - dejima-ci-runners will read"
+    say "             them from this checkout instead"
+fi
 
 # The resolver's static half. Its generated half - the server= lines - is
 # written by dejima-ci-allowlist from origin/main, into a separate file in the
@@ -525,56 +544,56 @@ fi
 
 say
 say "=============================================================="
-say " What is left to do"
+say " The runners"
 say "=============================================================="
 say
-say "This installer cannot configure or register your runners - that needs a"
-say "token from your forge, and the config file lives wherever your runner's"
-say "compose mounts it from. Everything below is on you."
+say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
+say "behind it yet, because no runner is configured on this host."
 say
-say "1. In the config.yaml of every runner whose jobs should be filtered:"
+say "This used to be a list of five things to copy into a runner's config by"
+say "hand, and every one of them was a value that had to match a value here:"
+say "container.network with $network, --dns with $gateway,"
+say "CONFIG_FILE with the path the compose file mounts to. Getting any of them"
+say "wrong produces a runner that starts and runs jobs and filters nothing."
 say
-say "     container:"
-say "       network: $network"
-say "       docker_host: \"-\""
-say "       options: \"--dns=$gateway --init --security-opt=no-new-privileges\""
-say "       valid_volumes: []"
-say "       privileged: false"
+say "$BIN_DIR/dejima-ci-runners writes both files from what is in"
+say "$CONFIG, so there is nothing to keep in step by hand."
 say
-say "   network must be exactly \"$network\" - the name, not the bridge."
-say "   --dns must be exactly $gateway, matching the resolver's listen-address."
-say "   docker_host: \"-\" is the one value that stops the Docker socket being"
-say "   mounted into job containers; unset is the default and the default mounts."
+
+run_runners=n
+if [ "$NONINTERACTIVE" -eq 0 ]; then
+    ask run_runners "Set up the runners now? (Y/n)" "y"
+fi
+if [ "${run_runners,,}" != n ] && [ "${run_runners,,}" != no ]; then
+    say
+    # Not exec'd and not fatal: everything above this point is installed and
+    # correct, and a runner that needs a second attempt should not read as the
+    # allowlist having failed.
+    "$BIN_DIR/dejima-ci-runners" --role confined || \
+        say "  runner setup did not finish - re-run $BIN_DIR/dejima-ci-runners --role confined"
+else
+    say "Skipped. When you are ready:"
+    say
+    say "  $BIN_DIR/dejima-ci-runners --role confined"
+    say
+    say "It asks for a label and a count, takes the network and resolver from"
+    say "$CONFIG, and tells you which page of your forge mints"
+    say "the registration token."
+fi
+
 say
-say "2. Give that runner a label no other runner carries, so a job naming it"
-say "   cannot land somewhere unhardened:"
+say "Then verify from inside a job rather than from this host. A runner that"
+say "grants the socket looks identical to one that does not, from out here and"
+say "from your forge's UI. dejima ships test/ci-runner.bats for exactly this."
+say "If the DNS checks pass while the egress checks fail, the resolver is fine"
+say "and the firewall is not:"
 say
-say "     runner:"
-say "       labels:"
-say "         - \"your-label:docker://node:20-bookworm\""
-say "       capacity: 1"
-say "     cache:"
-say "       enabled: false"
+say "  $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
 say
-say "3. Make sure CONFIG_FILE=/config.yaml is in that runner's environment."
-say "   Without it the file is not read at all and every default applies -"
-say "   including the socket reaching every job - with nothing saying so."
-say
-say "4. Restart the runner, then confirm it took:"
-say
-say "     docker compose restart      # wherever your runner lives"
-say
-say "5. Verify from inside a job, rather than from this host. dejima ships"
-say "   test/ci-runner.bats for exactly this; a job on the hardened runner"
-say "   should show the Docker socket absent, an off-list name not resolving,"
-say "   and an off-list address unreachable. If the DNS checks pass while the"
-say "   egress checks fail, the resolver is fine and the firewall is not:"
-say
-say "     $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
-say
-say "For a runner using host networking, none of steps 1-2 apply: its jobs are"
-say "in the host's namespace, no bridge is in front of them, and the rules"
-say "installed here do not filter them. Its egress is that machine's own."
+say "A runner using host networking is not covered by any of this: its jobs"
+say "are in the host's namespace, no bridge is in front of them, and the rules"
+say "installed here do not filter them. That is the privileged tier, and it"
+say "belongs on its own machine - see the README."
 say
 say "Files this installer owns, for later reference:"
 say "  config       $CONFIG"

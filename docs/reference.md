@@ -32,6 +32,12 @@ says so. If a config change appears to have no effect, check this first.
 Mount the config read-only: a runner has no reason to rewrite the file that
 decides what its jobs are granted.
 
+`dejima-ci-runners` sets both, and checks after starting that `CONFIG_FILE` is
+what it wrote — it is the one variable whose absence makes every other setting
+inert, so it is verified rather than assumed. That check is worth knowing about
+if you ever hand-edit the generated compose file: removing it there produces a
+runner that looks configured and is not.
+
 ## The `/data` volume
 
 It holds `.runner`, written at registration: the runner's identity and its

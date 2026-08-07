@@ -370,6 +370,21 @@ elif [ "$ROLE" = privileged ]; then
     say
     say "If this machine also runs confined runners - not recommended, and not"
     say "what the tiering is for - run ./install.sh by hand."
+
+    # The runner itself still has to be built, and on this role install.sh is
+    # not there to do it. Install the generator and its templates directly, so
+    # that this host ends up with the same "re-run it to change something"
+    # story as a confined one rather than a hand-written compose file.
+    install -m 0755 "$SRC/bin/dejima-ci-runners" /usr/local/sbin/dejima-ci-runners
+    install -d -m 0755 /usr/local/share/dejima-ci/templates
+    for tpl in "$SRC"/examples/*; do
+        [ -f "$tpl" ] && install -m 0644 "$tpl" "/usr/local/share/dejima-ci/templates/${tpl##*/}"
+    done
+    say
+    say "  installed  /usr/local/sbin/dejima-ci-runners"
+    say
+    /usr/local/sbin/dejima-ci-runners --role privileged || \
+        say "  runner setup did not finish - re-run dejima-ci-runners --role privileged"
 else
     say
     say "Running install.sh for the allowlist, resolver and job firewall..."
@@ -395,14 +410,14 @@ cat >&2 <<EOF
    is still not a boundary: root here can drop it. The node's firewall is the
    boundary.
 
-2. Register the runner. This script does not, because it needs a token from
-   your forge:
+2. If you skipped the runner setup above, or it did not finish, run it. It
+   writes the compose project and the runner config together, so nothing has
+   to be kept in step by hand:
 
-     - role confined:   label it something no other runner carries, and point
-                        container.network / --dns at what install.sh printed
-     - role privileged: socket and host netns. Give it one label that nothing
-                        else carries, and grant it to as few repositories as
-                        you can stand.
+     dejima-ci-runners --role $ROLE
+
+   It needs a registration token from your forge and names the exact page to
+   mint one on. Grant it to as few repositories as you can stand.
 
 3. In the Proxmox console, once step 2 shows the runner Online, snapshot this
    VM - BEFORE the first job runs, and with 'Include RAM' UNTICKED:

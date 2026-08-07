@@ -143,19 +143,45 @@ if that name is internal, this has to be your internal DNS. `no-resolv` in the
 dnsmasq config means it will not read `/etc/resolv.conf` itself, which is why
 it must be named explicitly.
 
-## The runner
+## The runners
 
-`install.sh` does not register runners - that needs a token from your forge
-and is the one step it cannot do for you.
+`install.sh` offers to do this at the end, and it is the same command either
+way:
 
-| File | Install as |
-| --- | --- |
-| `examples/act-runner-confined.yaml` | the runner's `config.yaml` |
-| `examples/docker-compose-confined.yml` | several runners on one host |
-| `examples/docker-daemon.json` | `/etc/docker/daemon.json` - merge, do not overwrite |
+```sh
+sudo dejima-ci-runners --role confined
+```
 
-Set `--dns=<your gateway>` in `container.options`, and register at
-**repository or organization** scope - see [Register scope is the
+It writes a compose project to `~/runners` - `docker-compose.yml`,
+`config.yaml` and a `0600` `.env` - brings it up, and then checks each runner
+actually registered rather than assuming it did.
+
+It asks for a label and how many runners you want. It does **not** ask for the
+job network or the resolver address: those come from the config `install.sh`
+wrote, because they have to match what it built, and a value that has to match
+something else is not a value to retype. That was the failure this replaces -
+`container.network`, `--dns` and `CONFIG_FILE` were three things to keep in
+step by hand, and each of them drifts silently, leaving a runner that starts,
+accepts jobs, and filters nothing.
+
+The one thing it cannot do is mint the registration token, which lives in your
+forge's UI. It prints the exact page for the scope you want and waits.
+
+To change something later - another runner, a different label, a new
+`act_runner` image - re-run it. Re-running with the same answers changes
+nothing, so it is safe to do casually:
+
+```sh
+sudo dejima-ci-runners --role confined --count 5 --non-interactive
+```
+
+`examples/` holds the annotated templates it renders. Read them there to see
+why each setting is what it is; the rendered copies say `DO NOT EDIT` because
+the next run overwrites them. `examples/docker-daemon.json` is the exception -
+it is not rendered, and goes into `/etc/docker/daemon.json` by hand, merged
+rather than overwritten.
+
+Register at **repository or organization** scope - see [Register scope is the
 boundary](#register-scope-is-the-boundary-the-label-is-not).
 
 ---
@@ -226,15 +252,31 @@ needs refreshing every month or two.
 
 ## The runner
 
-| File | Install as |
-| --- | --- |
-| `examples/act-runner-privileged.yaml` | the runner's `config.yaml`, on its own host |
-| `examples/docker-compose-privileged.yml` | the runner itself |
+`dejima-ci-bootstrap` offers to do this at the end. On its own:
+
+```sh
+sudo dejima-ci-runners --role privileged --forge https://gitea.example.com
+```
+
+Same command as the other tier, same `~/runners` project, same registration
+check. Three things differ, and each follows from the tier rather than being a
+setting you pick:
+
+- **One runner, not asked.** A second runner here would share the machine that
+  is already assumed lost rather than getting one of its own.
+- **`--forge` is required.** There is no `install.sh` config on this host to
+  read it from, because `install.sh` never runs here.
+- **It asks which host paths jobs may bind-mount.** A volume a workflow asks
+  for and `valid_volumes` does not name is dropped *silently*, so this has to
+  match what your workflows request. `none` allows nothing.
+
+There is no `--dns` to set and no job network to join: its jobs are in the
+host's namespace, which is the grant the tier exists for.
 
 Give it one label that nothing else carries, and grant it to as few
-repositories as you can stand. There is no `--dns` to set and no job network
-to join: its jobs are in the host's namespace, which is the grant the tier
-exists for.
+repositories as you can stand. Then **take the clean snapshot** - see
+[proxmox/README.md](proxmox/README.md) §5. A snapshot taken after the first
+job has run preserves whatever that job left.
 
 ---
 
@@ -294,6 +336,14 @@ dejima-ci-allowlist check    # what would change, without changing it
 dejima-ci-allowlist render   # fetch, validate, install, reload if changed
 dejima-ci-allowlist show     # what is installed right now
 dejima-ci-firewall           # reapply the egress rules
+```
+
+`dejima-ci-runners` is installed on both tiers, and is how the runners
+themselves are changed:
+
+```sh
+dejima-ci-runners --role confined --count 5 --non-interactive   # grow the pool
+dejima-ci-runners --role confined                               # change anything else
 ```
 
 Exit codes are distinguishable on purpose, because a timer's alerting has to
