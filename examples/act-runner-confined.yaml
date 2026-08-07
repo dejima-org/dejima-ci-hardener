@@ -1,5 +1,5 @@
 # act_runner configuration for a runner that executes agent-authored code and
-# is granted nothing to execute it with. This is the ordinary tier: everything
+# is granted nothing to execute it with. This is the confined tier: everything
 # except the one job that genuinely needs a Docker daemon belongs here.
 #
 # Written against act_runner v0.6.1. Check yours with `act_runner --version`,
@@ -8,9 +8,9 @@
 # one without anything in a job's output looking different.
 #
 # Not runnable as written: pick your own network name, subnet and label, and
-# see ci/README.md for the order things have to be created in.
+# see this repository's README for the order things have to be created in.
 #
-# See docs/ci.md for why each of these is here.
+# See dejima's docs/ci.md for why each of these is here.
 
 log:
   level: info
@@ -72,7 +72,7 @@ container:
   # A network created ahead of time, with a named bridge, so that the
   # interface name and gateway are stable enough to write firewall rules
   # against. Left empty, act_runner creates one per job and there is nothing
-  # fixed to match on. See ci/iptables-ci.example.sh.
+  # fixed to match on. See bin/dejima-ci-firewall.
   #
   # NOT `host`: that would put jobs in this machine's network namespace, where
   # no bridge-based filtering applies to them at all.

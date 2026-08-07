@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
 # Take a fresh Debian install to a hardened CI runner host.
 #
 # Runs INSIDE the VM. The firewall that keeps this machine off your LAN is not
@@ -22,16 +25,17 @@ SKIP_HARDENER=0
 
 usage() {
     cat >&2 <<EOF
-Usage: sudo $PROG --role ci|runtime [--mgmt IP] [--skip-hardener]
+Usage: sudo $PROG --role confined|privileged [--mgmt IP] [--skip-hardener]
 
-  --role ci        the ordinary tier: no Docker socket in job containers,
-                   deny-by-default job egress
-  --role runtime   the privileged tier: its jobs get the socket and the host
-                   network namespace. This host is the one to treat as lost
-  --mgmt IP        restrict sshd to this source as well as the node firewall
-  --skip-hardener  do the host hardening only, not the allowlist install.
-                   Implied by --role runtime, where the allowlist has nothing
-                   to attach to
+  --role confined    jobs are confined on this host: no Docker socket in job
+                     containers, own bridge network, deny-by-default egress
+  --role privileged  jobs get the socket and the host network namespace, so
+                     nothing on this host can confine them. Treat it as lost;
+                     the boundary is the hypervisor's firewall
+  --mgmt IP          restrict sshd to this source as well as the node firewall
+  --skip-hardener    do the host hardening only, not the allowlist install.
+                     Implied by --role privileged, where the allowlist has
+                     nothing to attach to
 EOF
     exit 2
 }
@@ -46,7 +50,16 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-case "$ROLE" in ci|runtime) ;; *) usage ;; esac
+# `ci` and `runtime` were the original spellings. They named the tiers after
+# what dejima used them for rather than after what a job on them is granted,
+# which is the thing that has to be legible to anyone else. Still accepted,
+# and said out loud rather than translated silently.
+case "$ROLE" in
+    confined|privileged) ;;
+    ci)      echo "$PROG: --role ci is now --role confined" >&2;      ROLE=confined ;;
+    runtime) echo "$PROG: --role runtime is now --role privileged" >&2; ROLE=privileged ;;
+    *) usage ;;
+esac
 
 die() { echo "$PROG: $*" >&2; exit 1; }
 say() { printf '%s\n' "$*" >&2; }
@@ -70,14 +83,14 @@ apt-get update -qq
 # machine whose value is a small surface - drops it. apt then reports success,
 # the daemon is installed, and there is no `docker` binary at all.
 #
-# ipset and dnsmasq belong to install.sh, which only runs on the ordinary
-# tier. The runtime tier's jobs are in the host network namespace, where a job
-# network's resolver and its ipset have nothing to sit in front of - so on that
-# role these install an unused listener on port 53, on the machine this same
-# script strips listeners from forty lines below. iptables stays either way:
-# the host's own egress policy uses it on both roles.
+# ipset and dnsmasq belong to install.sh, which only runs on the confined
+# tier. The privileged tier's jobs are in the host network namespace, where a
+# job network's resolver and its ipset have nothing to sit in front of - so on
+# that role these install an unused listener on port 53, on the machine this
+# same script strips listeners from forty lines below. iptables stays either
+# way: the host's own egress policy uses it on both roles.
 tier_packages=""
-if [ "$ROLE" = ci ]; then
+if [ "$ROLE" = confined ]; then
     tier_packages="ipset dnsmasq"
 fi
 apt-get install -y -qq --no-install-recommends \
@@ -193,11 +206,11 @@ fi
 # particular announces the machine to the LAN it is meant to be isolated from.
 say "Removing services a runner does not need..."
 unwanted="avahi-daemon cups bluetooth modemmanager rpcbind"
-# dnsmasq is not installed on a runtime host any more, but it was by earlier
-# runs of this script, and an upgrade that leaves the old listener running is
-# not an upgrade. Disabled rather than purged: someone co-locating both tiers
-# on one machine still needs the package.
-if [ "$ROLE" = runtime ]; then
+# dnsmasq is not installed on a privileged host any more, but it was by
+# earlier runs of this script, and an upgrade that leaves the old listener
+# running is not an upgrade. Disabled rather than purged: someone co-locating
+# both tiers on one machine still needs the package.
+if [ "$ROLE" = privileged ]; then
     unwanted="$unwanted dnsmasq"
 fi
 for svc in $unwanted; do
@@ -330,21 +343,21 @@ say "Enabling unattended security upgrades..."
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 
 # --- the hardener itself ----------------------------------------------------
-# Only for the ordinary tier, and the reason is the same one this whole
-# arrangement rests on: the runtime tier's jobs run in the HOST network
+# Only for the confined tier, and the reason is the same one this whole
+# arrangement rests on: the privileged tier's jobs run in the HOST network
 # namespace. No bridge sits in front of them, so a job network, its resolver
 # and its DOCKER-USER rules never see their traffic. Installing that machinery
 # here would take a working evening and protect nothing, and - worse - would
-# leave a runtime host that looks like it has an egress allowlist.
+# leave a privileged host that looks like it has an egress allowlist.
 #
-# What protects the runtime host is the node's firewall. That is the whole
+# What protects the privileged host is the node's firewall. That is the whole
 # list.
 if [ "$SKIP_HARDENER" -eq 1 ]; then
     say
     say "Skipping install.sh (--skip-hardener)."
-elif [ "$ROLE" = runtime ]; then
+elif [ "$ROLE" = privileged ]; then
     say
-    say "Not running install.sh on a runtime host, deliberately."
+    say "Not running install.sh on a privileged host, deliberately."
     say
     say "Its jobs run in the host network namespace - that is the grant the tier"
     say "exists for - so no bridge is in front of them and a job network, its"
@@ -355,7 +368,7 @@ elif [ "$ROLE" = runtime ]; then
     say "What protects this host is the Proxmox node's firewall, and that is the"
     say "entire list. See proxmox/README.md."
     say
-    say "If this machine also runs ordinary runners - not recommended, and not"
+    say "If this machine also runs confined runners - not recommended, and not"
     say "what the tiering is for - run ./install.sh by hand."
 else
     say
@@ -378,18 +391,18 @@ cat >&2 <<EOF
    Enabling it before that file is filled in will cut this host off from the
    forge, which is why it is not enabled for you.
 
-   On a runtime host this is the only egress control inside the VM, and it is
-   still not a boundary: root here can drop it. The node's firewall is the
+   On a privileged host this is the only egress control inside the VM, and it
+   is still not a boundary: root here can drop it. The node's firewall is the
    boundary.
 
 2. Register the runner. This script does not, because it needs a token from
    your forge:
 
-     - role ci:      label it something no other runner carries, and point
-                     container.network / --dns at what install.sh printed
-     - role runtime: this is the privileged tier - socket and host netns.
-                     Give it one label that nothing else carries, and grant
-                     it to as few repositories as you can stand.
+     - role confined:   label it something no other runner carries, and point
+                        container.network / --dns at what install.sh printed
+     - role privileged: socket and host netns. Give it one label that nothing
+                        else carries, and grant it to as few repositories as
+                        you can stand.
 
 3. In the Proxmox console, once step 2 shows the runner Online, snapshot this
    VM - BEFORE the first job runs, and with 'Include RAM' UNTICKED:
@@ -412,6 +425,6 @@ cat >&2 <<EOF
 
 Remember what is and is not enforced here. The node's firewall keeps this
 machine off your LAN and cannot be reached from inside it. Everything this
-script installed can be removed by root on this host - which, on the runtime
-role, is what a compromised job is assumed to get.
+script installed can be removed by root on this host - which, on the
+privileged role, is what a compromised job is assumed to get.
 EOF

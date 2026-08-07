@@ -14,14 +14,14 @@
 #   - holds no credentials beyond its own registration token,
 #   - is rebuilt from a snapshot on a schedule.
 #
-# Sharing a machine with the ordinary runner (ci/act-runner-ci.example.yaml)
+# Sharing a machine with the confined runner (examples/act-runner-confined.yaml)
 # gives you label tiering, not host separation: a job denied the socket still
 # shares a kernel and a network with a runner that has it. That is a real
 # reduction and worth doing if one machine is what you have - just do not read
 # it as isolation.
 #
 # Written against act_runner v0.6.1. Not runnable as written.
-# See docs/ci.md.
+# See dejima's docs/ci.md.
 
 log:
   level: info
@@ -46,7 +46,7 @@ cache:
   enabled: false
 
 container:
-  # Left unset ON PURPOSE, which is the opposite of the ordinary runner. Unset
+  # Left unset ON PURPOSE, which is the opposite of the confined runner. Unset
   # means act_runner mounts /var/run/docker.sock into job containers, and the
   # job here builds an image and boots real containers over it.
   #

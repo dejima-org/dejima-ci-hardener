@@ -28,9 +28,10 @@ root-equivalent on their host. So the working assumption is not *if* but
 *when*: a compromised job has root on this VM. Everything below follows from
 taking that seriously rather than hoping.
 
-Two VMs if you are following [the tiering](../README.md#register-scope-is-the-boundary-the-label-is-not):
-one for the privileged runner, one for the ordinary ones. The steps are the
-same; only the runner you register on each differs.
+Two VMs if you are following [the
+tiering](../README.md#two-tiers-and-you-must-pick-one): one for the privileged
+runner, one for the confined ones. The steps below are the same for both; what
+differs is the `--role` in §4 and the runner you register in §5.
 
 **The firewall goes on the node, not in the guest.** Root in the VM can flush
 any rule set it can see. It cannot reach one applied to its own tap device.
@@ -265,7 +266,7 @@ ssh <you>@<vm-ip>
 sudo apt-get update && sudo apt-get install -y git   # if the install left it out
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
-sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-management-ip>
+sudo ./bin/dejima-ci-bootstrap --role privileged --mgmt <your-management-ip>
 ```
 
 Two ways this stalls, both from choices made during the install:
@@ -277,13 +278,13 @@ Two ways this stalls, both from choices made during the install:
   during the install, so Debian did not add you. See "Leave the root password
   blank" above for the fix, or just run these as root from the console.
 
-`--role ci` for the ordinary tier. Either way the script installs packages,
+`--role confined` for the other tier. Either way the script installs packages,
 hardens sshd, removes listeners a runner has no use for, and sets up
-unattended security upgrades. On `--role ci` it then runs `install.sh` for the
-job allowlist, its resolver and its firewall; on `--role runtime` it
-deliberately does not, because those work by sitting in front of job traffic
-on a bridge and this tier's jobs are in the host's network namespace, where
-there is no bridge to sit on.
+unattended security upgrades. On `--role confined` it then runs `install.sh`
+for the job allowlist, its resolver and its firewall; on `--role privileged`
+it deliberately does not, because those work by sitting in front of job
+traffic on a bridge and this tier's jobs are in the host's network namespace,
+where there is no bridge to sit on.
 
 It does not register the runner — that needs a token from your forge — and it
 does not enable the host's own egress policy until you have filled in

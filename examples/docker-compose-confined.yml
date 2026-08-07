@@ -1,8 +1,8 @@
-# The ordinary runners: several on one host, sharing one config file and
+# The confined runners: several on one host, sharing one config file and
 # therefore one label, so a job naming that label lands on whichever is free.
 #
 # The privileged runner is NOT here. It has its own compose file, because it
-# belongs on its own host - see ci/docker-compose-runtime.example.yml.
+# belongs on its own host - see examples/docker-compose-privileged.yml.
 #
 # The thing to understand before reading the rest: compose's networks and the
 # job network are different worlds. Every service below is an act_runner
@@ -10,14 +10,14 @@
 # created by the Docker daemon, on the network named by `container.network` in
 # each runner's config.yaml, and compose knows nothing about them. Attaching a
 # service here to a network does not put its jobs there, and vice versa. See
-# ci/README.md for what that means for isolating jobs from each other.
+# docs/reference.md for what that means for isolating jobs from each other.
 #
 # Not runnable as written: substitute your own instance URL, image tag and
-# subnet, and create the job network first (ci/README.md, step 2).
+# subnet, and create the job network first - install.sh does it for you.
 
 name: dejima-runners
 
-# Shared by every ordinary runner. Volumes are per-service rather than here,
+# Shared by every confined runner. Volumes are per-service rather than here,
 # because each runner needs its own /data - and YAML merge keys merge mappings
 # but not lists, so a volumes: in a service replaces this one rather than
 # adding to it. Repeating them is the honest form.
@@ -44,7 +44,7 @@ x-ci-env: &ci-env
   GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_REGISTRATION_TOKEN:-}
 
 services:
-  # --- ordinary runners -----------------------------------------------------
+  # --- confined runners -----------------------------------------------------
   # All three share one config file, and therefore one label and one job
   # network. That is what makes them a pool: a job naming dejima-ci lands on
   # whichever is free. Only the name and the data volume differ.
@@ -57,11 +57,11 @@ services:
     volumes:
       # The runner's OWN access to the daemon, so it can create job
       # containers. NOT the same setting as container.docker_host, which
-      # decides whether job containers get the socket - see ci/README.md.
+      # decides whether job containers get the socket - see docs/reference.md.
       - /var/run/docker.sock:/var/run/docker.sock
       # Read-only: a runner has no reason to rewrite the file deciding what
       # its jobs are granted.
-      - ./act-runner-ci.yaml:/config.yaml:ro
+      - ./act-runner-confined.yaml:/config.yaml:ro
       # Its registration identity. One per runner, never shared - two runners
       # cannot share a .runner.
       - ci-1-data:/data
@@ -74,7 +74,7 @@ services:
       GITEA_RUNNER_NAME: dejima-ci-2
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-ci.yaml:/config.yaml:ro
+      - ./act-runner-confined.yaml:/config.yaml:ro
       - ci-2-data:/data
 
   ci-3:
@@ -85,7 +85,7 @@ services:
       GITEA_RUNNER_NAME: dejima-ci-3
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-ci.yaml:/config.yaml:ro
+      - ./act-runner-confined.yaml:/config.yaml:ro
       - ci-3-data:/data
 
 networks:
@@ -96,7 +96,7 @@ networks:
   # would protect nothing.
   #
   # The job network is deliberately absent. It is created by hand with a fixed
-  # bridge name so the firewall can match on it (ci/README.md, step 2), and
+  # bridge name so the firewall can match on it (install.sh does this), and
   # act_runner attaches job containers to it by name. Declaring it here would
   # invite attaching a service to it, which is exactly what must not happen: a
   # process holding the Docker socket has no business sharing a network with

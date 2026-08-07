@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
 # Install dejima-ci-allowlist and walk through its configuration.
 #
 # Idempotent: re-running and pressing Enter at every prompt changes nothing.
@@ -135,7 +138,7 @@ say "=============================================================="
 say
 say "A Docker network for job containers to run on, which this installer will"
 say "create. Name it whatever you like - it only has to match container.network"
-say "in each ordinary runner's config.yaml."
+say "in each confined runner's config.yaml."
 say
 say "A runner configured for host networking (container.network: host) needs"
 say "no job network - its jobs are in the host's own namespace, so no bridge"

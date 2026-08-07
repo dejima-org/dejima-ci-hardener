@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
 # dejima-ci-allowlist - render a CI job network's DNS allowlist from the
 # .dejima/allowed-domains declarations of the repositories this runner serves,
 # read from the branch the operator controls.

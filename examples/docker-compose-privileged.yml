@@ -9,7 +9,7 @@
 # nothing else: no other service, no route to a LAN or management network, no
 # credentials beyond its own registration token, rebuilt from a snapshot on a
 # schedule. That is why this is a separate file rather than another service
-# alongside the ordinary runners - a separate host is the intended
+# alongside the confined runners - a separate host is the intended
 # arrangement, and a compose file that assumes it is harder to drift away from
 # than one that has to be split later.
 #
@@ -18,7 +18,7 @@
 # with a runner that has it. That is a real reduction over granting everything
 # to everything, and it is not isolation between the tiers.
 #
-# Pair with ci/act-runner-runtime.example.yaml. Not runnable as written:
+# Pair with examples/act-runner-privileged.yaml. Not runnable as written:
 # substitute your own instance URL and image tag.
 
 name: dejima-runtime
@@ -52,10 +52,10 @@ services:
       # The runner's own access to the daemon, so it can create job
       # containers. On this tier the config file ALSO passes the socket into
       # those containers, which is the grant that makes this host sacrificial;
-      # on the ordinary tier it does not. Same bind, different consequence,
+      # on the confined tier it does not. Same bind, different consequence,
       # decided entirely by container.docker_host in the config.
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-runtime.yaml:/config.yaml:ro
+      - ./act-runner-privileged.yaml:/config.yaml:ro
       # Its own registration identity. Never shared with another runner.
       - runtime-data:/data
       # No bind for /tmp/dejima-ci. The job container gets that path because

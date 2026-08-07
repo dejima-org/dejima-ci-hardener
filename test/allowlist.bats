@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
 #
 # Drives bin/dejima-ci-allowlist against a stubbed curl and dnsmasq, so the
 # properties being checked are the ones that decide whether this program is
