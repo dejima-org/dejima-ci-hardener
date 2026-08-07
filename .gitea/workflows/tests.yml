@@ -37,10 +37,25 @@ name: tests
 # from the base - which is noisy, and for the untrusted half no worse than
 # having only `pull_request`. Keep the window short:
 #
-#   THE NEXT PULL REQUEST AFTER THIS ONE MERGES SHOULD DELETE THE
-#   `pull_request:` LINE BELOW, AND NOTHING ELSE.
+#   THE NEXT PULL REQUEST AFTER THIS ONE MERGES SHOULD MAKE TWO CHANGES:
+#     1. DELETE THE `pull_request:` LINE BELOW.
+#     2. DROP THE `ref:` FROM THE TWO runner-env CHECKOUTS, LEAVING A BARE
+#        `- uses: actions/checkout@v4`.
 #
 # That follow-up is itself tested by the copy on `main`, which is the point.
+#
+# The second change is the same bootstrap problem one level down. The
+# runner-env jobs assert on the RUNNER rather than on the change, so their
+# assertions should come from the base branch - under pull_request_target a
+# bare checkout gives exactly that, and a branch can then neither weaken those
+# tests nor delete them. But test/ci-runner.bats does not exist on `main`
+# until this merges, so a bare checkout today would fail on a missing file
+# rather than on anything about the runner. They name the head until it does.
+#
+# The jobs that test the branch already name the head permanently, and for the
+# opposite reason: under pull_request_target the run's ref is the base branch,
+# so a bare checkout there would test `main` on every pull request and pass
+# regardless of the change - green checks that mean nothing.
 #
 # See dejima's docs/ci.md, "Pinning the workflow with pull_request_target".
 on:
@@ -276,3 +291,104 @@ jobs:
       # assertions, taking twice as long, while looking like a stronger check
       # than it is. What this host adds is the real compose plugin, and that is
       # what the step above uses it for.
+
+  # The runners' own configuration, asserted from inside a job on each. Two
+  # jobs rather than two steps on the jobs above, because the point is that
+  # these are two different runners and either can be wrong on its own - one
+  # red check per tier says which.
+  #
+  # These fail on how a RUNNER is configured, not on anything in a pull
+  # request. A red check here means the machine needs attention; it does not
+  # mean the branch does.
+  #
+  # This is the check nothing else in the repository can make. install.sh
+  # reports what it wrote and dejima-ci-runners reports that a runner
+  # registered and is reading the generated config - and a runner can do both
+  # of those while granting its jobs everything. Whether the socket is absent
+  # and whether egress is filtered are only observable from inside a job.
+  runner-env-confined:
+    runs-on: dejima-confined
+    name: runner-env (confined)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Check the job network can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "This is the confined tier, so this is the allowlist or the" >&2
+          echo "resolver in front of it. On the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
+          echo "" >&2
+          echo "If other jobs in this run resolved fine, the runners in the pool" >&2
+          echo "are configured differently: every runner answering this label" >&2
+          echo "needs the same --dns and container.network. One missing it fails" >&2
+          echo "only the jobs that land on it, which looks intermittent." >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+
+      # See the note on the runner-env checkouts near the top of this file:
+      # this names the head for now, and becomes a bare checkout in the same
+      # follow-up that drops the pull_request trigger.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - run: bats test/ci-runner.bats
+        env:
+          # Declared, not detected: landing on the wrong runner should fail
+          # rather than quietly select a different set of assertions.
+          DEJIMA_CI_TIER: confined
+
+  runner-env-privileged:
+    runs-on: dejima-privileged
+    name: runner-env (privileged)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Check this host can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts. This tier has" >&2
+          echo "no allowlist in front of it, so this is the host's resolver or" >&2
+          echo "the node firewall's DNS pinhole - see proxmox/README.md." >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - run: bats test/ci-runner.bats
+        env:
+          DEJIMA_CI_TIER: privileged

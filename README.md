@@ -319,12 +319,43 @@ less than it appears to. In rough order of preference:
 
 Two failures matter here and both look exactly like success from inside a job:
 a job container that was handed the Docker socket, and a job that can reach an
-off-list address. Neither shows up as a red run.
+off-list address. Neither shows up as a red run. They show up as nothing at
+all.
 
-dejima ships `test/ci-runner.bats` for exactly this, run by its own CI as
-`runner-env (sandbox)` and `runner-env (host-docker)`. Point it at your runner
-and it will tell you which half is wrong - if the DNS checks pass while the
-egress checks fail, the resolver is fine and the packet filter is not.
+Nothing else in this repository can catch either. `install.sh` reports what it
+wrote; `dejima-ci-runners` reports that a runner registered and is reading the
+config it generated - and a runner can do all of that while granting its jobs
+everything. The properties the tool exists for are only observable from inside
+a job on the runner.
+
+So `test/ci-runner.bats` runs there. It takes the tier from `DEJIMA_CI_TIER`
+rather than sniffing it, so landing on the wrong runner fails instead of
+quietly selecting a different set of assertions, and it skips entirely when
+that variable is unset - which is why `bats test/` is still safe to run on a
+laptop.
+
+| | `confined` | `privileged` |
+| --- | --- | --- |
+| Docker socket absent | asserted | asserted **present** |
+| Host network namespace | — | asserted |
+| Allowlisted name resolves and connects | asserted | n/a |
+| Off-list name refused | asserted | n/a |
+| Off-list resolver on `:53` unreachable | asserted | n/a |
+| Off-list address on `:443` unreachable | asserted | n/a |
+| IPv6 not an unfiltered way around | asserted | n/a |
+
+The egress half is scoped to the confined tier on purpose. The privileged
+tier's jobs are in the host's network namespace, so the bridge rules are not
+in front of them at all and asserting an allowlist there would test nothing
+and pass anyway - which is the failure mode the file exists to catch.
+
+Read the two together. If the DNS checks pass while the egress checks fail,
+the resolver is fine and the packet filter is not. Each failure message names
+the setting and the command to check it.
+
+`.gitea/workflows/tests.yml` runs both tiers as `runner-env (confined)` and
+`runner-env (privileged)`, one red check each, so a broken runner says which
+one it was. A failure there means the machine needs attention, not the branch.
 
 ## Use
 
