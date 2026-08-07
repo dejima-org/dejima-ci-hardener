@@ -389,7 +389,17 @@ every job has unrestricted egress.
 bats test/
 ```
 
-Runs against a stubbed `curl` and `dnsmasq`.
+Runs against a stubbed `curl`, `dnsmasq` and `docker`, so it needs none of
+them and tells you what these programs decide rather than what the system does
+afterwards.
+
+`.gitea/workflows/tests.yml` runs that suite on every pull request, plus one
+check the stubs cannot make: it renders both tiers with the real generator and
+hands the output to a real `docker compose config`. A compose file can be
+valid YAML - which is all `bats test/` establishes - and still be rejected by
+Docker for a misspelled key or an anchor that does not merge. That job needs a
+Docker daemon and the host's own egress, so it runs on the privileged tier,
+and failing it means the runner needs attention rather than the branch.
 
 ## Further reading
 
