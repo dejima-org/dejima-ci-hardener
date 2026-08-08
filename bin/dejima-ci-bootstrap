@@ -133,8 +133,19 @@ tier_packages=""
 if [ "$ROLE" = confined ]; then
     tier_packages="ipset dnsmasq"
 fi
+# dbus named explicitly. systemd itself runs without it, but systemctl talks to
+# the manager over the system bus for anything beyond a unit-file lookup - so
+# on a host without it, everything below that disables a service, reloads sshd,
+# runs daemon-reload or enables a unit fails with "Failed to connect to system
+# scope bus" while `systemctl disable <absent unit>` still answers normally.
+#
+# It arrives as a recommendation of systemd rather than a dependency, which
+# means --no-install-recommends here does not add it and an install that never
+# had it, or a host where something removed it as an unused dependency, is
+# indistinguishable from a working one until a unit needs managing.
 apt-get install -y -qq --no-install-recommends \
     docker.io docker-cli \
+    dbus \
     openssh-server \
     iptables $tier_packages \
     ca-certificates curl git jq \
@@ -155,6 +166,25 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 say "  docker     $(docker --version 2>&1 | head -1)"
+
+# Checked rather than assumed, for the same reason as docker above: apt
+# reporting success is not the same as the thing working, and every remaining
+# section of this script manages a unit.
+if ! systemctl is-system-running >/dev/null 2>&1 \
+   && ! systemctl list-units --type=service >/dev/null 2>&1; then
+    {
+        printf '%s: systemctl cannot reach the service manager.\n\n' "$PROG"
+        printf 'PID 1 is %s. If that is systemd, the system bus is missing:\n' "$(ps -p 1 -o comm= 2>/dev/null)"
+        printf '  dbus installed: %s\n' "$(dpkg -l dbus 2>/dev/null | grep -c '^ii')"
+        printf '  socket:         %s\n\n' "$(ls /run/dbus/system_bus_socket 2>&1)"
+        printf 'dbus was just installed, so this usually means the bus has not\n'
+        printf 'started yet on a host that has been running without it. Restart\n'
+        printf 'the machine and run this again - everything above is idempotent.\n\n'
+        printf 'Nothing below this point would work: disabling a service,\n'
+        printf 'reloading sshd, daemon-reload and enabling a unit all need it.\n'
+    } >&2
+    exit 1
+fi
 
 # Compose, by whatever route this release actually offers.
 #
