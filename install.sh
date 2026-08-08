@@ -601,14 +601,11 @@ say
 say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
 say "behind it yet, because no runner is configured on this host."
 say
-say "This used to be a list of five things to copy into a runner's config by"
-say "hand, and every one of them was a value that had to match a value here:"
-say "container.network with $network, --dns with $gateway,"
-say "CONFIG_FILE with the path the compose file mounts to. Getting any of them"
-say "wrong produces a runner that starts and runs jobs and filters nothing."
-say
-say "$BIN_DIR/dejima-ci-runners writes both files from what is in"
-say "$CONFIG, so there is nothing to keep in step by hand."
+say "$BIN_DIR/dejima-ci-runners writes the compose project and the"
+say "runner config together, taking the job network and the resolver address"
+say "from $CONFIG. A runner whose container.network or"
+say "--dns disagrees with what was set up here starts, accepts jobs, and"
+say "filters nothing - so neither is left for you to copy across."
 say
 
 run_runners=n
