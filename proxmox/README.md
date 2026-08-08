@@ -120,20 +120,11 @@ Leave SSH server *on*, even though `dejima-ci-bootstrap` configures sshd
 later. Configuring is not installing: skip the task and the VM has no sshd to
 configure and no way in except the Proxmox console.
 
-**Leave standard system utilities on as well**, and be more careful about this
-one than it looks. It is where `sudo` comes from, and also `dbus` — which
-nothing here obviously needs until you notice that `systemctl` talks to the
-service manager over the system bus. Without it, `systemctl disable <a unit
-that does not exist>` still answers normally, because that is only a
-unit-file lookup, while every command that starts, stops, enables or reloads
-anything fails with `Failed to connect to system scope bus`. A host can run
-for days in that state: systemd is PID 1 and everything already started keeps
-running, so what you have is a machine whose services cannot be managed and
-which reports nothing unusual until you try.
-
-`dejima-ci-bootstrap` installs `dbus` itself and refuses to continue without a
-reachable bus, so a VM built this way recovers by re-running it. That is a
-backstop, not a reason to clear the task.
+**Leave standard system utilities on as well.** It is where `sudo` comes from,
+and `dbus` with it. `systemctl` reaches the service manager over the system
+bus, so a host without `dbus` cannot start, stop, enable or reload anything -
+while `systemctl` on a unit that does not exist still answers normally, which
+makes the state easy to miss.
 
 ### Once the install has finished: give it a stable address
 
@@ -249,11 +240,9 @@ This is also the file §3's "Values that must agree" reads for the firewall's
 DNS pinhole, so getting it wrong breaks name resolution and one firewall rule
 at the same time.
 
-This is the step most likely to look done and not be. Nothing fails at the
-moment you get it wrong: the shell you are in keeps working on connections it
-already holds, and the machine goes quiet later — `apt-get update` failing, a
-`git clone` reporting it could not resolve the host, CI jobs failing against a
-registry that is not the thing at fault.
+Get this one right before moving on. Nothing fails at the moment it is wrong:
+a shell already open keeps working, and the machine goes quiet later, on the
+next thing that needs a name resolved.
 
 **Apply and verify, still in the console:**
 
@@ -310,8 +299,7 @@ address, so a rebuilt VM that comes up on a different one is still fully
 firewalled.
 
 What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
-later visit. That is reason enough to pin it, and it is a smaller claim than
-the one this used to make.
+later visit. That is reason enough to pin it.
 
 ---
 
