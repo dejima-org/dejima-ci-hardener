@@ -99,6 +99,23 @@ cfg_get() {
     done < "$CONFIG"
 }
 
+# ask, defaulting to the config file's value and falling back to a built-in
+# when there is none.
+#
+# The fallback is passed to ask rather than applied to its answer afterwards,
+# and that is the whole point: ask only prints [brackets] when it is given a
+# non-empty default, so a fallback applied after the fact is invisible. On a
+# first install cfg_get returns nothing for every one of these, so each prompt
+# appeared bare - asking for a path, a branch and a shell command with no
+# indication that pressing Enter would produce a working answer, or what it
+# would be.
+ask_cfg() {
+    local __var="$1" prompt="$2" key="$3" fallback="$4" def
+    def="$(cfg_get "$key")"
+    [ -n "$def" ] || def="$fallback"
+    ask "$__var" "$prompt" "$def"
+}
+
 # The upstream resolver is the setting people get wrong, so offer what this
 # host already uses rather than making them go and find it.
 detect_upstream() {
@@ -165,8 +182,7 @@ say "machine a firewall of its own, or treat it as one you are willing to lose."
 say "Set this up for the runners that do use a bridge, and skip it for those."
 say
 
-ask network "Job network name (e.g. dejima-ci)" "$(cfg_get network)"
-: "${network:=dejima-ci}"
+ask_cfg network "Job network name" network dejima-ci
 say
 
 # Derived, not asked. Docker takes the first usable address of the subnet as
@@ -244,8 +260,7 @@ else
     say "(172.17-172.31, 192.168.x) so an unrelated network cannot collide."
     say
     while :; do
-        ask subnet "Subnet in CIDR form (e.g. 10.89.0.0/24)" "${subnet:-$(cfg_get subnet)}"
-        : "${subnet:=10.89.0.0/24}"
+        ask_cfg subnet "Subnet in CIDR form" subnet 10.89.0.0/24
         valid_cidr "$subnet" || { say "  not a CIDR block - it needs the form 10.89.0.0/24"; subnet=""; continue; }
         is_private "$subnet" || { say "  $subnet is not a private range - use 10.x, 172.16-31.x or 192.168.x"; subnet=""; continue; }
         break
@@ -346,14 +361,37 @@ while :; do
     say "  this setting."
     say
     say "  Servers this host has configured:"
-    { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p'
-      sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null; } | sort -u >&2
+    # resolvectl guarded by command -v, and the whole thing allowed to fail.
+    # Without the guard this aborted the installer outright on any host that
+    # does not have it - which is most of them, including a VM built by
+    # proxmox/README.md. `set -o pipefail` makes the inner pipeline return the
+    # 127 from a missing resolvectl, `set -e` acts on it, and the run ends on
+    # exit 127 with no message, immediately after printing this heading. A
+    # diagnostic that kills the program it is diagnosing is worse than no
+    # diagnostic.
+    {
+        if command -v resolvectl >/dev/null 2>&1; then
+            resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p' || true
+        fi
+        sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null || true
+    } | sort -u >&2 || true
     say
-    ask retry_upstream "Try a different address? (Y/n)" "y"
+
+    # Non-interactive cannot answer, and the default it would take used to be
+    # "retry" - which re-offered the same detected address, failed the same
+    # probe, and looped forever with no terminal to say so on.
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        say "  continuing with $upstream - fix it before expecting jobs to resolve"
+        break
+    fi
+    # Defaults to no, so Enter moves on. Defaulting to yes meant that pressing
+    # Enter - which this installer tells you to do to keep the value shown -
+    # asked the same question about the same address indefinitely.
+    ask retry_upstream "Try a different address? (y/N)" "n"
     case "${retry_upstream,,}" in
-        n|no) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
+        y|yes) existing_upstream="" ;;
+        *) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
     esac
-    existing_upstream=""
 done
 case "$upstream" in
     127.0.0.53|127.0.0.1|::1)
@@ -458,12 +496,9 @@ say
 
 # --- remaining settings -----------------------------------------------------
 ipset="$(cfg_get ipset)"; : "${ipset:=ci-allow}"
-ask out    "Generated allowlist path" "$(cfg_get out)"
-ask ref    "Branch treated as operator-approved" "$(cfg_get ref)"
-ask reload "Command that reloads the resolver" "$(cfg_get reload)"
-: "${out:=/etc/dnsmasq.d/ci-allow.conf}"
-: "${ref:=main}"
-: "${reload:=systemctl reload dnsmasq}"
+ask_cfg out    "Generated allowlist path"           out    /etc/dnsmasq.d/ci-allow.conf
+ask_cfg ref    "Branch treated as operator-approved" ref    main
+ask_cfg reload "Command that reloads the resolver"   reload "systemctl reload dnsmasq"
 say
 
 # --- write ------------------------------------------------------------------
