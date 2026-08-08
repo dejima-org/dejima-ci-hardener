@@ -342,12 +342,28 @@ resolvers=$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null || true)
 if command -v resolvectl >/dev/null 2>&1; then
     resolvers="$resolvers $(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: *//p' || true)"
 fi
+allowed_dns=0
 for ns in $resolvers; do
     case "$ns" in *:*) continue ;; esac   # this chain is iptables, not ip6tables
     iptables -A "$CHAIN" -d "$ns" -p udp --dport 53 -j ACCEPT
     iptables -A "$CHAIN" -d "$ns" -p tcp --dport 53 -j ACCEPT
     echo "dejima-ci-host-egress: allowing DNS to $ns"
+    allowed_dns=$((allowed_dns + 1))
 done
+if [ "$allowed_dns" -eq 0 ]; then
+    # Said loudly because the alternative is silence. If this host resolves
+    # through something on the LAN and nothing here found it, the rules below
+    # reject every query it makes, and the first symptom is some unrelated
+    # program reporting a connection refused by whatever it was trying to
+    # reach - never by the resolver, and never naming this policy.
+    echo "dejima-ci-host-egress: WARNING - found no nameserver to allow." >&2
+    echo "dejima-ci-host-egress: /etc/resolv.conf named none, and resolvectl" >&2
+    echo "dejima-ci-host-egress: either is absent or reported none. If this" >&2
+    echo "dejima-ci-host-egress: host resolves through a LAN address, the" >&2
+    echo "dejima-ci-host-egress: rules below now reject it: add it to" >&2
+    echo "dejima-ci-host-egress: /etc/dejima-ci/host-egress-allow as '<ip> 53 udp'" >&2
+    echo "dejima-ci-host-egress: and '<ip> 53 tcp', or run this with --remove." >&2
+fi
 
 if [ -r /etc/dejima-ci/host-egress-allow ]; then
     while read -r host port proto; do
