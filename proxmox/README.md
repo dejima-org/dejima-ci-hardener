@@ -64,21 +64,77 @@ before you flip it rather than after.
 | --- | --- | --- |
 | General | Name | `oubliette`, or whatever you prefer |
 | OS | ISO | Debian netinst, current stable |
-| System | Qemu Agent | ✓ |
+| System | Qemu Agent | ✓ — and see the note below, the tick alone does nothing |
 | Disks | Size | 64 GB is comfortable for image builds |
 | CPU | Cores | 4 |
 | Memory | | 8192 MB |
 | Network | Bridge | your normal bridge |
 | Network | **Firewall** | **✓ — this is the checkbox everything else depends on** |
 
-That last one is easy to miss and easy to uncheck later without noticing. If
-it is off, the per-VM rules do not apply to the interface and the VM is simply
-on your LAN.
+The Firewall checkbox is easy to miss and easy to uncheck later without
+noticing. If it is off, the per-VM rules do not apply to the interface and the
+VM is simply on your LAN.
 
-Install Debian normally, with two things to get right.
+**Qemu Agent is two halves, and this is only one of them.** The tick opens a
+virtio-serial channel on the host side; answering on it takes the
+`qemu-guest-agent` package inside the guest, which the Debian install does not
+add and nothing later in this runbook does either. Until it is installed the
+VM's Summary pane shows no IP address — which is the field you would reach for
+first if you let DHCP assign one. `sudo apt-get install -y qemu-guest-agent`
+in the guest is the whole of it. Leaving it out is a defensible choice on a
+machine built for a small surface; leaving it out while the box is ticked just
+looks like the agent is broken.
 
-**Static addressing**, not DHCP. The firewall names this VM by address, and a
-lease that moves is a rule that no longer describes it.
+Install Debian normally. Three things need attention, and only the last two of
+them are questions the installer actually asks.
+
+**A stable address — and the installer will not ask you for one.** With a
+working DHCP server on the segment, the Debian netinst configures the network
+and moves on; there is no static-or-DHCP question to answer. So this is not a
+step you perform during the install. It is a decision you make somewhere else,
+before or after it.
+
+Two places it can live, and either is fine:
+
+| Where | What you do | What it costs |
+| --- | --- | --- |
+| **Your DHCP server** | A reservation against the VM's MAC, which Proxmox shows under Hardware → Network Device | The VM keeps doing DHCP, which the firewall interferes with — see below |
+| **The guest** | After the install, edit `/etc/network/interfaces` and `systemctl restart networking` | Two records of the address if you also reserve it |
+
+Reserving it *and* setting it statically in the guest is the belt-and-braces
+option, and the usual argument against that shape applies: two places to keep
+in step. If you take it, put the reserved address outside your DHCP pool so
+nothing else is ever handed it.
+
+**If you go the DHCP route, read this first.** Rules 5–8 in the next section
+drop outbound traffic to every RFC1918 range, and your DHCP server is almost
+certainly inside one. A lease renewal at T1 is a *unicast* `DHCPREQUEST` to
+that server, so it is dropped. The lease usually survives anyway — at T2 the
+client gives up on unicast and rebinds by broadcast, and `255.255.255.255`
+matches none of those DROP rules — but you are relying on the fallback path of
+a protocol rather than on it working. If the rebind also fails, the lease
+expires and the VM drops off the network for a reason that looks nothing like
+a firewall rule.
+
+Two ways to fix it, if you want DHCP: tick **DHCP** under VM → Firewall →
+Options, which is what that option is for, or add an explicit `OUT ACCEPT` to
+your DHCP server on `udp/67` above the DROP rules. The second widens the LAN
+exposure the next section calls "the entire remaining LAN exposure" from two
+hosts to three, so say so to yourself before you add it.
+
+Static in the guest sidesteps all of that: no DHCP traffic, no third pinhole,
+nothing to renew.
+
+**What a moving address does *not* break.** Not the firewall. Every rule in the
+next section keys on a *destination*, except the SSH rule, which keys on *your*
+management address — and Proxmox applies the whole set to this VM's tap device,
+identified by VMID rather than by IP. An earlier version of this runbook said
+the rules name the VM by address. They do not, and a rebuilt VM that comes up
+on a different address is still fully firewalled.
+
+What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
+later visit. That is reason enough to pin it, and it is a smaller claim than
+the one this used to make.
 
 **Leave the root password blank.** Debian reads an empty root password as
 "use sudo", installs it, and puts your first user in the `sudo` group. Set a
@@ -260,6 +316,11 @@ Read them together, because the pattern says which thing is wrong:
 ---
 
 ## 4. Bootstrap the VM
+
+`<vm-ip>` is whatever §2 settled on. If you let DHCP assign it and have not
+installed `qemu-guest-agent`, the Summary pane will not tell you — log in at
+the Proxmox console and run `ip -4 addr`, which needs no network and no
+package.
 
 ```sh
 ssh <you>@<vm-ip>

@@ -52,6 +52,21 @@ policy_out: ACCEPT
 log_level_in: nolog
 log_level_out: nolog
 
+# Uncomment if this VM gets its address by DHCP rather than statically.
+#
+# The four OUT DROPs below cover every RFC1918 range, and a DHCP server is
+# almost always inside one - so a lease renewal at T1, which is a unicast
+# DHCPREQUEST to that server, is dropped. The lease usually survives on the
+# fallback: at T2 the client stops unicasting and rebinds by broadcast, and
+# 255.255.255.255 matches none of those DROPs. That is a protocol's last
+# resort doing routine work, and when it does fail the VM simply drops off
+# the network, which looks nothing like a firewall rule.
+#
+# The alternative to this line is an explicit OUT ACCEPT to the DHCP server on
+# udp/67, which widens the LAN exposure below from two hosts to three. This
+# option is the narrower of the two. Narrower still is not using DHCP.
+# dhcp: 1
+
 [RULES]
 
 # --- inbound ----------------------------------------------------------------
