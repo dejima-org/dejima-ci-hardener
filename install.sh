@@ -121,9 +121,16 @@ for tool in ipset iptables ip6tables dnsmasq docker; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
 [ -z "$missing" ] || die "missing required commands:$missing
-On Debian/Ubuntu: apt-get install ipset iptables dnsmasq
+On Debian/Ubuntu: apt-get install ipset iptables dnsmasq docker.io
+
+This installs nothing itself - it configures a machine you already have, and
+adding a Docker daemon to one is not a thing to do on someone's behalf. On a
+host built by dejima-ci-bootstrap these are already present; it installs them
+before it gets here.
+
 Without ipset the firewall cannot be applied, and a runner with no egress
-policy looks exactly like one with."
+policy looks exactly like one with. Without docker there is no job network to
+create, which is the first thing this does."
 
 say "dejima-ci-hardener installer"
 say

@@ -83,16 +83,23 @@ network.**
 Either works. On a machine you already have:
 
 ```sh
-sudo apt-get install git ipset iptables dnsmasq
+sudo apt-get install git ipset iptables dnsmasq docker.io
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
 sudo ./install.sh
 ```
 
-`git` is in that list because a Debian netinst does not install it — not even
-under "standard system utilities", which is `sudo` and the base tooling. It is
-listed first because it is the one you need before the next line rather than
-after `install.sh`.
+**`install.sh` installs no packages, so that line has to be complete.** It
+configures a machine you already have, and quietly adding a Docker daemon to
+one is not a thing it should do on your behalf. It checks for what it needs and
+stops if anything is absent.
+
+Two of those are easy to be missing on a fresh Debian. `git` is not installed
+by a netinst at any task selection, including "standard system utilities" —
+that task is `sudo` and the base tooling. And `docker.io` is what `install.sh`
+creates the job network with, which is the first thing it does. On trixie the
+client is a separate `docker-cli` package that arrives as a recommendation of
+`docker.io`; if you install with `--no-install-recommends`, name it too.
 
 On a fresh VM, [proxmox/README.md](proxmox/README.md) builds one and
 `dejima-ci-bootstrap` finishes it - packages, sshd, unattended upgrades, the
@@ -101,6 +108,9 @@ host's own egress policy, and then `install.sh` for the job allowlist:
 ```sh
 sudo ./bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
 ```
+
+That path needs none of the apt line above: installing those packages is the
+first thing `dejima-ci-bootstrap` does, Docker included.
 
 ## What `install.sh` does
 
