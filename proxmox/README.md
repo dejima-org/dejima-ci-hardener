@@ -450,6 +450,30 @@ Read them together, because the pattern says which thing is wrong:
 
 ## 4. Bootstrap the VM
 
+**Snapshot before you run it.** Everything up to here is a stock Debian with
+its networking settled; everything after is a script making changes across the
+machine. A snapshot at this line costs seconds and turns a bad run into a
+revert rather than an investigation.
+
+Check the base is sound first, so that what you preserve is worth returning to:
+
+```sh
+ip -o -4 addr show scope global      # the address you meant
+ip route | grep default
+getent hosts deb.debian.org          # a public name
+getent hosts <your-forge-hostname>   # and yours
+systemctl is-system-running          # running, not degraded
+```
+
+Then **VM → Snapshots → Take Snapshot**, named `preflight`, with *Include RAM*
+unticked. Roll back to it whenever a run leaves the host in a state you would
+rather not reason about — a second attempt from a known base beats unpicking a
+first one, and it keeps this machine identical to what the runbook describes
+rather than to whatever a half-finished run left.
+
+That is a different snapshot from `clean` in §5, which comes later and holds a
+registered runner. Keep both.
+
 `<vm-ip>` is whatever §2 settled on. If you let DHCP assign it and have not
 installed `qemu-guest-agent`, the Summary pane will not tell you — log in at
 the Proxmox console and run `ip -4 addr`, which needs no network and no
