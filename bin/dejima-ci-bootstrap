@@ -389,7 +389,14 @@ else
     say
     say "Running install.sh for the allowlist, resolver and job firewall..."
     say
-    "$SRC/install.sh" || die "install.sh did not complete"
+    # Recorded rather than fatal. Dying here skips the summary below, and by
+    # this point the host is most of the way configured - packages in, sshd
+    # hardened, units installed, quite possibly runners registered and taking
+    # jobs. An operator who is told only "install.sh did not complete" has to
+    # work out for themselves which of those happened. The run still fails, at
+    # the end, after saying what state the machine is in.
+    HARDENER_FAILED=0
+    "$SRC/install.sh" || HARDENER_FAILED=1
 fi
 
 cat >&2 <<EOF
@@ -443,3 +450,30 @@ machine off your LAN and cannot be reached from inside it. Everything this
 script installed can be removed by root on this host - which, on the
 privileged role, is what a compromised job is assumed to get.
 EOF
+
+if [ "${HARDENER_FAILED:-0}" -ne 0 ]; then
+    cat >&2 <<EOF
+
+=============================================================
+ install.sh did not finish
+=============================================================
+
+The host hardening above is done. What is not done is the job allowlist: no
+server= lines have been rendered, so the resolver job containers are pointed
+at answers for nothing, and any runner already registered will accept jobs
+that then fail to resolve anything at all.
+
+The reason was printed above, in install.sh's own output. The usual one is the
+forge token: a token that is wrong rather than missing is only detectable by
+asking the forge, and that is what fails.
+
+Fix the cause, then run either of these - the first re-prompts for every
+setting, the second only re-renders:
+
+  $SRC/install.sh
+  /usr/local/sbin/dejima-ci-allowlist render
+
+Nothing needs undoing first. Both are idempotent.
+EOF
+    exit 1
+fi

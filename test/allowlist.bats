@@ -21,6 +21,9 @@ out=""; url=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) out="$2"; shift ;;
+        # Recorded so a test can assert on what actually went over the wire,
+        # which is the only place token mangling is visible.
+        -H) printf '%s\n' "$2" >> "$STUB_DIR/last-headers"; shift ;;
         http*) url="$1" ;;
     esac
     shift
@@ -105,6 +108,47 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -ne 0 ]
     [ ! -f "$T/out/ci-allow.conf" ]
     [[ "$output" == *"HTTP 500"* ]]
+}
+
+@test "a rejected token says so, rather than reporting an HTTP number" {
+    # 401 is the one an operator actually meets, and "unexpected HTTP 401" sends
+    # nobody to the token. It has to name the file and say that a present-but-
+    # wrong token is what this looks like, because an empty one is refused
+    # earlier with a different message entirely.
+    mkdir -p "$STUB_DIR/owner"
+    echo 401 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [ ! -f "$T/out/ci-allow.conf" ]
+    [[ "$output" == *"rejected the token"* ]]
+    [[ "$output" == *"$T/token"* ]]
+}
+
+@test "a token refused permission is not confused with one refused outright" {
+    # 403 authenticates and cannot read. Telling someone to replace a token
+    # that is fine, when the answer is a scope they did not grant, costs them
+    # the one thing the message was supposed to save.
+    mkdir -p "$STUB_DIR/owner"
+    echo 403 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refused the read"* ]]
+    [[ "$output" == *"scope"* ]]
+    [[ "$output" != *"rejected the token"* ]]
+}
+
+@test "surrounding whitespace in the token file never reaches the forge" {
+    # Command substitution strips trailing newlines and nothing else, so a
+    # trailing space or a carriage return survives into the Authorization
+    # header and the forge rejects it - while the file still looks correct to
+    # anyone who cats it.
+    printf 'tok123 \r\n' > "$T/token"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -q 'Authorization: token tok123$' "$STUB_DIR/last-headers"
 }
 
 @test "an empty collection is refused rather than installed" {

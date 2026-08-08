@@ -183,6 +183,42 @@ fetch_repo() {
     case "$http" in
         200) cat "$body" ;;
         404) ;;  # no declaration is a normal state, not an error
+        # 401 and 403 are the two an operator will actually meet, and they mean
+        # different things: rejected outright, against accepted but not allowed
+        # to read this. "unexpected HTTP 401" named neither, and left the one
+        # credential this program holds as the last place anyone would look.
+        401) rm -f "$body"
+             die "the forge rejected the token (HTTP 401) reading $repo.
+
+The token in ${CFG[token_file]} is present and not empty - an empty one is
+refused before this point - so it is wrong rather than missing. Mistyped or
+truncated when pasted, revoked since, expired, or carrying a stray space or
+carriage return picked up on the way in.
+
+Check first that it is an API token at all. This wants one from the forge's
+Settings -> Applications page, with read access to repository contents. A
+RUNNER REGISTRATION token - the one from Actions -> Runners, which registers a
+runner and is what dejima-ci-runners asks for - is a different string that the
+API rejects exactly like this. Swapping the two is easy and looks like nothing
+else.
+
+Reproduce it by hand with the request this just made:
+
+  curl -sS -o /dev/null -w '%{http_code}\\n' \\
+    -H \"Authorization: token \$(cat ${CFG[token_file]})\" \\
+    '${CFG[forge_api]}/repos/$repo/raw/.dejima/allowed-domains?ref=${CFG[ref]}'
+
+200 or 404 means the token is good. Re-run install.sh to replace it." ;;
+        403) rm -f "$body"
+             die "the forge accepted the token but refused the read (HTTP 403) for $repo.
+
+The token in ${CFG[token_file]} authenticates, so this is permission rather
+than identity. Either it lacks the scope to read repository contents - Gitea
+tokens are scoped, and one created with none selected authenticates and can
+read nothing - or the account behind it cannot see $repo.
+
+Read access to repository contents is all this needs, and all it should have:
+it only ever GETs one file per repository." ;;
         *)   rm -f "$body"; die "unexpected HTTP $http for $repo" ;;
     esac
     rm -f "$body"
@@ -191,6 +227,14 @@ fetch_repo() {
 collect() {
     local token repo
     token=$(< "${CFG[token_file]}")
+    # Trimmed, because the failure it prevents is invisible. Command
+    # substitution strips trailing newlines and nothing else, so a token file
+    # written with a trailing space, or saved by an editor that left a carriage
+    # return, produces an Authorization header the forge rejects - and the file
+    # looks correct in every way a person would check it, including `cat`.
+    token="${token//$'\r'/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
     [ -n "$token" ] || die "empty token in ${CFG[token_file]}"
 
     # The base set first: what the runner needs regardless of any project.

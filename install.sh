@@ -408,9 +408,21 @@ if [ -s "$TOKEN_FILE" ]; then
     ask replace_token "Replace it? (y/N)" "n"
 else
     replace_token=y
-    say "A forge token is needed. Read access only - this program only ever GETs"
-    say "one file per repository, and a token that can do more is a token handed"
-    say "to a machine that runs untrusted code."
+    say "A forge API token is needed, so this can read .dejima/allowed-domains"
+    say "from the main branch of each repository listed below."
+    say
+    say "Create one here:"
+    say "  $instance/user/settings/applications"
+    say
+    say "Give it read access to repository contents and nothing else. This only"
+    say "ever GETs one file per repository, and a token that can do more is a"
+    say "token handed to a machine that runs untrusted code."
+    say
+    say "THIS IS NOT THE RUNNER REGISTRATION TOKEN. That is a different string"
+    say "from a different page - Actions -> Runners - used once to register a"
+    say "runner, and the API rejects it with a 401. dejima-ci-runners asks for"
+    say "that one separately, later. The two are easy to swap and the only"
+    say "symptom is this program failing to read anything."
 fi
 if [ "${replace_token,,}" = y ] || [ "${replace_token,,}" = yes ]; then
     token=""
@@ -461,6 +473,74 @@ else
     write_if_changed "$REPOS_FILE" 0640 "$existing_repos"
 fi
 say
+
+# --- does the forge actually accept that token? -----------------------------
+# The token is the one setting here that cannot be judged by looking at it. A
+# wrong one and a right one are both a non-empty 0600 file; only the forge can
+# tell them apart, and it is asked here rather than at the end so that a
+# rejected token is fixed while it is still the thing you are doing - not after
+# the units are enabled and the runners are registered and running.
+#
+# Probed against the first configured repository, using the same request the
+# allowlist will make. 200 and 404 both mean the token authenticated: 404 is a
+# repository with no declaration, which is ordinary.
+token_status() {  # token_status TOKEN REPO -> HTTP status, or 000 if unreachable
+    curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: token $1" \
+        "$forge_api/repos/$2/raw/.dejima/allowed-domains?ref=main" 2>/dev/null \
+        || printf '000'
+}
+
+probe_repo=$(grep -vE '^\s*(#|$)' "$REPOS_FILE" 2>/dev/null | head -1 || true)
+if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo" ]; then
+    while :; do
+        status=$(token_status "$(cat "$TOKEN_FILE")" "$probe_repo")
+        case "$status" in
+            200|404) say "  the forge accepted the token."; break ;;
+        esac
+        say
+        case "$status" in
+            401) say "  The forge REJECTED the token (401)."
+                 say "  It is present and not empty, so it is wrong rather than missing:"
+                 say "  mistyped or truncated when pasted, revoked, or expired." ;;
+            403) say "  The forge accepted the token but refused the read (403)."
+                 say "  It authenticates, so this is scope rather than identity - a Gitea"
+                 say "  token created with no scopes selected reads nothing. It needs read"
+                 say "  access to repository contents, and nothing more." ;;
+            000) say "  Could not reach $forge_api to check the token."
+                 say "  That is the network or the forge, not the token itself." ;;
+            *)   say "  The forge answered $status when checking the token against"
+                 say "  $probe_repo." ;;
+        esac
+        say
+        say "  Until this is fixed the allowlist cannot be rendered, and job"
+        say "  containers get a resolver that answers for nothing."
+        say
+        if [ "$NONINTERACTIVE" -eq 1 ]; then
+            say "  Continuing - fix the token and run: $BIN_DIR/dejima-ci-allowlist render"
+            break
+        fi
+        ask retry_token "Enter a different token now? (Y/n)" "y"
+        case "${retry_token,,}" in
+            n|no) say "  Continuing. Fix $TOKEN_FILE, then run:"
+                  say "    $BIN_DIR/dejima-ci-allowlist render"
+                  break ;;
+        esac
+        printf 'Forge token (not echoed): ' >&2
+        IFS= read -rs newtok </dev/tty || true
+        printf '\n' >&2
+        if [ -z "$newtok" ]; then
+            say "  Nothing entered - leaving the current token in place."
+            break
+        fi
+        printf '%s\n' "$newtok" > "$TOKEN_FILE.new"
+        chmod 600 "$TOKEN_FILE.new"
+        mv "$TOKEN_FILE.new" "$TOKEN_FILE"
+        unset newtok
+        say "  written    $TOKEN_FILE"
+    done
+    say
+fi
 
 # --- base domains -----------------------------------------------------------
 say "Names allowed regardless of any project declaration. Keep this short, and"
