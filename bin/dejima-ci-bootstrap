@@ -272,6 +272,10 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/dejima-ci-host-egress
+# Without this, `systemctl stop` marks the unit inactive and leaves every rule
+# in place - so the one command an operator reaches for when this policy has
+# cut them off does nothing at all.
+ExecStop=/usr/local/sbin/dejima-ci-host-egress --remove
 
 [Install]
 WantedBy=multi-user.target docker.service
@@ -287,6 +291,18 @@ cat > /usr/local/sbin/dejima-ci-host-egress <<'EGRESS'
 # something that had to step over a rule rather than something free.
 set -euo pipefail
 CHAIN=DEJIMA-HOST-OUT
+
+# --remove takes the whole policy back off, which is what ExecStop calls. A
+# firewall you cannot remove by the obvious means is one you cannot safely
+# experiment with.
+if [ "${1:-}" = --remove ]; then
+    iptables -D OUTPUT -j "$CHAIN" 2>/dev/null || true
+    iptables -F "$CHAIN" 2>/dev/null || true
+    iptables -X "$CHAIN" 2>/dev/null || true
+    echo "dejima-ci-host-egress: policy removed"
+    exit 0
+fi
+
 iptables -N "$CHAIN" 2>/dev/null || true
 iptables -F "$CHAIN"
 iptables -C OUTPUT -j "$CHAIN" 2>/dev/null || iptables -I OUTPUT -j "$CHAIN"
@@ -306,6 +322,33 @@ done
 # The LAN, minus whatever /etc/dejima-ci/host-egress-allow lists as
 # host:port pairs. The node firewall enforces the same thing; a divergence
 # between them is worth noticing, not worth relying on.
+# This host's own resolvers, on 53, derived from the machine rather than copied
+# into a second file by hand.
+#
+# They are on the LAN on almost every network, so without this the DROPs below
+# reject every DNS query the host makes - and an ICMP admin-prohibited on a UDP
+# socket is reported by Go, and so by Docker, as "connection refused". The
+# symptom is `docker pull` failing against the registry with a connection error
+# that names the registry and not the resolver, on a host that was working
+# until this policy was enabled.
+#
+# Requiring the address in host-egress-allow instead would be one more pair of
+# values that have to agree, of exactly the kind this project keeps warning
+# about, with the same silence when they do not.
+resolvers=$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null || true)
+# systemd-resolved puts a loopback stub in resolv.conf and keeps the real
+# servers to itself; loopback is already accepted above, but the queries the
+# stub forwards leave this host and would be rejected.
+if command -v resolvectl >/dev/null 2>&1; then
+    resolvers="$resolvers $(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: *//p' || true)"
+fi
+for ns in $resolvers; do
+    case "$ns" in *:*) continue ;; esac   # this chain is iptables, not ip6tables
+    iptables -A "$CHAIN" -d "$ns" -p udp --dport 53 -j ACCEPT
+    iptables -A "$CHAIN" -d "$ns" -p tcp --dport 53 -j ACCEPT
+    echo "dejima-ci-host-egress: allowing DNS to $ns"
+done
+
 if [ -r /etc/dejima-ci/host-egress-allow ]; then
     while read -r host port proto; do
         case "${host:-}" in ''|'#'*) continue ;; esac
@@ -321,13 +364,19 @@ chmod 755 /usr/local/sbin/dejima-ci-host-egress
 install -d -m 0750 /etc/dejima-ci
 if [ ! -f /etc/dejima-ci/host-egress-allow ]; then
     cat > /etc/dejima-ci/host-egress-allow <<'ALLOW'
-# host port [proto] - LAN destinations this VM may reach. Keep it to the two
-# the runner cannot work without: the forge, and a resolver. The Proxmox
-# node's firewall enforces the same list; this copy is defence in depth.
+# host port [proto] - LAN destinations this host may reach, beyond the ones it
+# works out for itself. The Proxmox node's firewall enforces the same list;
+# this copy is defence in depth.
+#
+# You do NOT need to list a resolver here. dejima-ci-host-egress reads this
+# host's own nameservers from /etc/resolv.conf and allows them on 53 - if it
+# did not, enabling the policy would stop the host resolving anything, and
+# Docker reports a rejected DNS query as a connection refused by the registry
+# rather than by the resolver.
+#
+# In practice that leaves the forge, which is reached by name and by address:
 #
 # <forge-ip> 443 tcp
-# <resolver-ip> 53 udp
-# <resolver-ip> 53 tcp
 ALLOW
     chmod 640 /etc/dejima-ci/host-egress-allow
     say "  created    /etc/dejima-ci/host-egress-allow - fill it in before enabling"
@@ -405,13 +454,20 @@ cat >&2 <<EOF
  What is left
 =============================================================
 
-1. Fill in /etc/dejima-ci/host-egress-allow with the forge and resolver
-   addresses, then enable the host's own egress policy:
+1. Put the forge's address in /etc/dejima-ci/host-egress-allow, then enable
+   the host's own egress policy:
 
      systemctl enable --now dejima-ci-host-egress
 
-   Enabling it before that file is filled in will cut this host off from the
-   forge, which is why it is not enabled for you.
+   It denies this host every RFC1918 destination except the ones in that file
+   and this host's own resolvers, which it reads from /etc/resolv.conf rather
+   than asking you to copy. Enabling it with the file still empty therefore
+   costs you the forge - the runner keeps working on connections it already
+   has and fails to make new ones - so fill it in first.
+
+   To take it back off, including when it is what locked you out:
+
+     systemctl stop dejima-ci-host-egress
 
    On a privileged host this is the only egress control inside the VM, and it
    is still not a boundary: root here can drop it. The node's firewall is the
