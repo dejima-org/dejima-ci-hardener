@@ -11,6 +11,6 @@ arbitrary from outside.
 | [../proxmox/firewall.fw.template](../proxmox/firewall.fw.template) | The same node firewall as one annotated file, easier to review in one piece than as a table. Reference, not something to install |
 | [../examples/](../examples/) | The annotated templates `dejima-ci-runners` renders into `~/runners`. Every setting carries the reasoning for its value, which the generated copies do not - read them here rather than reading what lands on the host |
 
-One document lives outside this repository: dejima's `docs/ci.md`, which
+One document lives outside this repository: [dejima's `docs/ci.md`](https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md), which
 covers why a CI run needs any of this over a sandbox, and why no approval gate
 is offered. You do not need it to follow the README.

@@ -7,12 +7,14 @@ request, and gives its jobs as little as possible to execute it with.
 there is no step that copies files out of a dejima checkout, and dejima itself
 never needs to be present here.
 
-There are two kinds of runner host, and which one you are building changes
-almost everything below. Pick the tier first, then follow only its half.
+There are two kinds of runner host. Both are built by the same runbook and the
+same command, differing in one flag; what differs is what a job on them is
+granted, and so where the boundary containing it sits. Pick the tier first -
+only one of the two halves below applies.
 
 For *why* any of this is necessary - what a CI run adds over a sandbox, and
-why no approval gate is offered - see dejima's `docs/ci.md`. You do not need
-it to follow this.
+why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md). You do
+not need it to follow this.
 
 ## Do not install this next to dejima
 
@@ -41,8 +43,7 @@ boundary sits**, and therefore what you have to build to have one at all.
 **Confined** is where everything belongs that can go there. Its jobs get no
 Docker socket, run on a bridge this tool creates, and reach only the domains
 the served repositories declare in `.dejima/allowed-domains` on their `main`.
-`install.sh` builds all of that, and it is reasonable to run on a machine you
-already have.
+`dejima-ci-bootstrap --role confined` builds all of it.
 
 **Privileged** exists for the jobs that cannot work otherwise: building a
 Docker image, or dejima's own runtime tests, which assert things about a real
@@ -479,7 +480,7 @@ and failing it means the runner needs attention rather than the branch.
 | [docs/](docs/) | Index of everything below |
 | [docs/reference.md](docs/reference.md) | The two `docker.sock` settings, `CONFIG_FILE`, the `/data` volume, compose networks against job networks, sharing a job network between runners, why the privileged runner is separate, why the resolver is per-runner, the cache server |
 | [proxmox/README.md](proxmox/README.md) | Building the sacrificial VM: node firewall rules, bootstrap, snapshot, scheduled rollback |
-| dejima's `docs/ci.md` | Why a CI runner needs any of this, and why there is no approval gate |
+| [dejima's `docs/ci.md`](https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md) | Why a CI runner needs any of this, and why there is no approval gate |
 
 ## License
 

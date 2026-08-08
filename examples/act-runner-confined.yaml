@@ -15,7 +15,8 @@
 # keep in step. This header is replaced in the rendered copy.
 # @@NOTE_END@@
 #
-# See dejima's docs/ci.md for why each of these is here.
+# See dejima's docs/ci.md for why each of these is here:
+# https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md
 
 log:
   level: info

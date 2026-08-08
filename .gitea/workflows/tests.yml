@@ -57,7 +57,8 @@ name: tests
 # so a bare checkout there would test `main` on every pull request and pass
 # regardless of the change - green checks that mean nothing.
 #
-# See dejima's docs/ci.md, "Pinning the workflow with pull_request_target".
+# See dejima's docs/ci.md, "Pinning the workflow with pull_request_target":
+# https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md
 on:
   pull_request:
   pull_request_target:
