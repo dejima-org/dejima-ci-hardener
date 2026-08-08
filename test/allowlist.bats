@@ -244,7 +244,12 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -eq 2 ]
     [[ "$output" == *"token_file points at $T/token"* ]]
     [[ "$output" == *"does not exist"* ]]
-    [[ "$output" == *"READ-ONLY forge token"* ]]
+    # Which kind of token, not just that one is wanted. A forge hands out two
+    # and this tool asks for both; naming only "a token" is how the wrong one
+    # ends up in the file, where it authenticates against nothing and the only
+    # symptom is a 401 from an unrelated-looking command.
+    [[ "$output" == *"API token"* ]]
+    [[ "$output" == *"registration token"* ]]
 }
 
 @test "every configuration problem is reported in one run, not one per run" {

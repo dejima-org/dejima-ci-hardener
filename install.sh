@@ -501,8 +501,17 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
         say
         case "$status" in
             401) say "  The forge REJECTED the token (401)."
-                 say "  It is present and not empty, so it is wrong rather than missing:"
-                 say "  mistyped or truncated when pasted, revoked, or expired." ;;
+                 say
+                 say "  Check first that it is an API token. A RUNNER REGISTRATION token"
+                 say "  - from Actions -> Runners, the one dejima-ci-runners asks for -"
+                 say "  is a different string that the API rejects exactly like this, and"
+                 say "  the two are asked for minutes apart by this same tool."
+                 say
+                 say "  An API token comes from:"
+                 say "    $instance/user/settings/applications"
+                 say
+                 say "  Otherwise it is present but wrong: mistyped or truncated when"
+                 say "  pasted, revoked, or expired." ;;
             403) say "  The forge accepted the token but refused the read (403)."
                  say "  It authenticates, so this is scope rather than identity - a Gitea"
                  say "  token created with no scopes selected reads nothing. It needs read"

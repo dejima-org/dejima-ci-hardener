@@ -106,7 +106,7 @@ declare -A HINT=(
     [out]="where the generated allowlist is written, e.g. /etc/dnsmasq.d/ci-allow.conf"
     [ref]="the branch treated as operator-approved, normally main"
     [reload]="the command that reloads the resolver, e.g. systemctl reload dnsmasq"
-    [token_file]="a file holding a READ-ONLY forge token, mode 0600"
+    [token_file]="a file holding a read-only forge API token, mode 0600 - from the forge's Settings -> Applications page, NOT a runner registration token"
     [repos_file]="one owner/repo per line - the repositories allowed to widen this runner's allowlist"
     [base_file]="names allowed regardless of any project declaration, one per line"
 )
