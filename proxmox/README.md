@@ -94,36 +94,104 @@ and moves on; there is no static-or-DHCP question to answer. So this is not a
 step you perform during the install. It is a decision you make somewhere else,
 before or after it.
 
-Two places it can live, and either is fine:
+So: **let the install finish on DHCP, then convert the guest to static.** That
+is the whole of it, and it is done from the Proxmox console rather than over
+SSH, because the address you are changing is the one an SSH session would be
+riding on.
 
-| Where | What you do | What it costs |
-| --- | --- | --- |
-| **Your DHCP server** | A reservation against the VM's MAC, which Proxmox shows under Hardware → Network Device | The VM keeps doing DHCP, which the firewall interferes with — see below |
-| **The guest** | After the install, edit `/etc/network/interfaces` and `systemctl restart networking` | Two records of the address if you also reserve it |
+**Open the console — VM → Console — and read what DHCP handed you.** Static
+config is not invented, it is the lease written down, so copy these three
+answers before changing anything:
 
-Reserving it *and* setting it statically in the guest is the belt-and-braces
-option, and the usual argument against that shape applies: two places to keep
-in step. If you take it, put the reserved address outside your DHCP pool so
-nothing else is ever handed it.
+```sh
+ip -o -4 addr show scope global      # the interface name, and the address/prefix
+ip route | grep default              # the gateway
+cat /etc/resolv.conf                 # the nameserver
+```
 
-**If you go the DHCP route, read this first.** Rules 5–8 in the next section
-drop outbound traffic to every RFC1918 range, and your DHCP server is almost
-certainly inside one. A lease renewal at T1 is a *unicast* `DHCPREQUEST` to
-that server, so it is dropped. The lease usually survives anyway — at T2 the
-client gives up on unicast and rebinds by broadcast, and `255.255.255.255`
-matches none of those DROP rules — but you are relying on the fallback path of
-a protocol rather than on it working. If the rebind also fails, the lease
-expires and the VM drops off the network for a reason that looks nothing like
-a firewall rule.
+The interface is something like `ens18`, not `eth0` — modern Debian names them
+by bus position, and using the wrong name here leaves the VM with no network at
+all on the next boot.
 
-Two ways to fix it, if you want DHCP: tick **DHCP** under VM → Firewall →
-Options, which is what that option is for, or add an explicit `OUT ACCEPT` to
-your DHCP server on `udp/67` above the DROP rules. The second widens the LAN
-exposure the next section calls "the entire remaining LAN exposure" from two
-hosts to three, so say so to yourself before you add it.
+**Then edit `/etc/network/interfaces`.** A netinst server install configures
+the network with ifupdown, and leaves a stanza like this. If that file has no
+stanza for your interface, this install is managing the network some other way
+and none of the rest of this applies — find out which before editing anything.
 
-Static in the guest sidesteps all of that: no DHCP traffic, no third pinhole,
-nothing to renew.
+```
+allow-hotplug ens18
+iface ens18 inet dhcp
+```
+
+Replace those two lines, substituting your own values and interface name:
+
+```
+auto ens18
+iface ens18 inet static
+    address 192.0.2.40/24
+    gateway 192.0.2.1
+```
+
+`auto` rather than `allow-hotplug`: `auto` brings the interface up as part of
+boot, so a machine that is rebooted by the rollback cadence in §6 comes back
+with its network regardless of how the device is enumerated that time.
+
+The prefix goes on the address (`/24`), which is the modern ifupdown form and
+replaces the separate `netmask` line older guides use. Leave `lo` alone.
+
+**Set the nameserver, because nothing else will now.** Under DHCP the client
+wrote `/etc/resolv.conf` for you; with no DHCP client running, that file is
+whatever it was last left as and nothing maintains it. Write it directly:
+
+```sh
+printf 'nameserver 192.0.2.11\n' | sudo tee /etc/resolv.conf
+```
+
+`dns-nameservers` inside the interfaces stanza is the other documented way and
+it is silently ignored unless `resolvconf` is installed, which it is not here.
+This is also the file §3's "Values that must agree" reads for the firewall's
+DNS pinhole, so getting it wrong breaks name resolution and one firewall rule
+at the same time.
+
+**Apply and verify, still in the console:**
+
+```sh
+sudo systemctl restart networking
+ip -o -4 addr show scope global      # the address you chose
+ip route | grep default              # the gateway you chose
+getent hosts deb.debian.org          # resolution still works
+```
+
+Then reboot once and check it all survives. A static config that works until
+the next boot is the common way to get this wrong, and the rollback cadence
+means this VM reboots on a schedule without you watching.
+
+> **If something other than Proxmox serves DHCP on that segment** — an upstream
+> router, most commonly — then give this VM a fixed address there as well:
+> either a reservation against its MAC, which Proxmox shows under Hardware →
+> Network Device, or an address outside the pool entirely. The guest still gets
+> configured statically as above. The reservation is not what assigns the
+> address; it is what stops the DHCP server handing the same one to something
+> else later, which is a collision that presents as two machines intermittently
+> unreachable rather than as anything to do with this VM.
+
+**If you keep DHCP anyway, read this.** Rules 5–8 in the next section drop
+outbound traffic to every RFC1918 range, and a DHCP server is almost certainly
+inside one. A lease renewal at T1 is a *unicast* `DHCPREQUEST` to that server,
+so it is dropped. The lease usually survives — at T2 the client gives up on
+unicast and rebinds by broadcast, and `255.255.255.255` matches none of those
+DROP rules — but that is a protocol's last resort doing routine work, and if
+the rebind also fails the lease expires and the VM drops off the network for a
+reason that looks nothing like a firewall rule.
+
+Two ways to fix it: tick **DHCP** under VM → Firewall → Options, which is what
+that option is for, or add an explicit `OUT ACCEPT` to your DHCP server on
+`udp/67` above the DROP rules. The second widens the LAN exposure the next
+section calls "the entire remaining LAN exposure" from two hosts to three, so
+say so to yourself before you add it.
+
+Converting to static sidesteps both: no DHCP traffic, no third pinhole, nothing
+to renew.
 
 **What a moving address does *not* break.** Not the firewall. Every rule in the
 next section keys on a *destination*, except the SSH rule, which keys on *your*
@@ -163,7 +231,7 @@ next section assumes.
 | Debian desktop environment (and any desktop under it) | **off** |
 | web server | off |
 | **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
-| **standard system utilities** | **on** — without it you have no `git`, no `sudo`, and very little else |
+| **standard system utilities** | **on** — without it you have no `sudo` and very little else. It does *not* give you `git`; see §4 |
 
 Leave SSH server *on*. An earlier version of this runbook said to leave it out
 on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
@@ -324,11 +392,17 @@ package.
 
 ```sh
 ssh <you>@<vm-ip>
-sudo apt-get update && sudo apt-get install -y git   # if the install left it out
+sudo apt-get update && sudo apt-get install -y git
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
 sudo ./bin/dejima-ci-bootstrap --role privileged --mgmt <your-management-ip>
 ```
+
+**`git` is a real step, not a precaution.** A Debian netinst does not install
+it at any task selection, including "standard system utilities" — that task is
+`sudo` and the base tooling, and `git` is not in it. `dejima-ci-bootstrap`
+installs `git` too, which does not help here: you need it to fetch the script
+that would install it. This one line is the bootstrap's own bootstrap.
 
 Two ways this stalls, both from choices made during the install:
 
