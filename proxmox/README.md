@@ -164,33 +164,52 @@ later visit. That is reason enough to pin it.
 
 ## 3. The firewall rules
 
-**VM → Firewall → Options** first:
+Every runner VM gets the same eight rules, whichever tier it is, so build them
+once as a **security group** and apply that group to each. Two VMs with two
+hand-entered copies is two chances to get the ordering wrong and one of them to
+drift out of step later.
 
-| | |
-| --- | --- |
-| Firewall | `Yes` |
-| Input Policy | `DROP` |
-| Output Policy | `ACCEPT` |
+### Both tiers get these, for different reasons
 
-Inbound denies by default — this VM offers no service anyone should reach, so
-the exceptions are short and knowable. Outbound accepts by default, and the
-LAN is denied explicitly below.
+Apply them to the confined tier as well as the privileged one. The rules are
+identical; what differs is the job they are doing.
 
-That asymmetry is deliberate, and it is worth resisting the obvious-looking
-alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123.
+On the **privileged** tier this *is* the boundary. Its jobs hold the Docker
+socket and run in the host's network namespace, so root on that VM is the
+working assumption, and anything installed inside it can be removed by whatever
+holds root. These rules are on the hypervisor, applied to the tap device, and
+the guest cannot reach them.
 
-That breaks things — apt during a first install, and anything else needing a
-port nobody listed — and each breakage presents as a network fault rather than
-as a firewall rule. It also buys almost nothing. This VM is assumed to be owned
-by an attacker with root, and the guarantee being made is *reaches the internet,
-not your network*, not *reaches only three ports*; anyone who owns the box
-tunnels over 443 like everybody else.
+On the **confined** tier the primary control is inside the VM: the job network,
+its allowlisting resolver, and the DOCKER-USER rules. Those are real against a
+job precisely because a job cannot reach them, and they decide job egress by
+name and by address. The node firewall sits behind that as defence in depth. It
+changes nothing the allowlist has already decided; it covers the case the
+allowlist cannot, which is a job that escapes its container and reaches root on
+the host. At that point what is left is this, and it is doing exactly what it
+does on the other tier.
 
-Deny-by-default earns its keep where the protected set is enumerable, which is
-the LAN. The internet is not, and treating it as though it were gets you a rule
-set that looks strict and only gets in the way.
+So: primary in the guest and defence in depth on the node for confined, nothing
+in the guest and everything on the node for privileged.
 
-Then **VM → Firewall → Add**, in this order:
+**One thing to weigh before applying them to a confined host.** Rules 5–8 drop
+every RFC1918 destination, including ones a *job* might legitimately want. If a
+served repository declares an internal name in `.dejima/allowed-domains` — a
+package mirror, an internal registry — the allowlist will resolve it and the
+node firewall will drop the connection, which reads as the allowlist not
+working. An internal NTP server is the same story. Give anything in that
+position its own pinhole above the DROPs, or keep it off the allowlist so the
+failure is at least honest about where it comes from.
+
+And one value that has to agree: the resolver in rules 3–4 must be the same
+address as `upstream` in `/etc/dejima-ci/config`, since that is where the
+confined tier's dnsmasq forwards allowed queries. Point them at different
+servers and every job fails to resolve while the host itself is fine.
+
+### Build the group once
+
+**Datacenter → Firewall → Security Group → Create**, named
+`dejima-ci-hardener`. Then **Add** these to it, in this order:
 
 | # | Direction | Action | Protocol | Dest. port | Source / Dest | Why |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -203,7 +222,45 @@ Then **VM → Firewall → Add**, in this order:
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
 | 8 | out | DROP | — | — | **Dest:** `169.254.0.0/16` | Link-local, incl. metadata services |
 
-**Order matters, and it is the one thing here that is easy to get wrong.**
+### Then apply it, per VM
+
+A security group carries **rules and nothing else**. The policies are not part
+of it, so each VM still needs its own:
+
+**VM → Firewall → Options**
+
+| | |
+| --- | --- |
+| Firewall | `Yes` |
+| Input Policy | `DROP` |
+| Output Policy | `ACCEPT` |
+
+Inbound denies by default — this VM offers no service anyone should reach, so
+the exceptions are short and knowable. Outbound accepts by default, and the LAN
+is denied explicitly by the group.
+
+That asymmetry is deliberate, and it is worth resisting the obvious-looking
+alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123. That
+breaks things — apt during a first install, and anything else needing a port
+nobody listed — and each breakage presents as a network fault rather than as a
+firewall rule. It also buys almost nothing: this VM is assumed to be owned by
+an attacker with root, and the guarantee being made is *reaches the internet,
+not your network*, not *reaches only three ports*. Anyone who owns the box
+tunnels over 443 like everybody else.
+
+Deny-by-default earns its keep where the protected set is enumerable, which is
+the LAN. The internet is not, and treating it as though it were gets you a rule
+set that looks strict and only gets in the way.
+
+Then **VM → Firewall → Add → Security Group**, and select
+`dejima-ci-hardener`. That single entry is the whole rule set, in the order the
+group defines, and it is the only firewall rule the VM needs.
+
+Adding another runner later is that one step. The ordering below was got right
+once, in one place, and cannot drift between hosts.
+
+**Order matters within the group, and it is the one thing here that is easy to
+get wrong.**
 Rules are evaluated top to bottom and the first match wins. Your forge and
 your resolver are *inside* the ranges rules 5–8 drop, so if either pinhole
 ends up below them it is dead and the runner cannot reach the forge or resolve
