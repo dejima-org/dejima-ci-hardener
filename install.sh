@@ -606,7 +606,7 @@ out = $out
 ref = $ref
 reload = $reload"
 
-for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners; do
+for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip; do
     if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
         say "  unchanged  $BIN_DIR/$prog"
     else

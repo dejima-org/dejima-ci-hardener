@@ -22,6 +22,9 @@ SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 ROLE=""
 MGMT=""
 SKIP_HARDENER=0
+STATIC_IP=0
+NONINTERACTIVE=0
+[ -t 0 ] || NONINTERACTIVE=1
 
 usage() {
     cat >&2 <<EOF
@@ -36,6 +39,11 @@ Usage: sudo $PROG --role confined|privileged [--mgmt IP] [--skip-hardener]
   --skip-hardener    do the host hardening only, not the allowlist install.
                      Implied by --role privileged, where the allowlist has
                      nothing to attach to
+  --static-ip        pin this host to the address, gateway and resolver it
+                     currently has, so they stop depending on a DHCP lease.
+                     Offered anyway when the interface is on DHCP and there is
+                     a terminal to ask on
+  --non-interactive  never prompt; take what the flags say and no more
 EOF
     exit 2
 }
@@ -45,6 +53,8 @@ while [ $# -gt 0 ]; do
         --role) ROLE="${2:?}"; shift ;;
         --mgmt) MGMT="${2:?}"; shift ;;
         --skip-hardener) SKIP_HARDENER=1 ;;
+        --static-ip) STATIC_IP=1 ;;
+        -n|--non-interactive) NONINTERACTIVE=1 ;;
         -h|--help) usage ;;
         *) echo "$PROG: unknown argument: $1" >&2; usage ;;
     esac
@@ -113,6 +123,47 @@ if ! getent hosts deb.debian.org >/dev/null 2>&1; then
         fi
     } >&2
     exit 1
+fi
+
+# --- addressing -------------------------------------------------------------
+# Offered before anything is installed, because the values it writes are read
+# off the running interface and this is the moment they are known good: the
+# host resolved a name a line ago, so its address, route and resolver are all
+# working. Doing it later means reading them back through whatever the rest of
+# this script has changed.
+#
+# Skipped silently unless the interface is actually on DHCP, so re-running this
+# on a pinned host says nothing about it.
+if [ "$STATIC_IP" -ne 0 ] || {
+       [ "$NONINTERACTIVE" -eq 0 ] \
+       && iface=$(ip route show default 2>/dev/null | awk '{print $5; exit}') \
+       && [ -n "${iface:-}" ] \
+       && grep -qE "^[[:space:]]*iface[[:space:]]+$iface[[:space:]]+inet[[:space:]]+dhcp" \
+                /etc/network/interfaces 2>/dev/null
+   }; then
+    if [ "$STATIC_IP" -eq 0 ]; then
+        say
+        say "$iface is configured by DHCP. A runner wants an address that stays"
+        say "put: you reach this machine by it for the life of the VM, and a"
+        say "lease that moves is a machine you have to go and find."
+        say
+        say "This can pin it to exactly what it has now - same address, same"
+        say "gateway, same resolver - so nothing about reachability changes and"
+        say "there is nothing to type. Reserve the address on your DHCP server"
+        say "afterwards, or put it outside the pool."
+        say
+        printf 'Pin this host to its current address? (Y/n) [y]: ' >&2
+        IFS= read -r pin </dev/tty || pin=""
+        case "${pin:-y}" in n|N|no|No|NO) pin="" ;; *) pin=y ;; esac
+    else
+        pin=y
+    fi
+    if [ -n "$pin" ]; then
+        say
+        "$SRC/bin/dejima-ci-static-ip" ${NONINTERACTIVE:+} \
+            $( [ "$NONINTERACTIVE" -eq 1 ] && printf '%s' --non-interactive ) \
+            || die "could not pin the address; nothing else has been changed yet"
+    fi
 fi
 
 say "Installing packages..."
