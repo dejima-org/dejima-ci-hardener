@@ -85,14 +85,48 @@ in the guest is the whole of it. Leaving it out is a defensible choice on a
 machine built for a small surface; leaving it out while the box is ticked just
 looks like the agent is broken.
 
-Install Debian normally. Three things need attention, and only the last two of
-them are questions the installer actually asks.
+Install Debian normally, with two things to get right while it runs.
 
-**A stable address — and the installer will not ask you for one.** With a
-working DHCP server on the segment, the Debian netinst configures the network
-and moves on; there is no static-or-DHCP question to answer. So this is not a
-step you perform during the install. It is a decision you make somewhere else,
-before or after it.
+**Leave the root password blank.** Debian reads an empty root password as
+"use sudo", installs it, and puts your first user in the `sudo` group. Set a
+root password instead and it does neither — your user has no `sudo` at all,
+and the bootstrap step below opens with two `sudo` commands that will tell you
+so.
+
+If you have already set one, fix it from the console as root:
+
+```sh
+apt-get install -y sudo
+usermod -aG sudo <your-user>
+```
+
+then log out and back in — group membership is read at login, so the shell you
+are already in will not have it.
+
+**The software selection screen.** This is the one that bites, because it is
+a checklist where the defaults are wrong for this machine and clearing them
+all is worse. Navigate with the arrow keys and toggle with **space** — typing
+does nothing useful, and clearing every entry leaves you without the tools the
+next section assumes.
+
+| Entry | Set it to |
+| --- | --- |
+| Debian desktop environment (and any desktop under it) | **off** |
+| web server | off |
+| **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
+| **standard system utilities** | **on** — without it you have no `sudo` and very little else. It does *not* give you `git`; see §4 |
+
+Leave SSH server *on*. An earlier version of this runbook said to leave it out
+on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
+configuring is not installing, so following that left a VM with no way in
+except the Proxmox console.
+
+### Once the install has finished: give it a stable address
+
+**The installer will not have asked you for one.** With a working DHCP server
+on the segment, the Debian netinst configures the network and moves on; there
+is no static-or-DHCP question to answer, which is why this is not one of the
+two things above. It is a separate job, done on the installed system.
 
 So: **let the install finish on DHCP, then convert the guest to static.** That
 is the whole of it, and it is done from the Proxmox console rather than over
@@ -109,9 +143,10 @@ ip route | grep default              # the gateway
 cat /etc/resolv.conf                 # the nameserver
 ```
 
-The interface is something like `ens18`, not `eth0` — modern Debian names them
-by bus position, and using the wrong name here leaves the VM with no network at
-all on the next boot.
+`<iface>` below is whatever that first command named. It will not be `eth0`:
+modern Debian names interfaces by bus position, so expect something of the form
+`ensN` or `enpXsN`. Using the wrong name leaves the VM with no network at all on
+the next boot.
 
 **Then edit `/etc/network/interfaces`.** A netinst server install configures
 the network with ifupdown, and leaves a stanza like this. If that file has no
@@ -119,32 +154,33 @@ stanza for your interface, this install is managing the network some other way
 and none of the rest of this applies — find out which before editing anything.
 
 ```
-allow-hotplug ens18
-iface ens18 inet dhcp
+allow-hotplug <iface>
+iface <iface> inet dhcp
 ```
 
 Replace those two lines, substituting your own values and interface name:
 
 ```
-auto ens18
-iface ens18 inet static
-    address 192.0.2.40/24
-    gateway 192.0.2.1
+auto <iface>
+iface <iface> inet static
+    address <the address from step 1>/<prefix>
+    gateway <the gateway from step 1>
 ```
 
 `auto` rather than `allow-hotplug`: `auto` brings the interface up as part of
 boot, so a machine that is rebooted by the rollback cadence in §6 comes back
 with its network regardless of how the device is enumerated that time.
 
-The prefix goes on the address (`/24`), which is the modern ifupdown form and
-replaces the separate `netmask` line older guides use. Leave `lo` alone.
+The prefix goes on the address — `/24` on most home and small office networks
+— which is the modern ifupdown form and replaces the separate `netmask` line
+older guides use. Leave `lo` alone.
 
 **Set the nameserver, because nothing else will now.** Under DHCP the client
 wrote `/etc/resolv.conf` for you; with no DHCP client running, that file is
 whatever it was last left as and nothing maintains it. Write it directly:
 
 ```sh
-printf 'nameserver 192.0.2.11\n' | sudo tee /etc/resolv.conf
+printf 'nameserver <the nameserver from step 1>\n' | sudo tee /etc/resolv.conf
 ```
 
 `dns-nameservers` inside the interfaces stanza is the other documented way and
@@ -203,40 +239,6 @@ on a different address is still fully firewalled.
 What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
 later visit. That is reason enough to pin it, and it is a smaller claim than
 the one this used to make.
-
-**Leave the root password blank.** Debian reads an empty root password as
-"use sudo", installs it, and puts your first user in the `sudo` group. Set a
-root password instead and it does neither — your user has no `sudo` at all,
-and the bootstrap step below opens with two `sudo` commands that will tell you
-so.
-
-If you have already set one, fix it from the console as root:
-
-```sh
-apt-get install -y sudo
-usermod -aG sudo <your-user>
-```
-
-then log out and back in — group membership is read at login, so the shell you
-are already in will not have it.
-
-**The software selection screen.** This is the one that bites, because it is
-a checklist where the defaults are wrong for this machine and clearing them
-all is worse. Navigate with the arrow keys and toggle with **space** — typing
-does nothing useful, and clearing every entry leaves you without the tools the
-next section assumes.
-
-| Entry | Set it to |
-| --- | --- |
-| Debian desktop environment (and any desktop under it) | **off** |
-| web server | off |
-| **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
-| **standard system utilities** | **on** — without it you have no `sudo` and very little else. It does *not* give you `git`; see §4 |
-
-Leave SSH server *on*. An earlier version of this runbook said to leave it out
-on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
-configuring is not installing, so following that left a VM with no way in
-except the Proxmox console.
 
 ---
 

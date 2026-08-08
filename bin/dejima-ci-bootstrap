@@ -325,9 +325,9 @@ if [ ! -f /etc/dejima-ci/host-egress-allow ]; then
 # the runner cannot work without: the forge, and a resolver. The Proxmox
 # node's firewall enforces the same list; this copy is defence in depth.
 #
-# 192.0.2.20 443 tcp
-# 192.0.2.11 53 udp
-# 192.0.2.11 53 tcp
+# <forge-ip> 443 tcp
+# <resolver-ip> 53 udp
+# <resolver-ip> 53 tcp
 ALLOW
     chmod 640 /etc/dejima-ci/host-egress-allow
     say "  created    /etc/dejima-ci/host-egress-allow - fill it in before enabling"

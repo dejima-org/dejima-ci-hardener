@@ -83,11 +83,16 @@ network.**
 Either works. On a machine you already have:
 
 ```sh
-sudo apt-get install ipset iptables dnsmasq
+sudo apt-get install git ipset iptables dnsmasq
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
 sudo ./install.sh
 ```
+
+`git` is in that list because a Debian netinst does not install it — not even
+under "standard system utilities", which is `sudo` and the base tooling. It is
+listed first because it is the one you need before the next line rather than
+after `install.sh`.
 
 On a fresh VM, [proxmox/README.md](proxmox/README.md) builds one and
 `dejima-ci-bootstrap` finishes it - packages, sshd, unattended upgrades, the
