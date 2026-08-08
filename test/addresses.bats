@@ -58,7 +58,13 @@ setup() {
         1.2.3.4             # obviously-fake, in an allowlist parser fixture
     )
 
+    # Anything inside the RFC 5737 documentation ranges is fine without being
+    # listed: they exist for examples, route nowhere, and belong to nobody.
+    # Listing each host individually would grow this list with every fixture
+    # until nobody read it.
     pattern="$(printf '%s\n' "${allowed[@]}" | sed 's/[.]/\\./g; s|/|\\/|g' | paste -sd'|' -)"
+    doc='(192\.0\.2|198\.51\.100|203\.0\.113)\.[0-9]+(/[0-9]{1,2})?'
+    pattern="$pattern|$doc"
 
     # git ls-files: only what is committed, and never .git or a stray render
     # left in the working tree by a local run.

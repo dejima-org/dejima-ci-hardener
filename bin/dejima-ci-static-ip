@@ -50,7 +50,7 @@ invocation takes no arguments at all and changes nothing about how the host is
 reachable - only what decides that after the next start.
 
   --iface NAME       interface to pin (default: the one carrying the default route)
-  --address CIDR     e.g. 10.0.0.5/24  (default: its current address)
+  --address CIDR     e.g. 192.0.2.5/24  (default: its current address)
   --gateway IP       (default: the current default route)
   --nameserver IP    repeatable (default: what $RESOLV names)
   --non-interactive  take the defaults; do not prompt
