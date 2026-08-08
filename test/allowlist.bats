@@ -259,12 +259,26 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
 # there at a root-owned path - sending them to create something that already
 # existed. The two cases need different messages because they need different
 # actions.
-@test "a missing config and an unreadable one are different messages" {
+@test "a missing config says so, and says what creates one" {
     # Not run_tool: it appends its own --config, which would win over this one.
     run "$BIN" check --config "$T/does-not-exist"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no config at"* ]]
     [[ "$output" == *"install.sh"* ]]
+}
+
+@test "an unreadable config is a different message from a missing one" {
+    # Only a caller who cannot read the file ever sees this branch, which makes
+    # the assertion depend on who is running it. `[ -r ]` is access(2) with
+    # R_OK, and that always succeeds for a process holding CAP_DAC_OVERRIDE -
+    # so as root the file is readable at mode 000, the branch is unreachable,
+    # and this fails on the privilege of the caller rather than on anything the
+    # program does.
+    #
+    # Skipped rather than asserted-around, because there is nothing here to
+    # check when the caller can bypass the permission being tested. CI runs the
+    # suite as an ordinary user precisely so that this runs there.
+    [ "$(id -u)" -ne 0 ] || skip "root reads a mode-000 file, so this branch is unreachable"
 
     chmod 000 "$T/config"
     run_tool render

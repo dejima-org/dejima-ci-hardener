@@ -146,7 +146,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - run: bats test/
+      # As an ordinary user, not root. One test asserts that the allowlist
+      # reports an unreadable config differently from a missing one, and that
+      # message exists only for a caller who cannot read the file. `[ -r ]` is
+      # access(2) with R_OK, which always succeeds for a process holding
+      # CAP_DAC_OVERRIDE - so as root the file is readable at mode 000, the
+      # branch is unreachable, and the test fails on the privilege of whoever
+      # ran it rather than on anything the program does.
+      #
+      # The test skips itself under root rather than failing, so this is what
+      # makes it actually run rather than what stops it breaking.
+      #
+      # Nothing else in the suite needs either privilege: it stubs curl,
+      # dnsmasq and docker, and writes only into its own temp directories.
+      # `node` is uid 1000 in this image and needs to own the checkout, which
+      # actions/checkout leaves owned by root.
+      - run: |
+          chown -R node:node .
+          su node -c "bats test/"
 
   compose-schema:
     # The only job here that needs anything the privileged tier grants, and the
