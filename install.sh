@@ -122,21 +122,20 @@ for tool in ipset iptables ip6tables dnsmasq docker; do
 done
 [ -z "$missing" ] || die "missing required commands:$missing
 
-From this checkout, which installs these and changes nothing else about the
-host - no service disabled, sshd untouched, no egress policy, no unattended
-upgrades:
+On a host built for this, run the bootstrap instead of this - it installs
+these, hardens the host, and then runs this script itself:
 
-  sudo $SRC/bin/dejima-ci-bootstrap --role confined --packages-only
+  sudo $SRC/bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
 
-Rather than an apt line, because one does not cover it. dejima-ci-runners
-needs Docker Compose as well, and compose has no single package name that
-works across releases: docker-compose-v2 does not exist before trixie, and the
-fallbacks are backports and then Docker's own repository. That script tries
-each and verifies the result; a README cannot.
+Running this on its own is for changing a setting afterwards, on a host that
+already has what it needs.
 
-This installer deliberately installs nothing itself. It configures a machine
-you already have, and adding a Docker daemon to one is not a thing to do on
-someone's behalf.
+If you are deliberately not using the bootstrap, install them yourself. Note
+that dejima-ci-runners will want Docker Compose v2 as well, and compose has no
+single package name that works across releases: docker-compose-v2 does not
+exist before trixie, and the fallbacks are backports and then Docker's own
+repository. This installer fetches nothing on your behalf - adding a Docker
+daemon to someone's machine is not a thing to do without being asked.
 
 Without ipset the firewall cannot be applied, and a runner with no egress
 policy looks exactly like one with. Without docker there is no job network to

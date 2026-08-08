@@ -22,12 +22,10 @@ SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 ROLE=""
 MGMT=""
 SKIP_HARDENER=0
-PACKAGES_ONLY=0
 
 usage() {
     cat >&2 <<EOF
 Usage: sudo $PROG --role confined|privileged [--mgmt IP] [--skip-hardener]
-                  [--packages-only]
 
   --role confined    jobs are confined on this host: no Docker socket in job
                      containers, own bridge network, deny-by-default egress
@@ -38,11 +36,6 @@ Usage: sudo $PROG --role confined|privileged [--mgmt IP] [--skip-hardener]
   --skip-hardener    do the host hardening only, not the allowlist install.
                      Implied by --role privileged, where the allowlist has
                      nothing to attach to
-  --packages-only    install the packages and stop, changing nothing else.
-                     For a machine you already have and do not want this
-                     script's opinions about: install.sh needs docker and
-                     compose, and compose has no one package name that works
-                     across Debian releases
 EOF
     exit 2
 }
@@ -52,7 +45,6 @@ while [ $# -gt 0 ]; do
         --role) ROLE="${2:?}"; shift ;;
         --mgmt) MGMT="${2:?}"; shift ;;
         --skip-hardener) SKIP_HARDENER=1 ;;
-        --packages-only) PACKAGES_ONLY=1 ;;
         -h|--help) usage ;;
         *) echo "$PROG: unknown argument: $1" >&2; usage ;;
     esac
@@ -207,30 +199,6 @@ else
         exit 1
     fi
     say "  compose    $(docker compose version 2>/dev/null | head -1)"
-fi
-
-# Everything above this line is packages, and everything below it changes how
-# the machine behaves: services disabled, sshd rewritten, an egress policy
-# installed, unattended upgrades enabled.
-#
-# That split is why --packages-only stops here rather than needing its own
-# copy of the routes above. install.sh configures a machine someone already
-# has and installs nothing, which leaves the packages it depends on as their
-# problem - and "apt-get install docker.io" is not an adequate answer to it.
-# Compose in particular has no single package name that works across releases:
-# docker-compose-v2 does not exist before trixie, and the fallbacks are the
-# thirty lines above. Pointing at those beats restating a worse version of
-# them in a README.
-if [ "$PACKAGES_ONLY" -eq 1 ]; then
-    say
-    say "Packages only (--packages-only). Nothing else on this host was changed:"
-    say "no service was disabled, sshd was not touched, no egress policy was"
-    say "installed, and unattended upgrades were not enabled."
-    say
-    say "Run ./install.sh next for the allowlist, its resolver and the job"
-    say "firewall. To harden the host itself as well, re-run this without"
-    say "--packages-only."
-    exit 0
 fi
 
 # --- services this host has no business running -----------------------------

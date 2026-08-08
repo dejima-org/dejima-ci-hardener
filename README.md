@@ -78,48 +78,64 @@ network.**
 
 # The confined tier
 
-## Build or harden the host
+## Build the host
 
-Either works. On a machine you already have:
+Same shape as the other tier: [proxmox/README.md](proxmox/README.md) builds
+the VM, then one command inside it.
 
 ```sh
 sudo apt-get install git
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
-sudo ./bin/dejima-ci-bootstrap --role confined --packages-only
-sudo ./install.sh
+sudo ./bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
 ```
 
 `git` is the only thing apt is asked for directly, because it is the one you
 need before there is a checkout to run anything from. A Debian netinst does not
 install it at any task selection, including "standard system utilities" — that
-task is `sudo` and the base tooling.
+task is `sudo` and the base tooling. Everything else is installed by the
+script, which is the point of it.
 
-**`--packages-only` installs the dependencies and stops.** It changes nothing
-else: no service disabled, sshd untouched, no egress policy, no unattended
-upgrades. It exists because the packages are not a list you can usefully paste
-into a README. `install.sh` needs Docker, `dejima-ci-runners` needs Compose,
-and Compose has no single package name that works across releases —
-`docker-compose-v2` does not exist before trixie, and the fallbacks are
-backports and then Docker's own apt repository, tried in that order and
-verified rather than assumed. Debian also splits the Docker client into
-`docker-cli`, which `--no-install-recommends` drops, leaving a daemon and no
-`docker` binary.
+**That one command is the whole tier.** It installs the packages, removes
+listeners a runner has no use for, hardens sshd, installs the host's own egress
+policy, enables unattended security upgrades, and then runs `install.sh` for
+the job network, its allowlist, its resolver and its firewall — and offers to
+set up the runners at the end.
 
-**`install.sh` itself installs nothing.** It configures a machine you already
-have, and quietly adding a Docker daemon to one is not a thing it should do on
-your behalf. It checks what it needs, and stops naming what is absent.
+The packages are worth a word, because they are not a list you can usefully
+paste into a README. `install.sh` needs Docker; `dejima-ci-runners` needs
+Compose; Compose has no single package name that works across releases, since
+`docker-compose-v2` does not exist before trixie and the fallbacks are
+backports and then Docker's own apt repository. Debian also splits the Docker
+client into `docker-cli`, which `--no-install-recommends` drops, leaving a
+daemon and no `docker` binary. The script tries each route and checks the
+result rather than trusting apt's exit code.
 
-On a fresh VM, [proxmox/README.md](proxmox/README.md) builds one and
-`dejima-ci-bootstrap` finishes it — the same packages, then sshd, unattended
-upgrades, the host's own egress policy, and `install.sh` at the end:
+### Running `install.sh` on its own
+
+It is a separate program and stays one, but not because building a host is a
+two-step job. It is what you run **afterwards**, to change something:
 
 ```sh
-sudo ./bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
+sudo ./install.sh          # add a repository, change the forge, move the resolver
 ```
 
-That is the whole of the confined tier in one command. Use it on a machine
-built for this; use `--packages-only` on a machine that was not.
+It is idempotent, so pressing Enter at every prompt changes nothing, and
+re-running the whole bootstrap to edit one setting would mean another
+`apt-get update`, another sshd rewrite and another egress policy install to
+change a line in a config file.
+
+It installs no packages, on the grounds that adding a Docker daemon to a
+machine is not a thing to do on someone's behalf — so on a host that
+`dejima-ci-bootstrap` did not build, it stops and names what is missing rather
+than fetching it. That is the deliberate case; the ordinary one is that
+bootstrap already put them there.
+
+Note what running it alone leaves undone: **the host hardening.** You get the
+job network, the allowlist, the resolver and the DOCKER-USER rules, on a
+machine that still answers on every listener the install left running, with
+whatever sshd configuration it came with. The confined tier's controls sit in
+front of jobs, not in front of the host.
 
 ## What `install.sh` does
 
@@ -214,9 +230,9 @@ boundary](#register-scope-is-the-boundary-the-label-is-not).
 
 ## Build the VM. Do not harden an existing one.
 
-`install.sh` hardens the runners on a machine you already have. For this tier
-that is the wrong starting point - its jobs get the Docker socket, so the
-assumption has to be that a compromised job gets root on that host, and
+Repurposing a machine you already have is a reasonable thought for the confined
+tier and the wrong starting point for this one. Its jobs get the Docker socket,
+so the assumption has to be that a compromised job gets root on that host, and
 handing an existing machine to that assumption is not a decision many people
 would make deliberately.
 
