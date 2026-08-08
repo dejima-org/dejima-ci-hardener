@@ -114,11 +114,26 @@ next section assumes.
 | Debian desktop environment (and any desktop under it) | **off** |
 | web server | off |
 | **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
-| **standard system utilities** | **on** — without it you have no `sudo` and very little else. It does *not* give you `git`; see §4 |
+| **standard system utilities** | **on** — the one that quietly costs you the most if it is off; see below. It does *not* give you `git`; see §4 |
 
 Leave SSH server *on*, even though `dejima-ci-bootstrap` configures sshd
 later. Configuring is not installing: skip the task and the VM has no sshd to
 configure and no way in except the Proxmox console.
+
+**Leave standard system utilities on as well**, and be more careful about this
+one than it looks. It is where `sudo` comes from, and also `dbus` — which
+nothing here obviously needs until you notice that `systemctl` talks to the
+service manager over the system bus. Without it, `systemctl disable <a unit
+that does not exist>` still answers normally, because that is only a
+unit-file lookup, while every command that starts, stops, enables or reloads
+anything fails with `Failed to connect to system scope bus`. A host can run
+for days in that state: systemd is PID 1 and everything already started keeps
+running, so what you have is a machine whose services cannot be managed and
+which reports nothing unusual until you try.
+
+`dejima-ci-bootstrap` installs `dbus` itself and refuses to continue without a
+reachable bus, so a VM built this way recovers by re-running it. That is a
+backstop, not a reason to clear the task.
 
 ### Once the install has finished: give it a stable address
 
