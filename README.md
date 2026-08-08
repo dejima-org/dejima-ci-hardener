@@ -83,34 +83,43 @@ network.**
 Either works. On a machine you already have:
 
 ```sh
-sudo apt-get install git ipset iptables dnsmasq docker.io
+sudo apt-get install git
 git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
 cd dejima-ci-hardener
+sudo ./bin/dejima-ci-bootstrap --role confined --packages-only
 sudo ./install.sh
 ```
 
-**`install.sh` installs no packages, so that line has to be complete.** It
-configures a machine you already have, and quietly adding a Docker daemon to
-one is not a thing it should do on your behalf. It checks for what it needs and
-stops if anything is absent.
+`git` is the only thing apt is asked for directly, because it is the one you
+need before there is a checkout to run anything from. A Debian netinst does not
+install it at any task selection, including "standard system utilities" — that
+task is `sudo` and the base tooling.
 
-Two of those are easy to be missing on a fresh Debian. `git` is not installed
-by a netinst at any task selection, including "standard system utilities" —
-that task is `sudo` and the base tooling. And `docker.io` is what `install.sh`
-creates the job network with, which is the first thing it does. On trixie the
-client is a separate `docker-cli` package that arrives as a recommendation of
-`docker.io`; if you install with `--no-install-recommends`, name it too.
+**`--packages-only` installs the dependencies and stops.** It changes nothing
+else: no service disabled, sshd untouched, no egress policy, no unattended
+upgrades. It exists because the packages are not a list you can usefully paste
+into a README. `install.sh` needs Docker, `dejima-ci-runners` needs Compose,
+and Compose has no single package name that works across releases —
+`docker-compose-v2` does not exist before trixie, and the fallbacks are
+backports and then Docker's own apt repository, tried in that order and
+verified rather than assumed. Debian also splits the Docker client into
+`docker-cli`, which `--no-install-recommends` drops, leaving a daemon and no
+`docker` binary.
+
+**`install.sh` itself installs nothing.** It configures a machine you already
+have, and quietly adding a Docker daemon to one is not a thing it should do on
+your behalf. It checks what it needs, and stops naming what is absent.
 
 On a fresh VM, [proxmox/README.md](proxmox/README.md) builds one and
-`dejima-ci-bootstrap` finishes it - packages, sshd, unattended upgrades, the
-host's own egress policy, and then `install.sh` for the job allowlist:
+`dejima-ci-bootstrap` finishes it — the same packages, then sshd, unattended
+upgrades, the host's own egress policy, and `install.sh` at the end:
 
 ```sh
 sudo ./bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
 ```
 
-That path needs none of the apt line above: installing those packages is the
-first thing `dejima-ci-bootstrap` does, Docker included.
+That is the whole of the confined tier in one command. Use it on a machine
+built for this; use `--packages-only` on a machine that was not.
 
 ## What `install.sh` does
 

@@ -121,12 +121,22 @@ for tool in ipset iptables ip6tables dnsmasq docker; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
 [ -z "$missing" ] || die "missing required commands:$missing
-On Debian/Ubuntu: apt-get install ipset iptables dnsmasq docker.io
 
-This installs nothing itself - it configures a machine you already have, and
-adding a Docker daemon to one is not a thing to do on someone's behalf. On a
-host built by dejima-ci-bootstrap these are already present; it installs them
-before it gets here.
+From this checkout, which installs these and changes nothing else about the
+host - no service disabled, sshd untouched, no egress policy, no unattended
+upgrades:
+
+  sudo $SRC/bin/dejima-ci-bootstrap --role confined --packages-only
+
+Rather than an apt line, because one does not cover it. dejima-ci-runners
+needs Docker Compose as well, and compose has no single package name that
+works across releases: docker-compose-v2 does not exist before trixie, and the
+fallbacks are backports and then Docker's own repository. That script tries
+each and verifies the result; a README cannot.
+
+This installer deliberately installs nothing itself. It configures a machine
+you already have, and adding a Docker daemon to one is not a thing to do on
+someone's behalf.
 
 Without ipset the firewall cannot be applied, and a runner with no egress
 policy looks exactly like one with. Without docker there is no job network to
