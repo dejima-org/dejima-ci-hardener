@@ -30,23 +30,23 @@ policy_in: DROP
 
 # Outbound ACCEPTs by default, and the LAN is denied explicitly below.
 #
-# The earlier version of this file did the opposite - deny outbound, then
-# allow tcp/80, tcp/443 and udp/123 - and it was wrong twice over.
+# Do not be tempted to invert this - deny outbound, then allow tcp/80, tcp/443
+# and udp/123 - because it is wrong twice over.
 #
-# It broke things: apt during a first install, and anything else that happens
-# to need a port nobody listed. Every such breakage looks like a network
-# fault rather than a firewall rule, and each one is found the hard way.
+# It breaks things: apt during a first install, and anything else that happens
+# to need a port nobody listed. Every such breakage looks like a network fault
+# rather than a firewall rule, so each one is found the hard way.
 #
-# And it bought almost nothing. This VM is assumed to be owned by an attacker
+# And it buys almost nothing. This VM is assumed to be owned by an attacker
 # with root; the guarantee being made is "reaches the internet, not your
 # network", not "reaches only three ports". Someone who owns the box tunnels
-# over 443 like everyone else, so the port list constrained honest software
-# and not them.
+# over 443 like everyone else, so the port list constrains honest software and
+# not them.
 #
-# Deny-by-default still applies where the protected set is enumerable, which
+# Deny-by-default earns its keep where the protected set is enumerable, which
 # is what the four DROPs below are. It does not apply to the internet, which
-# is not, and pretending otherwise produced a rule set that looked strict and
-# only got in the way.
+# is not enumerable, and treating it as though it were gets you a rule set
+# that looks strict and only gets in the way.
 policy_out: ACCEPT
 
 log_level_in: nolog

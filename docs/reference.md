@@ -122,19 +122,17 @@ the host daemon resolves the source host-side.
 
 The Proxmox firewall in [proxmox/README.md](../proxmox/README.md) denies the
 privileged VM every RFC1918 destination and leaves the public internet to the
-default policy. That asymmetry is deliberate, and it is the opposite of what
-an earlier version of that runbook said.
+default policy. That asymmetry is deliberate.
 
 An address allowlist there would break on every CDN rotation. A port allowlist
-buys nothing: an earlier version permitted only tcp/80, tcp/443 and udp/123,
-which broke apt on a first install, and each breakage presented as a network
-fault rather than as a firewall rule. Anyone who owns that box tunnels over
-443 like everybody else, and neither restriction would hold against VM root in
-any case.
+buys nothing: permitting only tcp/80, tcp/443 and udp/123 breaks apt on a first
+install, and each breakage presents as a network fault rather than as a
+firewall rule. Anyone who owns that box tunnels over 443 like everybody else,
+and neither restriction would hold against VM root in any case.
 
 Deny-by-default earns its keep where the protected set is enumerable, which is
-the LAN. The internet is not, and pretending otherwise produced a rule set
-that looked strict and only got in the way.
+the LAN. The internet is not, and treating it as though it were gets you a rule
+set that looks strict and only gets in the way.
 
 Note what that leaves. On the privileged tier there is no egress allowlist in
 front of job containers either — they are in the host's network namespace, so

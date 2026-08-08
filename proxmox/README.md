@@ -116,10 +116,9 @@ next section assumes.
 | **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
 | **standard system utilities** | **on** — without it you have no `sudo` and very little else. It does *not* give you `git`; see §4 |
 
-Leave SSH server *on*. An earlier version of this runbook said to leave it out
-on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
-configuring is not installing, so following that left a VM with no way in
-except the Proxmox console.
+Leave SSH server *on*, even though `dejima-ci-bootstrap` configures sshd
+later. Configuring is not installing: skip the task and the VM has no sshd to
+configure and no way in except the Proxmox console.
 
 ### Once the install has finished: give it a stable address
 
@@ -232,9 +231,9 @@ to renew.
 **What a moving address does *not* break.** Not the firewall. Every rule in the
 next section keys on a *destination*, except the SSH rule, which keys on *your*
 management address — and Proxmox applies the whole set to this VM's tap device,
-identified by VMID rather than by IP. An earlier version of this runbook said
-the rules name the VM by address. They do not, and a rebuilt VM that comes up
-on a different address is still fully firewalled.
+identified by VMID rather than by IP. Nothing anywhere names this VM by its own
+address, so a rebuilt VM that comes up on a different one is still fully
+firewalled.
 
 What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
 later visit. That is reason enough to pin it, and it is a smaller claim than
@@ -256,17 +255,19 @@ Inbound denies by default — this VM offers no service anyone should reach, so
 the exceptions are short and knowable. Outbound accepts by default, and the
 LAN is denied explicitly below.
 
-That asymmetry is deliberate, and it is the opposite of what an earlier
-version of this runbook said. Denying outbound and then allowing tcp/80,
-tcp/443 and udp/123 breaks things — apt during a first install, and anything
-else needing a port nobody listed — and each breakage presents as a network
-fault rather than as a firewall rule. It also bought almost nothing: this VM
-is assumed to be owned by an attacker with root, and the guarantee is *reaches
-the internet, not your network*, not *reaches only three ports*. Anyone who
-owns the box tunnels over 443 like everybody else. Deny-by-default earns its
-keep where the protected set is enumerable, which is the LAN; the internet is
-not, and pretending otherwise produced a rule set that looked strict and only
-got in the way.
+That asymmetry is deliberate, and it is worth resisting the obvious-looking
+alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123.
+
+That breaks things — apt during a first install, and anything else needing a
+port nobody listed — and each breakage presents as a network fault rather than
+as a firewall rule. It also buys almost nothing. This VM is assumed to be owned
+by an attacker with root, and the guarantee being made is *reaches the internet,
+not your network*, not *reaches only three ports*; anyone who owns the box
+tunnels over 443 like everybody else.
+
+Deny-by-default earns its keep where the protected set is enumerable, which is
+the LAN. The internet is not, and treating it as though it were gets you a rule
+set that looks strict and only gets in the way.
 
 Then **VM → Firewall → Add**, in this order:
 
@@ -298,9 +299,9 @@ Nothing follows rule 8. The public internet is reached by the default policy.
 ### Values that must agree
 
 Three pairs here are entered in two places each, and each pair is silent when
-the halves disagree. Read the real value off the machine rather than
-recalling it — that is the whole of the advice, and every one of these has
-been got wrong at least once.
+the halves disagree. Read the real value off the machine rather than recalling
+it — that is the whole of the advice, and every one of these is easy to get
+wrong from memory.
 
 | This | Must equal this | Read the truth from |
 | --- | --- | --- |
