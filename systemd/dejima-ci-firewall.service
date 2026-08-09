@@ -15,22 +15,22 @@
 # that was never the problem.
 #
 # Install as /etc/systemd/system/dejima-ci-firewall.service, then:
-#   systemctl daemon-reload
-#   systemctl enable --now dejima-ci-firewall
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dejima-ci-firewall
 #
 # Verify it actually rebinds, rather than assuming:
-#   systemctl restart docker && sudo iptables -S DOCKER-USER
+#   sudo systemctl restart docker && sudo iptables -S DOCKER-USER
 
 [Unit]
 Description=dejima CI job-network egress rules
-Documentation=https://gitbox.example.com/branderson/dejima/src/branch/main/ci/README.md
+Documentation=https://gitbox.branderson.io/dejima/dejima-ci-hardener
 After=docker.service
 PartOf=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/dejima-ci-firewall
+ExecStart=@@BIN_DIR@@/dejima-ci-firewall
 
 # Failing to apply the rules must be loud. A runner that came up without them
 # is a runner with unrestricted egress, which is the state this whole setup

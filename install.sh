@@ -18,6 +18,7 @@ BIN_DIR=${BIN_DIR:-/usr/local/sbin}
 CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
 DNSMASQ_DIR=${DNSMASQ_DIR:-/etc/dnsmasq.d}
+TEMPLATE_DIR=${TEMPLATE_DIR:-/usr/local/share/dejima-ci/templates}
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG="$CONF_DIR/config"
@@ -98,6 +99,78 @@ cfg_get() {
     done < "$CONFIG"
 }
 
+# ask, defaulting to the config file's value and falling back to a built-in
+# when there is none.
+#
+# The fallback is passed to ask rather than applied to its answer afterwards,
+# and that is the whole point: ask only prints [brackets] when it is given a
+# non-empty default, so a fallback applied after the fact is invisible. On a
+# first install cfg_get returns nothing for every one of these, so each prompt
+# appeared bare - asking for a path, a branch and a shell command with no
+# indication that pressing Enter would produce a working answer, or what it
+# would be.
+ask_cfg() {
+    local __var="$1" prompt="$2" key="$3" fallback="$4" def
+    def="$(cfg_get "$key")"
+    [ -n "$def" ] || def="$fallback"
+    ask "$__var" "$prompt" "$def"
+}
+
+# Collect a list, with a way to take an entry back and a look at the whole of
+# it before it is written.
+#
+# Entry used to be one-way: a mistyped line was accepted in silence, and the
+# only ways out were to live with it or abandon the run and start the installer
+# again. Neither is proportionate to a typo, and the list this reads decides
+# which repositories may widen a runner's allowlist - somewhere a wrong entry
+# should be easy to notice and cheap to undo.
+read_list() {   # read_list VAR PROMPT VALIDATOR
+    local __var="$1" prompt="$2" validate="$3" acc="" one ok removed
+    while :; do
+        acc=""
+        say "One per line. '-' takes back the last one. Blank line to finish."
+        while :; do
+            ask one "  $prompt" ""
+            case "$one" in
+                "") break ;;
+                -)  if [ -n "$acc" ]; then
+                        removed="${acc##*$'\n'}"
+                        if [ "$removed" = "$acc" ]; then acc=""; else acc="${acc%$'\n'*}"; fi
+                        say "    took back $removed"
+                    else
+                        say "    nothing to take back"
+                    fi
+                    continue ;;
+            esac
+            "$validate" "$one" || continue
+            acc="${acc:+$acc$'\n'}$one"
+        done
+        if [ -z "$acc" ]; then printf -v "$__var" '%s' ""; return 0; fi
+        say
+        say "  That is:"
+        sed 's/^/    /' <<< "$acc" >&2
+        say
+        ask ok "Is that right? (Y/n)" "y"
+        case "${ok,,}" in n|no) say; continue ;; esac
+        printf -v "$__var" '%s' "$acc"
+        return 0
+    done
+}
+
+# Checked on the way in, so a malformed line is rejected while the person who
+# typed it is still looking at it. Neither of these can tell a real repository
+# from an imagined one - only the forge can - but both catch the shape.
+valid_repo_entry() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && return 0
+    say "    not an owner/repo - e.g. acme/widget"
+    return 1
+}
+valid_domain_entry() {
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] && return 0
+    say "    not a domain name - e.g. deb.debian.org"
+    return 1
+}
+
 # The upstream resolver is the setting people get wrong, so offer what this
 # host already uses rather than making them go and find it.
 detect_upstream() {
@@ -120,9 +193,25 @@ for tool in ipset iptables ip6tables dnsmasq docker; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
 [ -z "$missing" ] || die "missing required commands:$missing
-On Debian/Ubuntu: apt-get install ipset iptables dnsmasq
+
+On a host built for this, run the bootstrap instead of this - it installs
+these, hardens the host, and then runs this script itself:
+
+  sudo $SRC/bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
+
+Running this on its own is for changing a setting afterwards, on a host that
+already has what it needs.
+
+If you are deliberately not using the bootstrap, install them yourself. Note
+that dejima-ci-runners will want Docker Compose v2 as well, and compose has no
+single package name that works across releases: docker-compose-v2 does not
+exist before trixie, and the fallbacks are backports and then Docker's own
+repository. This installer fetches nothing on your behalf - adding a Docker
+daemon to someone's machine is not a thing to do without being asked.
+
 Without ipset the firewall cannot be applied, and a runner with no egress
-policy looks exactly like one with."
+policy looks exactly like one with. Without docker there is no job network to
+create, which is the first thing this does."
 
 say "dejima-ci-hardener installer"
 say
@@ -148,8 +237,7 @@ say "machine a firewall of its own, or treat it as one you are willing to lose."
 say "Set this up for the runners that do use a bridge, and skip it for those."
 say
 
-ask network "Job network name (e.g. dejima-ci)" "$(cfg_get network)"
-: "${network:=dejima-ci}"
+ask_cfg network "Job network name" network dejima-ci
 say
 
 # Derived, not asked. Docker takes the first usable address of the subnet as
@@ -227,8 +315,7 @@ else
     say "(172.17-172.31, 192.168.x) so an unrelated network cannot collide."
     say
     while :; do
-        ask subnet "Subnet in CIDR form (e.g. 10.89.0.0/24)" "${subnet:-$(cfg_get subnet)}"
-        : "${subnet:=10.89.0.0/24}"
+        ask_cfg subnet "Subnet in CIDR form" subnet 10.89.0.0/24
         valid_cidr "$subnet" || { say "  not a CIDR block - it needs the form 10.89.0.0/24"; subnet=""; continue; }
         is_private "$subnet" || { say "  $subnet is not a private range - use 10.x, 172.16-31.x or 192.168.x"; subnet=""; continue; }
         break
@@ -309,6 +396,7 @@ probe_name="${instance#*://}"; probe_name="${probe_name%%/*}"; probe_name="${pro
 : "${probe_name:=deb.debian.org}"
 
 while :; do
+    say
     ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
     [ -n "$upstream" ] || die "an upstream resolver is required"
     if ! command -v python3 >/dev/null 2>&1; then
@@ -329,14 +417,37 @@ while :; do
     say "  this setting."
     say
     say "  Servers this host has configured:"
-    { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p'
-      sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null; } | sort -u >&2
+    # resolvectl guarded by command -v, and the whole thing allowed to fail.
+    # Without the guard this aborted the installer outright on any host that
+    # does not have it - which is most of them, including a VM built by
+    # proxmox/README.md. `set -o pipefail` makes the inner pipeline return the
+    # 127 from a missing resolvectl, `set -e` acts on it, and the run ends on
+    # exit 127 with no message, immediately after printing this heading. A
+    # diagnostic that kills the program it is diagnosing is worse than no
+    # diagnostic.
+    {
+        if command -v resolvectl >/dev/null 2>&1; then
+            resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: */    /p' || true
+        fi
+        sed -n 's/^nameserver/    /p' /etc/resolv.conf 2>/dev/null || true
+    } | sort -u >&2 || true
     say
-    ask retry_upstream "Try a different address? (Y/n)" "y"
+
+    # Non-interactive cannot answer, and the default it would take used to be
+    # "retry" - which re-offered the same detected address, failed the same
+    # probe, and looped forever with no terminal to say so on.
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        say "  continuing with $upstream - fix it before expecting jobs to resolve"
+        break
+    fi
+    # Defaults to no, so Enter moves on. Defaulting to yes meant that pressing
+    # Enter - which this installer tells you to do to keep the value shown -
+    # asked the same question about the same address indefinitely.
+    ask retry_upstream "Try a different address? (y/N)" "n"
     case "${retry_upstream,,}" in
-        n|no) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
+        y|yes) existing_upstream="" ;;
+        *) say "  continuing with $upstream - fix it before expecting jobs to resolve"; break ;;
     esac
-    existing_upstream=""
 done
 case "$upstream" in
     127.0.0.53|127.0.0.1|::1)
@@ -350,16 +461,30 @@ say
 # --- token ------------------------------------------------------------------
 if [ -s "$TOKEN_FILE" ]; then
     say "A forge token is already installed at $TOKEN_FILE."
+    say
     ask replace_token "Replace it? (y/N)" "n"
 else
     replace_token=y
-    say "A forge token is needed. Read access only - this program only ever GETs"
-    say "one file per repository, and a token that can do more is a token handed"
-    say "to a machine that runs untrusted code."
+    say "A forge API token is needed, so this can read .dejima/allowed-domains"
+    say "from the main branch of each repository listed below."
+    say
+    say "Create one here:"
+    say "  $instance/user/settings/applications"
+    say
+    say "Give it read access to repository contents and nothing else. This only"
+    say "ever GETs one file per repository, and a token that can do more is a"
+    say "token handed to a machine that runs untrusted code."
+    say
+    say "THIS IS NOT THE RUNNER REGISTRATION TOKEN. That is a different string"
+    say "from a different page - Actions -> Runners - used once to register a"
+    say "runner, and the API rejects it with a 401. dejima-ci-runners asks for"
+    say "that one separately, later. The two are easy to swap and the only"
+    say "symptom is this program failing to read anything."
 fi
 if [ "${replace_token,,}" = y ] || [ "${replace_token,,}" = yes ]; then
     token=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
+        say
         printf 'Forge token (not echoed): ' >&2
         IFS= read -rs token </dev/tty || true
         printf '\n' >&2
@@ -387,6 +512,7 @@ existing_repos=""
 [ -r "$REPOS_FILE" ] && existing_repos="$(grep -vE '^\s*(#|$)' "$REPOS_FILE" || true)"
 if [ -n "$existing_repos" ]; then
     say "Currently:"; sed 's/^/  /' <<< "$existing_repos" >&2
+    say
     ask keep_repos "Keep this list? (Y/n)" "y"
 else
     keep_repos=n
@@ -394,11 +520,7 @@ fi
 if [ "${keep_repos,,}" = n ] || [ "${keep_repos,,}" = no ]; then
     repos=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
-        while :; do
-            ask one "  owner/repo" ""
-            [ -n "$one" ] || break
-            repos="${repos:+$repos$'\n'}$one"
-        done
+        read_list repos "owner/repo" valid_repo_entry
     fi
     [ -n "$repos" ] || repos="$existing_repos"
     write_if_changed "$REPOS_FILE" 0640 "$repos"
@@ -406,6 +528,96 @@ else
     write_if_changed "$REPOS_FILE" 0640 "$existing_repos"
 fi
 say
+
+# --- does the forge actually accept that token? -----------------------------
+# The token is the one setting here that cannot be judged by looking at it. A
+# wrong one and a right one are both a non-empty 0600 file; only the forge can
+# tell them apart, and it is asked here rather than at the end so that a
+# rejected token is fixed while it is still the thing you are doing - not after
+# the units are enabled and the runners are registered and running.
+#
+# Probed against the first configured repository, using the same request the
+# allowlist will make. 200 and 404 both mean the token authenticated: 404 is a
+# repository with no declaration, which is ordinary.
+token_status() {  # token_status TOKEN REPO -> HTTP status, or 000 if unreachable
+    curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: token $1" \
+        "$forge_api/repos/$2/raw/.dejima/allowed-domains?ref=main" 2>/dev/null \
+        || printf '000'
+}
+
+probe_repo=$(grep -vE '^\s*(#|$)' "$REPOS_FILE" 2>/dev/null | head -1 || true)
+if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo" ]; then
+    while :; do
+        status=$(token_status "$(cat "$TOKEN_FILE")" "$probe_repo")
+        case "$status" in
+            200|404) say "  the forge accepted the token."; break ;;
+        esac
+        say
+        case "$status" in
+            401) say "  The forge REJECTED the token (401)."
+                 say
+                 say "  Check first that it is an API token. A RUNNER REGISTRATION token"
+                 say "  - from Actions -> Runners, the one dejima-ci-runners asks for -"
+                 say "  is a different string that the API rejects exactly like this, and"
+                 say "  the two are asked for minutes apart by this same tool."
+                 say
+                 say "  An API token comes from:"
+                 say "    $instance/user/settings/applications"
+                 say
+                 say "  Otherwise it is present but wrong: mistyped or truncated when"
+                 say "  pasted, revoked, or expired." ;;
+            403) say "  The forge accepted the token but refused the read (403)."
+                 say "  It authenticates, so this is scope rather than identity - a Gitea"
+                 say "  token created with no scopes selected reads nothing. It needs read"
+                 say "  access to repository contents, and nothing more." ;;
+            30[1278])
+                 say "  The forge redirected ($status) for $probe_repo, which is"
+                 say "  about that repository rather than about the token: it has"
+                 say "  been renamed or moved to another owner."
+                 say
+                 say "  Fix the entry in $REPOS_FILE - the rest of this"
+                 say "  run is unaffected, and re-running this installer or"
+                 say "  'sudo $BIN_DIR/dejima-ci-allowlist render' picks it up." ;;
+            000) say "  Could not reach $forge_api to check the token."
+                 say "  That is the network or the forge, not the token itself." ;;
+            *)   say "  The forge answered $status when checking the token against"
+                 say "  $probe_repo." ;;
+        esac
+        say
+        say "  Until this is fixed the allowlist cannot be rendered, and job"
+        say "  containers get a resolver that answers for nothing."
+        say
+        if [ "$NONINTERACTIVE" -eq 1 ]; then
+            say "  Continuing - fix the token and run: sudo $BIN_DIR/dejima-ci-allowlist render"
+            break
+        fi
+        case "$status" in
+            30[1278]) say "  Continuing. Fix $REPOS_FILE, then run:"
+                      say "    sudo $BIN_DIR/dejima-ci-allowlist render"
+                      break ;;
+        esac
+        ask retry_token "Enter a different token now? (Y/n)" "y"
+        case "${retry_token,,}" in
+            n|no) say "  Continuing. Fix $TOKEN_FILE, then run:"
+                  say "    $BIN_DIR/dejima-ci-allowlist render"
+                  break ;;
+        esac
+        printf 'Forge token (not echoed): ' >&2
+        IFS= read -rs newtok </dev/tty || true
+        printf '\n' >&2
+        if [ -z "$newtok" ]; then
+            say "  Nothing entered - leaving the current token in place."
+            break
+        fi
+        printf '%s\n' "$newtok" > "$TOKEN_FILE.new"
+        chmod 600 "$TOKEN_FILE.new"
+        mv "$TOKEN_FILE.new" "$TOKEN_FILE"
+        unset newtok
+        say "  written    $TOKEN_FILE"
+    done
+    say
+fi
 
 # --- base domains -----------------------------------------------------------
 say "Names allowed regardless of any project declaration. Keep this short, and"
@@ -417,20 +629,17 @@ existing_base=""
 default_base="${existing_base:-$forge_host$'\n'deb.debian.org}"
 if [ -n "$existing_base" ]; then
     say "Currently:"; sed 's/^/  /' <<< "$existing_base" >&2
+    say
     ask keep_base "Keep this list? (Y/n)" "y"
 else
     say "Suggested:"; sed 's/^/  /' <<< "$default_base" >&2
+    say
     ask keep_base "Use this list? (Y/n)" "y"
 fi
 if [ "${keep_base,,}" = n ] || [ "${keep_base,,}" = no ]; then
     base=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
-        say "One name per line, blank line to finish."
-        while :; do
-            ask one "  domain" ""
-            [ -n "$one" ] || break
-            base="${base:+$base$'\n'}$one"
-        done
+        read_list base "domain" valid_domain_entry
     fi
     [ -n "$base" ] || base="$default_base"
 else
@@ -441,12 +650,12 @@ say
 
 # --- remaining settings -----------------------------------------------------
 ipset="$(cfg_get ipset)"; : "${ipset:=ci-allow}"
-ask out    "Generated allowlist path" "$(cfg_get out)"
-ask ref    "Branch treated as operator-approved" "$(cfg_get ref)"
-ask reload "Command that reloads the resolver" "$(cfg_get reload)"
-: "${out:=/etc/dnsmasq.d/ci-allow.conf}"
-: "${ref:=main}"
-: "${reload:=systemctl reload dnsmasq}"
+say "Where the generated allowlist goes, which branch is trusted, and how the"
+say "resolver is reloaded. The defaults are right unless you have a reason."
+say
+ask_cfg out    "Generated allowlist path"           out    /etc/dnsmasq.d/ci-allow.conf
+ask_cfg ref    "Branch treated as operator-approved" ref    main
+ask_cfg reload "Command that reloads the resolver"   reload "systemctl reload dnsmasq"
 say
 
 # --- write ------------------------------------------------------------------
@@ -465,7 +674,7 @@ out = $out
 ref = $ref
 reload = $reload"
 
-for prog in dejima-ci-allowlist dejima-ci-firewall; do
+for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip; do
     if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
         say "  unchanged  $BIN_DIR/$prog"
     else
@@ -473,6 +682,24 @@ for prog in dejima-ci-allowlist dejima-ci-firewall; do
         say "  installed  $BIN_DIR/$prog"
     fi
 done
+
+# The templates dejima-ci-runners renders. Installed rather than read from the
+# checkout, because it is installed too and has to keep working once whatever
+# clone it came from is gone.
+if writable "$TEMPLATE_DIR"; then
+    for tpl in "$SRC"/examples/*; do
+        [ -f "$tpl" ] || continue
+        if cmp -s "$tpl" "$TEMPLATE_DIR/${tpl##*/}" 2>/dev/null; then
+            say "  unchanged  $TEMPLATE_DIR/${tpl##*/}"
+        else
+            install -m 0644 "$tpl" "$TEMPLATE_DIR/${tpl##*/}"
+            say "  installed  $TEMPLATE_DIR/${tpl##*/}"
+        fi
+    done
+else
+    say "  skipped    $TEMPLATE_DIR (not writable) - dejima-ci-runners will read"
+    say "             them from this checkout instead"
+fi
 
 # The resolver's static half. Its generated half - the server= lines - is
 # written by dejima-ci-allowlist from origin/main, into a separate file in the
@@ -493,8 +720,24 @@ stop-dns-rebind
 rebind-domain-ok=/$forge_host/"
 
 if [ "$INSTALL_UNITS" -eq 1 ]; then
+    # @@BIN_DIR@@ substituted rather than written into the units, because the
+    # path was previously in two places and they disagreed: the units named
+    # /usr/local/bin while this installs to /usr/local/sbin, so the timer's
+    # service failed with 203/EXEC on every tick. Nothing said so - a timer
+    # that never succeeds looks exactly like one that has nothing to do, and
+    # the allowlist simply stopped being refreshed.
     for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer dejima-ci-firewall.service; do
-        write_if_changed "$UNIT_DIR/$unit" 0644 "$(cat "$SRC/systemd/$unit")"
+        write_if_changed "$UNIT_DIR/$unit" 0644 \
+            "$(sed "s|@@BIN_DIR@@|$BIN_DIR|g" "$SRC/systemd/$unit")"
+    done
+
+    # And checked, because a unit that names a program which is not there is
+    # only visible as a failed start, long after this run has finished.
+    for unit in dejima-ci-allowlist.service dejima-ci-firewall.service; do
+        exe=$(sed -n 's|^ExecStart=\([^ ]*\).*|\1|p' "$UNIT_DIR/$unit" | head -1)
+        [ -x "$exe" ] || die "$UNIT_DIR/$unit runs $exe, which is not executable.
+That is this installer's own mistake rather than anything you did. The programs
+are installed to $BIN_DIR; report the mismatch."
     done
 else
     say "  skipped    $UNIT_DIR (not writable) - install the units by hand"
@@ -512,6 +755,7 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
     # Docker starts. Docker recreates its own chains on every start and
     # DOCKER-USER comes back empty, so "apply them once" is not an
     # instruction that stays true.
+    say
     ask enable_fw "Enable the firewall unit (reapplies rules on every Docker start)? (Y/n)" "y"
     if [ "${enable_fw,,}" != n ] && [ "${enable_fw,,}" != no ]; then
         systemctl enable --now dejima-ci-firewall.service
@@ -525,56 +769,53 @@ fi
 
 say
 say "=============================================================="
-say " What is left to do"
+say " The runners"
 say "=============================================================="
 say
-say "This installer cannot configure or register your runners - that needs a"
-say "token from your forge, and the config file lives wherever your runner's"
-say "compose mounts it from. Everything below is on you."
+say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
+say "behind it yet, because no runner is configured on this host."
 say
-say "1. In the config.yaml of every runner whose jobs should be filtered:"
+say "$BIN_DIR/dejima-ci-runners writes the compose project and the"
+say "runner config together, taking the job network and the resolver address"
+say "from $CONFIG. A runner whose container.network or"
+say "--dns disagrees with what was set up here starts, accepts jobs, and"
+say "filters nothing - so neither is left for you to copy across."
 say
-say "     container:"
-say "       network: $network"
-say "       docker_host: \"-\""
-say "       options: \"--dns=$gateway --init --security-opt=no-new-privileges\""
-say "       valid_volumes: []"
-say "       privileged: false"
+
+run_runners=n
+if [ "$NONINTERACTIVE" -eq 0 ]; then
+    ask run_runners "Set up the runners now? (Y/n)" "y"
+fi
+if [ "${run_runners,,}" != n ] && [ "${run_runners,,}" != no ]; then
+    say
+    # Not exec'd and not fatal: everything above this point is installed and
+    # correct, and a runner that needs a second attempt should not read as the
+    # allowlist having failed.
+    "$BIN_DIR/dejima-ci-runners" --role confined || \
+        say "  runner setup did not finish - re-run: sudo $BIN_DIR/dejima-ci-runners --role confined"
+else
+    say "Skipped. When you are ready:"
+    say
+    say "  sudo $BIN_DIR/dejima-ci-runners --role confined"
+    say
+    say "It asks for a label and a count, takes the network and resolver from"
+    say "$CONFIG, and tells you which page of your forge mints"
+    say "the registration token."
+fi
+
 say
-say "   network must be exactly \"$network\" - the name, not the bridge."
-say "   --dns must be exactly $gateway, matching the resolver's listen-address."
-say "   docker_host: \"-\" is the one value that stops the Docker socket being"
-say "   mounted into job containers; unset is the default and the default mounts."
+say "Then verify from inside a job rather than from this host. A runner that"
+say "grants the socket looks identical to one that does not, from out here and"
+say "from your forge's UI. dejima ships test/ci-runner.bats for exactly this."
+say "If the DNS checks pass while the egress checks fail, the resolver is fine"
+say "and the firewall is not:"
 say
-say "2. Give that runner a label no other runner carries, so a job naming it"
-say "   cannot land somewhere unhardened:"
+say "  sudo $BIN_DIR/dejima-ci-firewall && sudo iptables -S DOCKER-USER"
 say
-say "     runner:"
-say "       labels:"
-say "         - \"your-label:docker://node:20-bookworm\""
-say "       capacity: 1"
-say "     cache:"
-say "       enabled: false"
-say
-say "3. Make sure CONFIG_FILE=/config.yaml is in that runner's environment."
-say "   Without it the file is not read at all and every default applies -"
-say "   including the socket reaching every job - with nothing saying so."
-say
-say "4. Restart the runner, then confirm it took:"
-say
-say "     docker compose restart      # wherever your runner lives"
-say
-say "5. Verify from inside a job, rather than from this host. dejima ships"
-say "   test/ci-runner.bats for exactly this; a job on the hardened runner"
-say "   should show the Docker socket absent, an off-list name not resolving,"
-say "   and an off-list address unreachable. If the DNS checks pass while the"
-say "   egress checks fail, the resolver is fine and the firewall is not:"
-say
-say "     $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
-say
-say "For a runner using host networking, none of steps 1-2 apply: its jobs are"
-say "in the host's namespace, no bridge is in front of them, and the rules"
-say "installed here do not filter them. Its egress is that machine's own."
+say "A runner using host networking is not covered by any of this: its jobs"
+say "are in the host's namespace, no bridge is in front of them, and the rules"
+say "installed here do not filter them. That is the privileged tier, and it"
+say "belongs on its own machine - see the README."
 say
 say "Files this installer owns, for later reference:"
 say "  config       $CONFIG"
@@ -590,7 +831,7 @@ rc=0
 case "$rc" in
     0) say "Up to date." ;;
     1) say; say "There is a pending change, shown above. Apply it with:"
-       say "  $BIN_DIR/dejima-ci-allowlist render" ;;
+       say "  sudo $BIN_DIR/dejima-ci-allowlist render" ;;
     *) say; say "The configuration is not usable yet - the problems are listed above."
        say "Re-run this installer to fix them."; exit "$rc" ;;
 esac

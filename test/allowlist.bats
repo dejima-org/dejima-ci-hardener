@@ -21,6 +21,9 @@ out=""; url=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) out="$2"; shift ;;
+        # Recorded so a test can assert on what actually went over the wire,
+        # which is the only place token mangling is visible.
+        -H) printf '%s\n' "$2" >> "$STUB_DIR/last-headers"; shift ;;
         http*) url="$1" ;;
     esac
     shift
@@ -107,6 +110,63 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [[ "$output" == *"HTTP 500"* ]]
 }
 
+@test "a rejected token says so, rather than reporting an HTTP number" {
+    # 401 is the one an operator actually meets, and "unexpected HTTP 401" sends
+    # nobody to the token. It has to name the file and say that a present-but-
+    # wrong token is what this looks like, because an empty one is refused
+    # earlier with a different message entirely.
+    mkdir -p "$STUB_DIR/owner"
+    echo 401 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [ ! -f "$T/out/ci-allow.conf" ]
+    [[ "$output" == *"rejected the token"* ]]
+    [[ "$output" == *"$T/token"* ]]
+}
+
+@test "a token refused permission is not confused with one refused outright" {
+    # 403 authenticates and cannot read. Telling someone to replace a token
+    # that is fine, when the answer is a scope they did not grant, costs them
+    # the one thing the message was supposed to save.
+    mkdir -p "$STUB_DIR/owner"
+    echo 403 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refused the read"* ]]
+    [[ "$output" == *"scope"* ]]
+    [[ "$output" != *"rejected the token"* ]]
+}
+
+@test "surrounding whitespace in the token file never reaches the forge" {
+    # Command substitution strips trailing newlines and nothing else, so a
+    # trailing space or a carriage return survives into the Authorization
+    # header and the forge rejects it - while the file still looks correct to
+    # anyone who cats it.
+    printf 'tok123 \r\n' > "$T/token"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -q 'Authorization: token tok123$' "$STUB_DIR/last-headers"
+}
+
+@test "a renamed repository is named as such, and not followed" {
+    # Gitea 301s the old path after a rename or a transfer. Following it would
+    # mean reading the allowlist from whichever repository the forge points at
+    # now, which is the one thing this program must not do - the whole premise
+    # is that the list comes from a branch of a repository the operator named.
+    mkdir -p "$STUB_DIR/owner"
+    echo 301 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [ ! -f "$T/out/ci-allow.conf" ]
+    [[ "$output" == *"renamed or moved"* ]]
+    [[ "$output" == *"$T/repos"* ]]
+    [[ "$output" != *"unexpected HTTP"* ]]
+}
+
 @test "an empty collection is refused rather than installed" {
     mkdir -p "$STUB_DIR/owner"; : > "$STUB_DIR/owner/repo.body"
     run_tool render
@@ -179,6 +239,22 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [[ "$output" == *"unknown key"* ]]
 }
 
+@test "a first install reports what it would install, not a diff error" {
+    # The allowlist does not exist yet on a first run, which is the ordinary
+    # case and not a fault. Handing diff a path that is not there prints its
+    # complaint instead of the answer, on the one run where the operator is
+    # least able to tell the difference.
+    mkdir -p "$STUB_DIR/owner"
+    printf 'example.com\ndeb.debian.org\n' > "$STUB_DIR/owner/repo.body"
+    [ ! -f "$T/out/ci-allow.conf" ]
+    run_tool check
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"would install"* ]]
+    [[ "$output" == *"2 names"* ]]
+    [[ "$output" != *"No such file"* ]]
+    [ ! -f "$T/out/ci-allow.conf" ]
+}
+
 @test "check reports a pending change without installing it" {
     mkdir -p "$STUB_DIR/owner"; echo example.com > "$STUB_DIR/owner/repo.body"
     run_tool check
@@ -200,7 +276,12 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -eq 2 ]
     [[ "$output" == *"token_file points at $T/token"* ]]
     [[ "$output" == *"does not exist"* ]]
-    [[ "$output" == *"READ-ONLY forge token"* ]]
+    # Which kind of token, not just that one is wanted. A forge hands out two
+    # and this tool asks for both; naming only "a token" is how the wrong one
+    # ends up in the file, where it authenticates against nothing and the only
+    # symptom is a 401 from an unrelated-looking command.
+    [[ "$output" == *"API token"* ]]
+    [[ "$output" == *"registration token"* ]]
 }
 
 @test "every configuration problem is reported in one run, not one per run" {
@@ -259,12 +340,43 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
 # there at a root-owned path - sending them to create something that already
 # existed. The two cases need different messages because they need different
 # actions.
-@test "a missing config and an unreadable one are different messages" {
+@test "a config behind an unsearchable directory is not reported as missing" {
+    # /etc/dejima-ci is 0750 root-owned, so every unprivileged run cannot even
+    # stat the file inside it. Reporting that as "no config - run install.sh"
+    # sends someone to redo an install that already succeeded, when the only
+    # thing missing is sudo.
+    [ "$(id -u)" -ne 0 ] || skip "root searches any directory, so this cannot arise"
+    mkdir -p "$T/locked"
+    cp "$T/config" "$T/locked/config"
+    chmod 000 "$T/locked"
+    run "$BIN" check --config "$T/locked/config"
+    chmod 755 "$T/locked"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not searchable"* ]]
+    [[ "$output" == *"sudo"* ]]
+    [[ "$output" != *"run install.sh to create it"* ]]
+}
+
+@test "a missing config says so, and says what creates one" {
     # Not run_tool: it appends its own --config, which would win over this one.
     run "$BIN" check --config "$T/does-not-exist"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no config at"* ]]
     [[ "$output" == *"install.sh"* ]]
+}
+
+@test "an unreadable config is a different message from a missing one" {
+    # Only a caller who cannot read the file ever sees this branch, which makes
+    # the assertion depend on who is running it. `[ -r ]` is access(2) with
+    # R_OK, and that always succeeds for a process holding CAP_DAC_OVERRIDE -
+    # so as root the file is readable at mode 000, the branch is unreachable,
+    # and this fails on the privilege of the caller rather than on anything the
+    # program does.
+    #
+    # Skipped rather than asserted-around, because there is nothing here to
+    # check when the caller can bypass the permission being tested. CI runs the
+    # suite as an ordinary user precisely so that this runs there.
+    [ "$(id -u)" -ne 0 ] || skip "root reads a mode-000 file, so this branch is unreachable"
 
     chmod 000 "$T/config"
     run_tool render

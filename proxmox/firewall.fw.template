@@ -9,6 +9,12 @@
 #
 # Substitute the three placeholders if you do use it directly.
 #
+# For more than one runner VM, prefer a security group: the same rules, defined
+# once at datacenter level and referenced by each VM, so the ordering below is
+# got right in one place and cannot drift between hosts. proxmox/README.md
+# section 3 builds it that way. The [OPTIONS] block is NOT part of a group and
+# stays per-VM either way.
+#
 # THIS IS THE BOUNDARY. Everything dejima-ci-hardener installs inside the VM -
 # the job network's allowlist, the DOCKER-USER rules - is defence in depth,
 # because the premise of the privileged runner is that a compromised job
@@ -30,27 +36,42 @@ policy_in: DROP
 
 # Outbound ACCEPTs by default, and the LAN is denied explicitly below.
 #
-# The earlier version of this file did the opposite - deny outbound, then
-# allow tcp/80, tcp/443 and udp/123 - and it was wrong twice over.
+# Do not be tempted to invert this - deny outbound, then allow tcp/80, tcp/443
+# and udp/123 - because it is wrong twice over.
 #
-# It broke things: apt during a first install, and anything else that happens
-# to need a port nobody listed. Every such breakage looks like a network
-# fault rather than a firewall rule, and each one is found the hard way.
+# It breaks things: apt during a first install, and anything else that happens
+# to need a port nobody listed. Every such breakage looks like a network fault
+# rather than a firewall rule, so each one is found the hard way.
 #
-# And it bought almost nothing. This VM is assumed to be owned by an attacker
+# And it buys almost nothing. This VM is assumed to be owned by an attacker
 # with root; the guarantee being made is "reaches the internet, not your
 # network", not "reaches only three ports". Someone who owns the box tunnels
-# over 443 like everyone else, so the port list constrained honest software
-# and not them.
+# over 443 like everyone else, so the port list constrains honest software and
+# not them.
 #
-# Deny-by-default still applies where the protected set is enumerable, which
+# Deny-by-default earns its keep where the protected set is enumerable, which
 # is what the four DROPs below are. It does not apply to the internet, which
-# is not, and pretending otherwise produced a rule set that looked strict and
-# only got in the way.
+# is not enumerable, and treating it as though it were gets you a rule set
+# that looks strict and only gets in the way.
 policy_out: ACCEPT
 
 log_level_in: nolog
 log_level_out: nolog
+
+# Uncomment if this VM gets its address by DHCP rather than statically.
+#
+# The four OUT DROPs below cover every RFC1918 range, and a DHCP server is
+# almost always inside one - so a lease renewal at T1, which is a unicast
+# DHCPREQUEST to that server, is dropped. The lease usually survives on the
+# fallback: at T2 the client stops unicasting and rebinds by broadcast, and
+# 255.255.255.255 matches none of those DROPs. That is a protocol's last
+# resort doing routine work, and when it does fail the VM simply drops off
+# the network, which looks nothing like a firewall rule.
+#
+# The alternative to this line is an explicit OUT ACCEPT to the DHCP server on
+# udp/67, which widens the LAN exposure below from two hosts to three. This
+# option is the narrower of the two. Narrower still is not using DHCP.
+# dhcp: 1
 
 [RULES]
 

@@ -20,8 +20,14 @@
 # reduction and worth doing if one machine is what you have - just do not read
 # it as isolation.
 #
-# Written against act_runner v0.6.1. Not runnable as written.
-# See dejima's docs/ci.md.
+# @@NOTE_BEGIN@@
+# TEMPLATE. `dejima-ci-runners` renders this to ~/runners/config.yaml,
+# substituting the @@MARKER@@ values. This header is replaced in the rendered
+# copy.
+# @@NOTE_END@@
+#
+# Written against act_runner v0.6.1. See dejima's docs/ci.md:
+# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
 
 log:
   level: info
@@ -35,7 +41,7 @@ runner:
   # asking for them - and a job that never asked is exactly the one nobody
   # reviews for whether it should have them.
   labels:
-    - "dejima-runtime:docker://node:20-bookworm"
+    - "@@LABEL@@:docker://@@JOB_IMAGE@@"
 
   envs: {}
   env_file: ""
@@ -80,8 +86,10 @@ container:
   #
   # A volume a workflow asks for and this list does not name is dropped
   # silently, so this has to match what the workflow requests.
+# @@VOLUMES_BEGIN@@
   valid_volumes:
     - /tmp/dejima-ci
+# @@VOLUMES_END@@
 
   force_pull: true
   force_rebuild: false

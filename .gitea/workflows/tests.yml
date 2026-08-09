@@ -1,0 +1,412 @@
+# Runs the bats suite on every pull request and on every push to one.
+# `pull_request` fires on opened/reopened/synchronize, and synchronize is the
+# push-to-an-open-PR event, so both are covered without listing types.
+#
+# Split by what each half NEEDS. `bats test/` runs anywhere a shell does - it
+# stubs curl, dnsmasq and docker, on purpose, because the properties worth
+# checking are in what these programs decide rather than in what the system
+# does afterwards. The compose job needs a real Docker daemon and a real
+# compose plugin, because the thing it checks is precisely what a stub cannot:
+# whether what dejima-ci-runners emits is a compose file Docker will accept.
+#
+# Both jobs name the same runner anyway. Only one label is registered for this
+# repository, and a job that "runs anywhere" is a statement about what it needs
+# rather than about what it should be handed.
+name: tests
+
+# Two triggers, deliberately, and only for now.
+#
+# `pull_request_target` is the one that matters: under `on: pull_request` the
+# workflow is read from the HEAD of the pull request, so the branch under test
+# decides what runs and, critically, `runs-on:`. A branch can point its jobs at
+# any runner its repository can reach, which makes every control the runner
+# provides opt-out by whoever wrote the branch. Under `pull_request_target`
+# Gitea reads the workflow from the BASE branch and explicitly discards any
+# pull_request_target workflow found on the head commit, so a branch can
+# neither edit this file's copy nor introduce its own.
+#
+# ADOPTING IT TAKES TWO MERGES. The trigger only takes effect once it is on the
+# base branch, because that is where it is read from - so the change that
+# introduces it cannot be tested by it. With only `pull_request_target` here
+# and nothing on `main`, the head's copy is skipped, the base has nothing to
+# contribute, and no checks run at all: a bootstrap problem that presents as a
+# broken workflow.
+#
+# So this carries both through the first merge. Every pull request in the
+# meantime gets two runs - an untrusted one from the head and a trusted one
+# from the base - which is noisy, and for the untrusted half no worse than
+# having only `pull_request`. Keep the window short:
+#
+#   THE NEXT PULL REQUEST AFTER THIS ONE MERGES SHOULD MAKE TWO CHANGES:
+#     1. DELETE THE `pull_request:` LINE BELOW.
+#     2. DROP THE `ref:` FROM THE TWO runner-env CHECKOUTS, LEAVING A BARE
+#        `- uses: actions/checkout@v4`.
+#
+# That follow-up is itself tested by the copy on `main`, which is the point.
+#
+# The second change is the same bootstrap problem one level down. The
+# runner-env jobs assert on the RUNNER rather than on the change, so their
+# assertions should come from the base branch - under pull_request_target a
+# bare checkout gives exactly that, and a branch can then neither weaken those
+# tests nor delete them. But test/ci-runner.bats does not exist on `main`
+# until this merges, so a bare checkout today would fail on a missing file
+# rather than on anything about the runner. They name the head until it does.
+#
+# The jobs that test the branch already name the head permanently, and for the
+# opposite reason: under pull_request_target the run's ref is the base branch,
+# so a bare checkout there would test `main` on every pull request and pass
+# regardless of the change - green checks that mean nothing.
+#
+# See dejima's docs/ci.md, "Pinning the workflow with pull_request_target":
+# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
+on:
+  pull_request:
+  pull_request_target:
+
+# No `concurrency:` block. Gitea does not implement one - so writing it here
+# would only claim a cancellation that never happens. On a single-capacity
+# runner, expect a backlog rather than a supersede, and cancel a stale run by
+# hand if it is in the way.
+
+jobs:
+  tests:
+    # The privileged tier, registered at organization scope so that this
+    # repository and dejima both reach it. Not a generic label: whether a job
+    # container gets the Docker socket is a property of the runner's
+    # config.yaml (container.docker_host), not of anything this file can ask
+    # for or refuse, so naming a specific label is the only say this file has
+    # in which runner that is.
+    #
+    # If no runner carries this label, these jobs queue. That is the intended
+    # failure, and a better one than a green run on a host that grants
+    # everything.
+    runs-on: dejima-privileged
+    container:
+      # Debian bookworm plus a node binary - node is what actions/checkout
+      # needs to run at all, and apt-get is what everything below needs.
+      image: node:20-bookworm
+    steps:
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why.
+      #
+      # This tier has no egress allowlist and no job bridge - its jobs are in
+      # the host's network namespace, which is the grant the tier exists for -
+      # so a name that does not resolve here is the host's resolver or the
+      # node firewall's DNS pinhole, never this repository's allowlist. The
+      # diagnosis below says so, rather than sending anyone to
+      # `dejima-ci-allowlist show` on a host that does not run it.
+      #
+      # Retried rather than decided on one attempt: a resolver can be a moment
+      # behind a container's start, and apt itself retries, so failing a whole
+      # job on a single lookup would be stricter than the step it protects.
+      # Six attempts over ~15s, then a diagnosis.
+      #
+      # Uses only what the image already has: getent is libc.
+      - name: Check this host can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "This is the privileged tier: no allowlist and no job bridge is" >&2
+          echo "in front of this job, so nothing this repository installs can" >&2
+          echo "be the cause. Check, on the runner host and then the node:" >&2
+          echo "  cat /etc/resolv.conf         - does the VM have a nameserver?" >&2
+          echo "  getent hosts deb.debian.org  - does the VM itself resolve?" >&2
+          echo "" >&2
+          echo "If the VM cannot resolve either, the node firewall's udp/53 and" >&2
+          echo "tcp/53 pinholes are the usual cause - they must name the VM's" >&2
+          echo "NAMESERVER, not its gateway, and must sit ABOVE the LAN DROP" >&2
+          echo "rules. See proxmox/README.md section 3." >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          # python3-yaml, not a YAML parser fetched at test time: two tests
+          # assert that the templates and the rendered files parse, and they
+          # skip rather than fail when no parser is present. A skip reads as a
+          # pass in the run summary, so the parser is installed here to make
+          # sure those two actually run.
+          apt-get install -y --no-install-recommends bats python3 python3-yaml ca-certificates
+
+      # The code under test, named explicitly. Under pull_request_target the
+      # run's ref is the base branch, so a bare checkout here would test `main`
+      # on every pull request and pass regardless of the change - green checks
+      # that mean nothing.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # As an ordinary user, not root. One test asserts that the allowlist
+      # reports an unreadable config differently from a missing one, and that
+      # message exists only for a caller who cannot read the file. `[ -r ]` is
+      # access(2) with R_OK, which always succeeds for a process holding
+      # CAP_DAC_OVERRIDE - so as root the file is readable at mode 000, the
+      # branch is unreachable, and the test fails on the privilege of whoever
+      # ran it rather than on anything the program does.
+      #
+      # The test skips itself under root rather than failing, so this is what
+      # makes it actually run rather than what stops it breaking.
+      #
+      # Nothing else in the suite needs either privilege: it stubs curl,
+      # dnsmasq and docker, and writes only into its own temp directories.
+      # `node` is uid 1000 in this image and needs to own the checkout, which
+      # actions/checkout leaves owned by root.
+      - run: |
+          chown -R node:node .
+          su node -c "bats test/"
+
+  compose-schema:
+    # The only job here that needs anything the privileged tier grants, and the
+    # reason it is a separate check: it asserts on the RUNNER as much as on the
+    # branch. dejima-ci-runners emits compose files, and every test in
+    # test/runners.bats checks them with a YAML parser - which says the syntax
+    # is well formed and nothing about whether Docker would accept the result.
+    # A valid-YAML compose file with a misspelled key, a broken anchor merge or
+    # a service referring to an undeclared volume passes all 47 of those and
+    # fails on the host.
+    #
+    # So this renders both tiers with the real generator and hands the output
+    # to a real `docker compose config`. That needs a daemon and the compose
+    # plugin, which is exactly what this tier grants and the confined tier does
+    # not - making this job also a live check that the runner built by PR #11
+    # was configured the way it was meant to be.
+    runs-on: dejima-privileged
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Check this host can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts. See the same" >&2
+          echo "check in the job above for what to look at." >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 python3-yaml ca-certificates curl
+          # The CLI only - the daemon is the host's, reached over the socket the
+          # runner binds in. Debian ships no docker-cli package that does not
+          # drag in a daemon this job would never start, so take the static
+          # binary.
+          curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
+            | tar -xzC /usr/local/bin --strip-components=1 docker/docker
+          # compose ships separately from that tarball, as a CLI plugin.
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+            "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-$(uname -m)"
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          # Checked rather than assumed. A download that returned an error page
+          # instead of a binary still chmods fine, and the failure would then
+          # surface as the generator refusing to run for a reason that has
+          # nothing to do with the generator.
+          docker compose version || {
+            echo "The compose plugin did not load. Check that the release tag and" >&2
+            echo "architecture in the URL above still exist." >&2
+            exit 1
+          }
+        env:
+          DOCKER_CLI_VERSION: 27.5.1
+          COMPOSE_VERSION: 2.32.4
+
+      # Fails here, with the fix in the message, rather than deep in a render
+      # that cannot work. Both of these are runner configuration, not anything
+      # a change to this repository can cause - so a red check here means the
+      # machine needs attention, not the branch.
+      - name: Check the runner granted Docker and the host netns
+        run: |
+          docker info >/dev/null 2>&1 || {
+            echo "No Docker daemon reachable from this job." >&2
+            echo "In act_runner's config.yaml, container.docker_host must not be \"-\"" >&2
+            echo "- that is the one value that stops the socket being mounted into job" >&2
+            echo "containers. dejima-ci-runners --role privileged writes it unset." >&2
+            echo "" >&2
+            echo "If it IS unset and this still fails, check CONFIG_FILE=/config.yaml" >&2
+            echo "is in the runner's environment: without it act_runner never reads the" >&2
+            echo "config file at all and every default applies, with nothing saying so." >&2
+            exit 1
+          }
+          # Read sysfs rather than shell out to `ip`: /sys/class/net is
+          # per-netns and always there, while iproute2 is not in this image.
+          [ -e /sys/class/net/docker0 ] || {
+            echo "This job is not in the host network namespace - docker0 is not" >&2
+            echo "visible. Set container.network: host in act_runner's config.yaml;" >&2
+            echo "dejima-ci-runners --role privileged writes it." >&2
+            exit 1
+          }
+          echo "Docker reachable and in the host netns - the privileged tier's two grants."
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Render both tiers exactly as an operator would, then let Docker judge
+      # the output. --no-start because registering runners against the forge is
+      # not this job's business; --non-interactive because there is no terminal.
+      #
+      # CONF_DIR points at a fixture rather than /etc/dejima-ci: this host is
+      # the privileged tier and never ran install.sh, so it has no config - and
+      # the confined render needs one. Writing the fixture into a temp dir
+      # rather than installing anything keeps this job read-only with respect
+      # to both the host and the checkout.
+      #
+      # forge.invalid, not a real forge: nothing here contacts one. The .invalid
+      # TLD is reserved for exactly this, so a URL that leaks into a request
+      # fails to resolve rather than reaching someone.
+      - name: Render both tiers and let Docker validate the compose files
+        run: |
+          set -eu
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          export CONF_DIR="$work/conf"
+          export TEMPLATE_DIR="$PWD/examples"
+          mkdir -p "$CONF_DIR"
+          cat > "$CONF_DIR/config" <<'EOF'
+          network = ci-schema-check
+          gateway = 10.99.0.1
+          forge_api = https://forge.invalid/api/v1
+          EOF
+          printf 'acme/widget\n' > "$CONF_DIR/repos"
+
+          for role in confined privileged; do
+            out="$work/render-$role"
+            bin/dejima-ci-runners --role "$role" --dir "$out" \
+              --forge https://forge.invalid --non-interactive --no-start
+            # -q: report problems and print nothing when there are none. This
+            # is the check a YAML parser cannot make - it resolves the anchor
+            # merges, rejects unknown keys, and fails on a service naming a
+            # volume the file never declares.
+            docker compose -f "$out/docker-compose.yml" config -q || {
+              echo "The $role tier rendered a compose file Docker will not accept." >&2
+              echo "What was generated:" >&2
+              sed 's/^/  /' "$out/docker-compose.yml" >&2
+              exit 1
+            }
+            echo "ok  $role tier: compose file accepted by docker compose config"
+          done
+
+      # Deliberately not re-running test/runners.bats here. Its setup() puts a
+      # docker stub at the front of PATH unconditionally, so it would exercise
+      # the stub on this host exactly as it does in the job above - the same
+      # assertions, taking twice as long, while looking like a stronger check
+      # than it is. What this host adds is the real compose plugin, and that is
+      # what the step above uses it for.
+
+  # The runners' own configuration, asserted from inside a job on each. Two
+  # jobs rather than two steps on the jobs above, because the point is that
+  # these are two different runners and either can be wrong on its own - one
+  # red check per tier says which.
+  #
+  # These fail on how a RUNNER is configured, not on anything in a pull
+  # request. A red check here means the machine needs attention; it does not
+  # mean the branch does.
+  #
+  # This is the check nothing else in the repository can make. install.sh
+  # reports what it wrote and dejima-ci-runners reports that a runner
+  # registered and is reading the generated config - and a runner can do both
+  # of those while granting its jobs everything. Whether the socket is absent
+  # and whether egress is filtered are only observable from inside a job.
+  runner-env-confined:
+    runs-on: dejima-confined
+    name: runner-env (confined)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Check the job network can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "This is the confined tier, so this is the allowlist or the" >&2
+          echo "resolver in front of it. On the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
+          echo "" >&2
+          echo "If other jobs in this run resolved fine, the runners in the pool" >&2
+          echo "are configured differently: every runner answering this label" >&2
+          echo "needs the same --dns and container.network. One missing it fails" >&2
+          echo "only the jobs that land on it, which looks intermittent." >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+
+      # See the note on the runner-env checkouts near the top of this file:
+      # this names the head for now, and becomes a bare checkout in the same
+      # follow-up that drops the pull_request trigger.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - run: bats test/ci-runner.bats
+        env:
+          # Declared, not detected: landing on the wrong runner should fail
+          # rather than quietly select a different set of assertions.
+          DEJIMA_CI_TIER: confined
+
+  runner-env-privileged:
+    runs-on: dejima-privileged
+    name: runner-env (privileged)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Check this host can resolve before installing anything
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts. This tier has" >&2
+          echo "no allowlist in front of it, so this is the host's resolver or" >&2
+          echo "the node firewall's DNS pinhole - see proxmox/README.md." >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - run: bats test/ci-runner.bats
+        env:
+          DEJIMA_CI_TIER: privileged

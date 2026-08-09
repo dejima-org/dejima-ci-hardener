@@ -24,8 +24,13 @@ ipset = ci-allow
 # The forge's API root. Read-only access is all this needs.
 forge_api = https://gitea.example.com/api/v1
 
-# A token file, mode 0600, owned by root. Give it read access and nothing
-# else - this program only ever GETs one file per repository.
+# A token file, mode 0600, owned by root. A forge API token, from the forge's
+# Settings -> Applications page, with read access to repository contents and
+# nothing else - this program only ever GETs one file per repository.
+#
+# NOT a runner registration token. That is the string from Actions -> Runners
+# that registers a runner, which dejima-ci-runners asks for separately. The API
+# rejects it with a 401, and nothing about the file says which kind it holds.
 token_file = /etc/dejima-ci/forge-token
 
 # One owner/repo per line. These are the repositories whose declarations are

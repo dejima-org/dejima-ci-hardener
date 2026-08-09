@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
+# Pin this host's network configuration to what it currently has.
+#
+# A CI runner wants a stable address: you reach it by name or number for the
+# life of the machine, and a lease that moves is a machine you have to go and
+# find. The Debian installer never asks - with a working DHCP server it
+# configures the interface and moves on - so converting is a job for afterwards,
+# and doing it by hand means transcribing four values into two files with no
+# feedback until something fails hours later.
+#
+# So nothing here is invented. The address, prefix, gateway and nameservers are
+# read off the running system and written back as configuration. The values do
+# not change, which is what makes this safe to run over SSH: the interface
+# already has this address, so there is nothing to renumber and no moment where
+# the host is unreachable.
+#
+# What does change is who decides them next time. Before: a DHCP client, every
+# boot, and whatever it is handed. After: these files.
+#
+# Idempotent. On a host already configured statically it reports that and
+# changes nothing.
+
+set -euo pipefail
+
+PROG=${0##*/}
+IFACES=${IFACES:-/etc/network/interfaces}
+RESOLV=${RESOLV:-/etc/resolv.conf}
+RESOLV_HEAD=${RESOLV_HEAD:-/etc/resolv.conf.head}
+
+IFACE=""
+ADDRESS=""
+GATEWAY=""
+NAMESERVERS=""
+NONINTERACTIVE=0
+[ -t 0 ] || NONINTERACTIVE=1
+
+usage() {
+    cat >&2 <<EOF
+Usage: sudo $PROG [--iface NAME] [--address CIDR] [--gateway IP]
+                  [--nameserver IP]... [--non-interactive]
+
+Writes this host's current addressing into $IFACES and
+$RESOLV, so it survives without a DHCP client.
+
+Every value defaults to what the interface already has, so the usual
+invocation takes no arguments at all and changes nothing about how the host is
+reachable - only what decides that after the next start.
+
+  --iface NAME       interface to pin (default: the one carrying the default route)
+  --address CIDR     e.g. 192.0.2.5/24  (default: its current address)
+  --gateway IP       (default: the current default route)
+  --nameserver IP    repeatable (default: what $RESOLV names)
+  --non-interactive  take the defaults; do not prompt
+EOF
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --iface) IFACE="${2:?}"; shift ;;
+        --address) ADDRESS="${2:?}"; shift ;;
+        --gateway) GATEWAY="${2:?}"; shift ;;
+        --nameserver) NAMESERVERS="${NAMESERVERS:+$NAMESERVERS }${2:?}"; shift ;;
+        -n|--non-interactive) NONINTERACTIVE=1 ;;
+        -h|--help) usage ;;
+        *) echo "$PROG: unknown argument: $1" >&2; usage ;;
+    esac
+    shift
+done
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+say() { printf '%s\n' "$*" >&2; }
+
+ask() {
+    local __var="$1" prompt="$2" def="${3:-}" reply=""
+    if [ "$NONINTERACTIVE" -eq 0 ]; then
+        if [ -n "$def" ]; then printf '%s [%s]: ' "$prompt" "$def" >&2
+        else printf '%s: ' "$prompt" >&2; fi
+        IFS= read -r reply </dev/tty || reply=""
+    fi
+    [ -n "$reply" ] || reply="$def"
+    printf -v "$__var" '%s' "$reply"
+}
+
+# --- what the host has right now --------------------------------------------
+[ -n "$IFACE" ]   || IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+[ -n "$IFACE" ]   || die "no default route, so there is no interface to pin.
+Bring the network up first - there is nothing here to read."
+
+[ -n "$ADDRESS" ] || ADDRESS=$(ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null \
+                                 | awk '{print $4; exit}')
+[ -n "$GATEWAY" ] || GATEWAY=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+
+if [ -z "$NAMESERVERS" ]; then
+    NAMESERVERS=$(awk '/^[[:space:]]*nameserver/ {print $2}' "$RESOLV" 2>/dev/null | tr '\n' ' ')
+    # A loopback stub is not an answer: it is systemd-resolved forwarding to
+    # servers this file does not name, and writing 127.0.0.53 into a static
+    # config leaves the host pointing at a stub that will not be there.
+    case "$NAMESERVERS" in
+        *127.0.0.53*|*127.0.0.1*)
+            if command -v resolvectl >/dev/null 2>&1; then
+                real=$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: *//p' | tr '\n' ' ')
+                [ -z "$real" ] || NAMESERVERS="$real"
+            fi ;;
+    esac
+    NAMESERVERS=$(printf '%s' "$NAMESERVERS" | tr -s ' ' | sed 's/^ *//; s/ *$//')
+fi
+
+[ -n "$ADDRESS" ] || die "$IFACE has no global IPv4 address to pin."
+[ -n "$GATEWAY" ] || die "no default gateway found for $IFACE."
+# Refused rather than written empty. A static configuration with no resolver is
+# a host that comes back from its next start unable to resolve anything, and
+# the cause is invisible by then: every symptom names whatever was being
+# reached rather than the file that stopped naming a server.
+[ -n "$NAMESERVERS" ] || die "no nameserver found in $RESOLV, and none given.
+Writing a static configuration now would leave this host with no resolver at
+all after its next start. Pass --nameserver <ip>, or fix $RESOLV first."
+
+# --- already done? -----------------------------------------------------------
+if grep -qE "^[[:space:]]*iface[[:space:]]+$IFACE[[:space:]]+inet[[:space:]]+static" "$IFACES" 2>/dev/null; then
+    say "$IFACE is already configured statically in $IFACES - nothing to do."
+    say "  address    $ADDRESS"
+    say "  gateway    $GATEWAY"
+    say "  resolver   $NAMESERVERS"
+    exit 0
+fi
+grep -qE "^[[:space:]]*iface[[:space:]]+$IFACE[[:space:]]+inet[[:space:]]+dhcp" "$IFACES" 2>/dev/null \
+    || die "no 'iface $IFACE inet dhcp' stanza in $IFACES.
+This only converts an ifupdown DHCP stanza. Something else is configuring this
+interface, and changing $IFACES would not affect it."
+
+say "=============================================================="
+say " Pinning $IFACE to what it already has"
+say "=============================================================="
+say
+say "Read from the running system, not invented - so none of these change how"
+say "this host is reachable. What changes is that they stop depending on a DHCP"
+say "lease being renewed."
+say
+
+say
+ask ADDRESS     "Address and prefix" "$ADDRESS"
+ask GATEWAY     "Gateway"            "$GATEWAY"
+ask NAMESERVERS "Nameserver(s)"      "$NAMESERVERS"
+
+case "$ADDRESS" in */*) ;; *) die "address must carry a prefix, e.g. $ADDRESS/24" ;; esac
+
+# --- write -------------------------------------------------------------------
+backup="$IFACES.dejima-$$"
+cp -a "$IFACES" "$backup"
+[ ! -e "$RESOLV" ] || cp -a "$RESOLV" "$RESOLV.dejima-$$"
+
+# Replace the dhcp stanza and everything indented under it. `auto` rather than
+# `allow-hotplug`, so the interface comes up as part of boot rather than when a
+# device happens to be enumerated - which is what a machine that is restarted on
+# a schedule needs.
+new_stanza="auto $IFACE
+iface $IFACE inet static
+    address $ADDRESS
+    gateway $GATEWAY"
+
+awk -v iface="$IFACE" -v stanza="$new_stanza" '
+    # allow-hotplug/auto lines for this interface are replaced by the stanza,
+    # which carries its own auto line.
+    $0 ~ "^[[:space:]]*(allow-hotplug|auto)[[:space:]]+" iface "[[:space:]]*$" { next }
+    $0 ~ "^[[:space:]]*iface[[:space:]]+" iface "[[:space:]]+inet[[:space:]]+dhcp" {
+        print stanza; inblk = 1; next
+    }
+    inblk && /^[[:space:]]+[^[:space:]]/ { next }   # indented options of the old stanza
+    { inblk = 0; print }
+' "$backup" > "$IFACES.new"
+mv "$IFACES.new" "$IFACES"
+
+{
+    echo "# Written by $PROG. This host is statically addressed; nothing"
+    echo "# regenerates this file, so an edit here is the whole of the change."
+    for ns in $NAMESERVERS; do echo "nameserver $ns"; done
+} > "$RESOLV.new"
+cp "$RESOLV.new" "$RESOLV_HEAD"
+mv "$RESOLV.new" "$RESOLV"
+
+# --- validate, and put it back if it does not hold ---------------------------
+# ifup --no-act parses the file and resolves the stanza without touching the
+# interface. A file that does not parse would cost the host its network at the
+# next start, by which time nobody is watching.
+if command -v ifup >/dev/null 2>&1; then
+    if ! ifup --no-act "$IFACE" >/dev/null 2>&1; then
+        cp -a "$backup" "$IFACES"
+        [ ! -e "$RESOLV.dejima-$$" ] || cp -a "$RESOLV.dejima-$$" "$RESOLV"
+        rm -f "$backup" "$RESOLV.dejima-$$"
+        die "the generated $IFACES did not parse; it has been put back unchanged.
+Nothing was applied and this host's networking is as it was."
+    fi
+fi
+
+say
+say "  written    $IFACES"
+say "  written    $RESOLV"
+say "  written    $RESOLV_HEAD"
+say "  backup     $backup"
+say
+
+# A DHCP client that still runs owns resolv.conf and will rewrite it, emptying
+# it on a statically addressed host because it has no lease to take servers
+# from. resolv.conf.head above survives that; disabling it is better.
+for unit in dhcpcd dhcpcd5 isc-dhcp-client; do
+    if systemctl list-unit-files "$unit.service" >/dev/null 2>&1 \
+       && systemctl is-enabled "$unit" >/dev/null 2>&1; then
+        systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        say "  disabled   $unit - a static host has no use for a DHCP client"
+    fi
+done
+
+say
+say "Nothing about the running network changed: the address written is the one"
+say "$IFACE already has. It takes effect as configuration at the next start,"
+say "which is also when it is first proven - so restart this VM before trusting"
+say "it, while there is still a snapshot to go back to."
+say
+say "  address    $ADDRESS"
+say "  gateway    $GATEWAY"
+say "  resolver   $NAMESERVERS"
+say
+say "Reserve this address on your DHCP server, or put it outside the pool."
+say "Nothing here can do that, and until it is done the server is free to hand"
+say "the same address to something else."

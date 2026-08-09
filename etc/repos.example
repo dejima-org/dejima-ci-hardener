@@ -1,3 +1,3 @@
 # One owner/repo per line. Adding a line trusts that repository's main branch
 # to widen this runner's egress allowlist.
-branderson/dejima
+dejima/dejima
