@@ -341,6 +341,7 @@ probe_name="${instance#*://}"; probe_name="${probe_name%%/*}"; probe_name="${pro
 : "${probe_name:=deb.debian.org}"
 
 while :; do
+    say
     ask upstream "Upstream resolver address" "${existing_upstream:-$(detect_upstream)}"
     [ -n "$upstream" ] || die "an upstream resolver is required"
     if ! command -v python3 >/dev/null 2>&1; then
@@ -405,6 +406,7 @@ say
 # --- token ------------------------------------------------------------------
 if [ -s "$TOKEN_FILE" ]; then
     say "A forge token is already installed at $TOKEN_FILE."
+    say
     ask replace_token "Replace it? (y/N)" "n"
 else
     replace_token=y
@@ -427,6 +429,7 @@ fi
 if [ "${replace_token,,}" = y ] || [ "${replace_token,,}" = yes ]; then
     token=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
+        say
         printf 'Forge token (not echoed): ' >&2
         IFS= read -rs token </dev/tty || true
         printf '\n' >&2
@@ -454,6 +457,7 @@ existing_repos=""
 [ -r "$REPOS_FILE" ] && existing_repos="$(grep -vE '^\s*(#|$)' "$REPOS_FILE" || true)"
 if [ -n "$existing_repos" ]; then
     say "Currently:"; sed 's/^/  /' <<< "$existing_repos" >&2
+    say
     ask keep_repos "Keep this list? (Y/n)" "y"
 else
     keep_repos=n
@@ -561,9 +565,11 @@ existing_base=""
 default_base="${existing_base:-$forge_host$'\n'deb.debian.org}"
 if [ -n "$existing_base" ]; then
     say "Currently:"; sed 's/^/  /' <<< "$existing_base" >&2
+    say
     ask keep_base "Keep this list? (Y/n)" "y"
 else
     say "Suggested:"; sed 's/^/  /' <<< "$default_base" >&2
+    say
     ask keep_base "Use this list? (Y/n)" "y"
 fi
 if [ "${keep_base,,}" = n ] || [ "${keep_base,,}" = no ]; then
@@ -585,6 +591,9 @@ say
 
 # --- remaining settings -----------------------------------------------------
 ipset="$(cfg_get ipset)"; : "${ipset:=ci-allow}"
+say "Where the generated allowlist goes, which branch is trusted, and how the"
+say "resolver is reloaded. The defaults are right unless you have a reason."
+say
 ask_cfg out    "Generated allowlist path"           out    /etc/dnsmasq.d/ci-allow.conf
 ask_cfg ref    "Branch treated as operator-approved" ref    main
 ask_cfg reload "Command that reloads the resolver"   reload "systemctl reload dnsmasq"
@@ -671,6 +680,7 @@ if [ "$INSTALL_UNITS" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
     # Docker starts. Docker recreates its own chains on every start and
     # DOCKER-USER comes back empty, so "apply them once" is not an
     # instruction that stays true.
+    say
     ask enable_fw "Enable the firewall unit (reapplies rules on every Docker start)? (Y/n)" "y"
     if [ "${enable_fw,,}" != n ] && [ "${enable_fw,,}" != no ]; then
         systemctl enable --now dejima-ci-firewall.service

@@ -216,6 +216,7 @@ say
 say "The runner label. A workflow reaches these runners by naming it in"
 say "runs-on:, and no other runner on the instance may carry it - if one does,"
 say "a job naming it can land there instead, on a host nothing here hardened."
+say
 ask label "Runner label" "${OPT_LABEL:-$default_label}"
 [ -n "$label" ] || die "a label is required"
 case "$label" in
@@ -235,6 +236,7 @@ if [ "$ROLE" = confined ]; then
     say "of them share this label and this job network, so they are a pool: a"
     say "job naming $label lands on whichever is free."
     while :; do
+        say
         ask count "Number of runners" "${OPT_COUNT:-3}"
         [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -ge 1 ] && [ "$count" -le 32 ] && break
         say "  a whole number between 1 and 32"
@@ -262,6 +264,7 @@ if [ "$ROLE" = privileged ]; then
     say
     say "Type 'none' to allow no host paths at all. Pressing Enter takes the"
     say "default shown, which is not the same thing."
+    say
     ask valid_volumes "Allowed volume paths (space-separated, or none)" "${OPT_VOLUMES:-/tmp/dejima-ci}"
     [ "${valid_volumes,,}" != none ] || valid_volumes=""
 fi
@@ -389,6 +392,7 @@ fi
 if [ -n "$existing_token" ]; then
     say
     say "A registration token is already in $ENV_FILE."
+    say
     ask replace_token "Replace it? (y/N)" "n"
 else
     replace_token=y
@@ -422,6 +426,7 @@ fi
 if [ "${replace_token,,}" = y ] || [ "${replace_token,,}" = yes ]; then
     token=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
+        say
         printf 'Registration token (not echoed, Enter to skip): ' >&2
         IFS= read -rs token </dev/tty || true
         printf '\n' >&2

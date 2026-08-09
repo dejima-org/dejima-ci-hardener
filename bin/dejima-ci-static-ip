@@ -141,6 +141,7 @@ say "this host is reachable. What changes is that they stop depending on a DHCP"
 say "lease being renewed."
 say
 
+say
 ask ADDRESS     "Address and prefix" "$ADDRESS"
 ask GATEWAY     "Gateway"            "$GATEWAY"
 ask NAMESERVERS "Nameserver(s)"      "$NAMESERVERS"
