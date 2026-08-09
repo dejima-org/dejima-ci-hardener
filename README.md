@@ -16,6 +16,10 @@ For *why* any of this is necessary - what a CI run adds over a sandbox, and
 why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md). You do
 not need it to follow this.
 
+**One maintainer, no support.** Nothing about this is promised: not a reply,
+not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
+where to report a vulnerability rather than in a public issue.
+
 ## Do not install this next to dejima
 
 This runs on a machine whose job is to execute untrusted code. dejima runs on
@@ -315,6 +319,7 @@ and failing it means the runner needs attention rather than the branch.
 | [docs/](docs/) | Index of everything below |
 | [docs/reference.md](docs/reference.md) | The two `docker.sock` settings, `CONFIG_FILE`, the `/data` volume, compose networks against job networks, sharing a job network between runners, why the privileged runner is separate, why the resolver is per-runner, the cache server |
 | [proxmox/README.md](proxmox/README.md) | Building the sacrificial VM: node firewall rules, bootstrap, snapshot, scheduled rollback |
+| [SECURITY.md](SECURITY.md) | What this software claims and where to report a vulnerability; links on to the organisation-wide policy for the rest |
 | [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md) | Why a CI runner needs any of this, and why there is no approval gate |
 
 ## License
