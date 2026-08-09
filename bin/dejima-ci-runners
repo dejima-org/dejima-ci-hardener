@@ -215,7 +215,6 @@ say "  forge         $instance"
 say
 
 # --- what it asks -----------------------------------------------------------
-ask DIR "Where to put the compose project" "$DIR"
 
 default_label="dejima-$ROLE"
 say
@@ -241,6 +240,13 @@ case "$name" in
     */*|*' '*) die "a group name cannot contain a slash or a space: $name" ;;
 esac
 : "${DIR:=$target_home/runners/$name}"
+
+say
+say "Where this group's compose project goes. One directory per group, so a"
+say "second group registered later sits beside this one rather than replacing"
+say "it - which is why the default carries the group name."
+ask DIR "Compose project directory" "$DIR"
+[ -n "$DIR" ] || die "a directory is required"
 
 case "$label" in
     ubuntu-*|ubuntu|latest|self-hosted)

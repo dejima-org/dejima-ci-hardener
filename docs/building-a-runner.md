@@ -367,9 +367,10 @@ sudo dejima-ci-runners --role confined --name dejima     --label ci-shared
 sudo dejima-ci-runners --role confined --name branderson --label ci-shared
 ```
 
-Each gets its own directory, compose project, containers, volumes and `.env`,
-so the tokens never meet and either group can be changed or removed without
-touching the other. Run the command again per group; it is idempotent, so the
+Each gets its own directory under `~/runners` — named for the group, which is
+what the directory prompt offers by default — along with its own compose
+project, containers, volumes and `.env`, so the tokens never meet and either
+group can be changed or removed without touching the other. Run the command again per group; it is idempotent, so the
 first is undisturbed by the second.
 
 **The label may be the same for both, and usually should be.** It is what a

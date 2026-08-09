@@ -36,7 +36,14 @@ EOF
 [ "$1 $2" = "compose version" ] && { echo "Docker Compose version v2.29.0"; exit 0; }
 exit 0
 STUB
-    chmod +x "$TMP/stub/docker"
+    # getent passwd, so the home the directory is derived from is this test's
+    # rather than whoever is running it.
+    cat > "$TMP/stub/getent" <<STUB
+#!/bin/sh
+[ "\$1" = passwd ] && { echo "tester:x:1000:1000::$TMP/home:/bin/bash"; exit 0; }
+exec /usr/bin/getent "\$@"
+STUB
+    chmod +x "$TMP/stub/docker" "$TMP/stub/getent"
     export PATH="$TMP/stub:$PATH"
 
     OUT="$TMP/runners"
@@ -224,6 +231,24 @@ privileged() {
     for f in "$TEMPLATE_DIR"/*.yaml "$TEMPLATE_DIR"/*.yml; do
         parse "$f" || { echo "unparseable template: $f"; return 1; }
     done
+}
+
+@test "with no --dir, the project lands under the group's own directory" {
+    # The default has to exist and has to carry the group name: a prompt with
+    # nothing in its brackets asks the operator to invent a path, and inventing
+    # one is how a second group ends up somewhere the first cannot sit beside.
+    run bash "$RUNNERS" --role confined --non-interactive --no-start --name grp
+    [ "$status" -eq 0 ]
+    [ -f "$TMP/home/runners/grp/docker-compose.yml" ]
+    [ -f "$TMP/home/runners/grp/config.yaml" ]
+}
+
+@test "the derived directory follows the group name, not the label" {
+    run bash "$RUNNERS" --role confined --non-interactive --no-start \
+        --name second --label shared
+    [ "$status" -eq 0 ]
+    [ -d "$TMP/home/runners/second" ]
+    [ ! -d "$TMP/home/runners/shared" ]
 }
 
 @test "two groups on one host can share a label without colliding" {
