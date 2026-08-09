@@ -1,7 +1,20 @@
-# dejima-ci-hardener
+<!-- Fixed, not preference-aware, and that is the decision rather than an
+     oversight. `prefers-color-scheme` reports the browser's setting, never the
+     site's, and this is read on a forge that renders dark whichever way the
+     browser is set - so anything conditional shows dark ink on a dark page to
+     a reader whose browser prefers light, and does it silently.
+     The suffix names the mode a file is FOR, not the colour of its ink:
+     -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
+     light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
+     which is committed alongside for exactly that. One line, on the mirror,
+     where someone can see whether it worked. -->
+<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
 
-Hardens a CI runner host that executes agent-authored code on every pull
-request, and gives its jobs as little as possible to execute it with.
+# Continuous Integration Hardener
+
+Hardens a continuous integration runner host that executes agent-authored code
+on every pull request, and gives its jobs as little as possible to execute it
+with.
 
 **This is the only thing you clone onto a CI box.** It is self-contained -
 there is no step that copies files out of a dejima checkout, and dejima itself
@@ -320,3 +333,8 @@ and failing it means the runner needs attention rather than the branch.
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The dejima wordmark and logo are not code and are not covered by that licence.
+They are trademarks; who holds them and what may be done with them is stated
+once for the organisation, at
+[dejima's ATTRIBUTION.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/ATTRIBUTION.md).

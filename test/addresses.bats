@@ -68,8 +68,13 @@ setup() {
 
     # git ls-files: only what is committed, and never .git or a stray render
     # left in the working tree by a local run.
+    #
+    # grep -I skips binary files. Without it an image's bytes can happen to
+    # contain something shaped like an address, and the guard fails on a file
+    # nobody can read or fix - which is how a check like this stops being
+    # trusted.
     found=$(cd "$REPO" && git ls-files -z \
-        | xargs -0 grep -hoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?\b' 2>/dev/null \
+        | xargs -0 grep -IhoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?\b' 2>/dev/null \
         | sort -u | grep -vxE "$pattern" || true)
 
     if [ -n "$found" ]; then
