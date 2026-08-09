@@ -156,6 +156,23 @@ Two ways this stalls, both from choices made during the install:
   during the install, so Debian did not add you. See §1 for the fix, or just
   run these as root from the console.
 
+**Install your SSH key before running it**, if you have not already:
+
+```sh
+ssh-copy-id <you>@<vm-ip>          # from the machine you administer this one from
+```
+
+The bootstrap turns password authentication off, which is what you want on a
+machine that executes untrusted code — but only if there is a key to log in
+with instead. It checks, and leaves passwords on where it finds no
+`authorized_keys` anywhere on the host, saying so rather than locking you out.
+Installing the key first means it can do the thing it is for.
+
+If you are reading this because you are already locked out: the hypervisor's
+console does not use SSH. Log in there, add the key, and re-run the bootstrap -
+or comment out the `PasswordAuthentication` line in
+`/etc/ssh/sshd_config.d/60-dejima-ci.conf` and `systemctl reload ssh`.
+
 ### What it does, on both tiers
 
 It checks this host can resolve, offers to [pin the

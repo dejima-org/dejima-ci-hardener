@@ -388,10 +388,36 @@ apt-get purge -y -qq avahi-daemon >/dev/null 2>&1 || true
 # survives the firewall being wrong.
 say "Hardening sshd..."
 sshd_drop=/etc/ssh/sshd_config.d/60-dejima-ci.conf
+# Password authentication is the one setting here that can lock you out, and
+# it does so silently: sshd keeps answering, the client is simply told that
+# publickey is all that is on offer, and the log says "Connection closed by
+# authenticating user" - which reads like a network fault rather than a
+# decision this script made.
+#
+# So it is only applied where a key already exists to log in with. Checked
+# across every home directory rather than only the invoking user's, because
+# `sudo` from one account does not mean that is the account anyone SSHes in as.
+have_authorized_key() {
+    local f
+    for f in /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys; do
+        [ -s "$f" ] || continue
+        grep -qE '^[[:space:]]*[^#[:space:]]' "$f" && return 0
+    done
+    return 1
+}
+
+if have_authorized_key; then
+    pw_auth="PasswordAuthentication no
+KbdInteractiveAuthentication no"
+else
+    pw_auth="# PasswordAuthentication left ON: no authorized_keys was found on this
+# host when $PROG ran, and turning it off would have left no way in but the
+# hypervisor's console. Install a key and re-run this to have it disabled."
+fi
+
 new_sshd="# Written by $PROG.
 PermitRootLogin no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
+$pw_auth
 X11Forwarding no
 AllowAgentForwarding no
 AllowTcpForwarding no"
@@ -409,6 +435,23 @@ else
     sshd -t || die "sshd config rejected - not restarting, $sshd_drop is bad"
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
     say "  written    $sshd_drop"
+fi
+
+if ! have_authorized_key; then
+    say
+    say "  PASSWORD AUTHENTICATION IS STILL ON, deliberately. No authorized_keys"
+    say "  exists anywhere on this host, so disabling it would have left the"
+    say "  hypervisor's console as the only way in."
+    say
+    say "  From the machine you administer this one from:"
+    say
+    say "    ssh-copy-id ${SUDO_USER:-<user>}@\$(hostname -I | awk '{print \$1}')"
+    say
+    say "  then re-run this script, which will disable it. Until then this host"
+    say "  accepts a password from your management address - narrower than it"
+    say "  sounds, since the node firewall admits only that address on 22, and"
+    say "  wider than it should stay."
+
 fi
 
 # --- automatic security updates ---------------------------------------------
