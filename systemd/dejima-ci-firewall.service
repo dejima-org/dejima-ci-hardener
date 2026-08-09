@@ -30,7 +30,7 @@ PartOf=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/dejima-ci-firewall
+ExecStart=@@BIN_DIR@@/dejima-ci-firewall
 
 # Failing to apply the rules must be loud. A runner that came up without them
 # is a runner with unrestricted egress, which is the state this whole setup

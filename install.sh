@@ -720,8 +720,24 @@ stop-dns-rebind
 rebind-domain-ok=/$forge_host/"
 
 if [ "$INSTALL_UNITS" -eq 1 ]; then
+    # @@BIN_DIR@@ substituted rather than written into the units, because the
+    # path was previously in two places and they disagreed: the units named
+    # /usr/local/bin while this installs to /usr/local/sbin, so the timer's
+    # service failed with 203/EXEC on every tick. Nothing said so - a timer
+    # that never succeeds looks exactly like one that has nothing to do, and
+    # the allowlist simply stopped being refreshed.
     for unit in dejima-ci-allowlist.service dejima-ci-allowlist.timer dejima-ci-firewall.service; do
-        write_if_changed "$UNIT_DIR/$unit" 0644 "$(cat "$SRC/systemd/$unit")"
+        write_if_changed "$UNIT_DIR/$unit" 0644 \
+            "$(sed "s|@@BIN_DIR@@|$BIN_DIR|g" "$SRC/systemd/$unit")"
+    done
+
+    # And checked, because a unit that names a program which is not there is
+    # only visible as a failed start, long after this run has finished.
+    for unit in dejima-ci-allowlist.service dejima-ci-firewall.service; do
+        exe=$(sed -n 's|^ExecStart=\([^ ]*\).*|\1|p' "$UNIT_DIR/$unit" | head -1)
+        [ -x "$exe" ] || die "$UNIT_DIR/$unit runs $exe, which is not executable.
+That is this installer's own mistake rather than anything you did. The programs
+are installed to $BIN_DIR; report the mismatch."
     done
 else
     say "  skipped    $UNIT_DIR (not writable) - install the units by hand"
