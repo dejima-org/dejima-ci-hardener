@@ -27,7 +27,7 @@
 # @@NOTE_END@@
 #
 # Written against act_runner v0.6.1. See dejima's docs/ci.md:
-# https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md
+# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
 
 log:
   level: info

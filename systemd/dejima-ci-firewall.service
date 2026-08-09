@@ -23,7 +23,7 @@
 
 [Unit]
 Description=dejima CI job-network egress rules
-Documentation=https://gitbox.example.com/branderson/dejima/src/branch/main/ci/README.md
+Documentation=https://gitbox.branderson.io/dejima/dejima-ci-hardener
 After=docker.service
 PartOf=docker.service
 

@@ -58,7 +58,7 @@ name: tests
 # regardless of the change - green checks that mean nothing.
 #
 # See dejima's docs/ci.md, "Pinning the workflow with pull_request_target":
-# https://gitbox.branderson.io/branderson/dejima/src/branch/main/docs/ci.md
+# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
 on:
   pull_request:
   pull_request_target:
