@@ -72,6 +72,21 @@ read_config() {
     # user saw for a file that was sitting right there - sending them to
     # create something that already existed.
     if [ ! -e "$file" ]; then
+        # -e cannot tell "absent" from "I am not allowed to look". The config
+        # lives in a 0750 root-owned directory, so every unprivileged run lands
+        # here - and being told to run install.sh, when install.sh has already
+        # run and the only thing missing is sudo, sends someone to redo work
+        # that is already done.
+        local dir; dir=$(dirname "$file")
+        if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+            die "cannot tell whether $file exists: $dir is not searchable by $(id -un).
+
+It is mode $(stat -c %a "$dir" 2>/dev/null || echo '?') and owned by $(stat -c %U "$dir" 2>/dev/null || echo '?'), so only that owner can look
+inside it. This says nothing about whether the configuration is there.
+
+Run the same command with sudo. This writes the resolver's configuration and
+reloads it, so it needs root regardless of what it can read."
+        fi
         die "no config at $file - run install.sh to create it"
     elif [ ! -r "$file" ]; then
         die "$file exists but is not readable by $(id -un) - it is mode $(stat -c %a "$file" 2>/dev/null || echo '?') and owned by $(stat -c %U "$file" 2>/dev/null || echo '?'). Run this as root, or with sudo."

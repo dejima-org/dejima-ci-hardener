@@ -340,6 +340,23 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
 # there at a root-owned path - sending them to create something that already
 # existed. The two cases need different messages because they need different
 # actions.
+@test "a config behind an unsearchable directory is not reported as missing" {
+    # /etc/dejima-ci is 0750 root-owned, so every unprivileged run cannot even
+    # stat the file inside it. Reporting that as "no config - run install.sh"
+    # sends someone to redo an install that already succeeded, when the only
+    # thing missing is sudo.
+    [ "$(id -u)" -ne 0 ] || skip "root searches any directory, so this cannot arise"
+    mkdir -p "$T/locked"
+    cp "$T/config" "$T/locked/config"
+    chmod 000 "$T/locked"
+    run "$BIN" check --config "$T/locked/config"
+    chmod 755 "$T/locked"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not searchable"* ]]
+    [[ "$output" == *"sudo"* ]]
+    [[ "$output" != *"run install.sh to create it"* ]]
+}
+
 @test "a missing config says so, and says what creates one" {
     # Not run_tool: it appends its own --config, which would win over this one.
     run "$BIN" check --config "$T/does-not-exist"
