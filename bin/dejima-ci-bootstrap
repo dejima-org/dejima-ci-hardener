@@ -635,7 +635,7 @@ cat >&2 <<EOF
 
      /etc/cron.d/dejima-ci-rollback  on the Proxmox node
 
-   proxmox/README.md section 6 has the line and what each part of it is for.
+   proxmox/README.md section 4 has the line and what each part of it is for.
    Roll back after anything suspicious too; that one is not optional.
 
 Remember what is and is not enforced here. The node's firewall keeps this

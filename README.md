@@ -77,247 +77,35 @@ network.**
 
 ---
 
-# The confined tier
+# Build one
 
-## Build the host
+Two pages, in this order. Neither repeats the other.
 
-Same shape as the other tier: [proxmox/README.md](proxmox/README.md) builds
-the VM, then one command inside it.
+1. **Your hypervisor.** On Proxmox:
+   [proxmox/README.md](proxmox/README.md) — the VM, the firewall applied to
+   it, and its snapshots. On anything else, the equivalent is a VM that
+   reaches the internet and, on your LAN, only your forge and a resolver.
+2. **The host inside it.**
+   [docs/building-a-runner.md](docs/building-a-runner.md) — the Debian
+   install, one bootstrap command, and the runners. The same on any
+   hypervisor, and the same for both tiers bar one flag.
 
-```sh
-sudo apt-get install git
-git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
-cd dejima-ci-hardener
-sudo ./bin/dejima-ci-bootstrap --role confined --mgmt <your-ip>
-```
-
-`git` is the only thing apt is asked for directly, because it is the one you
-need before there is a checkout to run anything from. A Debian netinst does not
-install it at any task selection, including "standard system utilities" — that
-task is `sudo` and the base tooling. Everything else is installed by the
-script, which is the point of it.
-
-**That one command is the whole tier.** It installs the packages, removes
-listeners a runner has no use for, hardens sshd, installs the host's own egress
-policy, enables unattended security upgrades, and then runs `install.sh` for
-the job network, its allowlist, its resolver and its firewall — and offers to
-set up the runners at the end.
-
-The packages are worth a word, because they are not a list you can usefully
-paste into a README. `install.sh` needs Docker; `dejima-ci-runners` needs
-Compose; Compose has no single package name that works across releases, since
-`docker-compose-v2` does not exist before trixie and the fallbacks are
-backports and then Docker's own apt repository. Debian also splits the Docker
-client into `docker-cli`, which `--no-install-recommends` drops, leaving a
-daemon and no `docker` binary. The script tries each route and checks the
-result rather than trusting apt's exit code.
-
-### Running `install.sh` on its own
-
-It is a separate program and stays one, but not because building a host is a
-two-step job. It is what you run **afterwards**, to change something:
+The whole of the tier decision is that flag, which the second page runs for
+you at the point it belongs:
 
 ```sh
-sudo ./install.sh          # add a repository, change the forge, move the resolver
+--role confined      --role privileged
 ```
 
-It is idempotent, so pressing Enter at every prompt changes nothing, and
-re-running the whole bootstrap to edit one setting would mean another
-`apt-get update`, another sshd rewrite and another egress policy install to
-change a line in a config file.
+On `confined` the bootstrap additionally runs `install.sh`, which builds the job network,
+its allowlisting resolver and the egress rules. On `privileged` it stops short
+of that, for [the reason above](#the-privileged-tier-has-no-egress-allowlist-on-purpose).
 
-It installs no packages, on the grounds that adding a Docker daemon to a
-machine is not a thing to do on someone's behalf — so on a host that
-`dejima-ci-bootstrap` did not build, it stops and names what is missing rather
-than fetching it. That is the deliberate case; the ordinary one is that
-bootstrap already put them there.
-
-Note what running it alone leaves undone: **the host hardening.** You get the
-job network, the allowlist, the resolver and the DOCKER-USER rules, on a
-machine that still answers on every listener the install left running, with
-whatever sshd configuration it came with. The confined tier's controls sit in
-front of jobs, not in front of the host.
-
-## What `install.sh` does
-
-It prompts for each value, offering whatever is already configured as the
-default, and does the whole job: creates the Docker network with a fixed
-bridge name, writes the resolver config, installs `dejima-ci-allowlist` and
-`dejima-ci-firewall`, installs and enables the systemd units, and renders the
-first allowlist.
-
-**Idempotent** - re-running and pressing Enter at every prompt changes
-nothing, so it is also how to change one setting later.
-`--non-interactive` re-installs from the existing configuration.
-
-What it asks for:
-
-| | |
-| --- | --- |
-| Job network | name, bridge, gateway and subnet - a **private** range |
-| Forge URL | `https://gitea.example.com` - the API root is derived |
-| Upstream resolver | see below; it offers what this host already uses |
-| Forge token | read access only, never echoed, kept if one is already installed |
-| Repositories | `owner/repo` per line - adding one trusts that repository's `main` |
-| Base domains | allowed regardless of any project declaration |
-
-## The upstream resolver
-
-The one setting that is genuinely ambiguous, so: it is the resolver **dnsmasq
-forwards allowed queries to** - the one that actually knows the answers.
-
-It is *not* the dnsmasq this configures (that would loop), and *not* the job
-bridge gateway. It is whatever this host already resolves with:
-
-```sh
-grep nameserver /etc/resolv.conf
-```
-
-On a host running systemd-resolved that gives you `127.0.0.53`, the local
-stub, which is not an answer - `resolvectl status | grep 'DNS Servers'` is,
-and names the servers behind it. Anywhere else `resolvectl` is simply absent,
-including on a VM built by the runbook above. Do not install it to find this
-out; `/etc/resolv.conf` is the answer on that machine.
-
-It has to resolve everything on the allowlist, **including your forge** - so
-if that name is internal, this has to be your internal DNS. `no-resolv` in the
-dnsmasq config means it will not read `/etc/resolv.conf` itself, which is why
-it must be named explicitly.
-
-## The runners
-
-`install.sh` offers to do this at the end, and it is the same command either
-way:
-
-```sh
-sudo dejima-ci-runners --role confined
-```
-
-It writes a compose project to `~/runners` - `docker-compose.yml`,
-`config.yaml` and a `0600` `.env` - brings it up, and then checks each runner
-actually registered rather than assuming it did.
-
-It asks for a label and how many runners you want. It does **not** ask for the
-job network or the resolver address: those come from the config `install.sh`
-wrote, because they have to match what it built, and a value that has to match
-something else is not a value to retype. That was the failure this replaces -
-`container.network`, `--dns` and `CONFIG_FILE` were three things to keep in
-step by hand, and each of them drifts silently, leaving a runner that starts,
-accepts jobs, and filters nothing.
-
-The one thing it cannot do is mint the registration token, which lives in your
-forge's UI. It prints the exact page for the scope you want and waits.
-
-To change something later - another runner, a different label, a new
-`act_runner` image - re-run it. Re-running with the same answers changes
-nothing, so it is safe to do casually:
-
-```sh
-sudo dejima-ci-runners --role confined --count 5 --non-interactive
-```
-
-`examples/` holds the annotated templates it renders. Read them there to see
-why each setting is what it is; the rendered copies say `DO NOT EDIT` because
-the next run overwrites them. `examples/docker-daemon.json` is the exception -
-it is not rendered, and goes into `/etc/docker/daemon.json` by hand, merged
-rather than overwritten.
-
-Register at **repository or organization** scope - see [Register scope is the
-boundary](#register-scope-is-the-boundary-the-label-is-not).
-
----
-
-# The privileged tier
-
-## Build the VM. Do not harden an existing one.
-
-Repurposing a machine you already have is a reasonable thought for the confined
-tier and the wrong starting point for this one. Its jobs get the Docker socket,
-so the assumption has to be that a compromised job gets root on that host, and
-handing an existing machine to that assumption is not a decision many people
-would make deliberately.
-
-**[proxmox/README.md](proxmox/README.md)** builds one instead: a runbook for
-the Proxmox web console, then one script inside the VM.
-
-```sh
-# inside the new VM, once the console steps are done
-sudo ./bin/dejima-ci-bootstrap --role privileged --mgmt <your-ip>
-```
-
-The node half is a runbook rather than a script on purpose. Something that
-runs `qm create` and writes into `/etc/pve/firewall/` is exactly what gets
-pasted into a root shell unread, and the blast radius is every VM on the node.
-The in-VM half is a script, because running that one blind costs you a machine
-built to be lost.
-
-## The boundary is on the node, not in the VM
-
-Everything installed inside the VM is defence in depth: real against a
-compromised job that has not escaped its container, which is the ordinary
-case, and worth nothing against one that has.
-
-What holds either way is the Proxmox firewall, applied to the VM's tap device
-and unreachable from the guest. It denies the VM every RFC1918 destination
-except two pinholes - the forge on 443 and a resolver on 53 - and those two
-are the entire remaining LAN exposure. Public egress is deliberately *not*
-restricted there;
-[docs/reference.md](docs/reference.md#why-public-egress-is-not-restricted-on-the-node)
-says why, and why a port allowlist there bought nothing.
-
-One thing to check rather than assume, because its absence looks exactly like
-it working: **the datacenter firewall must be enabled** (Datacenter → Firewall
-→ Options → Firewall: Yes), and the VM's network device must have its own
-**Firewall** checkbox ticked. Without either, the per-VM rules apply to
-nothing. `pve-firewall compile` on the node is the check, and
-[proxmox/README.md](proxmox/README.md) has a from-inside-the-VM check that
-does not rely on reading configuration at all.
-
-## Snapshot, and roll back on a cadence
-
-The VM is worth losing, which is only true if losing it is cheap. Register the
-runner, then snapshot - **VM → Snapshots → Take Snapshot**, named `clean`,
-**before the first job runs** and with *Include RAM* unticked. One taken later
-preserves whatever that job left; one taken before registration drops the
-runner off the forge on every rollback; one with RAM restores the guest's clock
-along with it, and a VM that thinks it is last month cannot verify a
-certificate.
-
-Rolling back after anything suspicious is not optional. Rolling back *on a
-schedule* is the more valuable of the two, because it does not depend on your
-having noticed - and it is the one that stops happening once doing it by hand
-gets old. Proxmox schedules backups, not rollbacks, so it is a cron entry on
-the node; [proxmox/README.md](proxmox/README.md) §6 has the line, why each part
-of it is what it is, how to confirm it is still running, and why the baseline
-needs refreshing every month or two.
-
-## The runner
-
-`dejima-ci-bootstrap` offers to do this at the end. On its own:
-
-```sh
-sudo dejima-ci-runners --role privileged --forge https://gitea.example.com
-```
-
-Same command as the other tier, same `~/runners` project, same registration
-check. Three things differ, and each follows from the tier rather than being a
-setting you pick:
-
-- **One runner, not asked.** A second runner here would share the machine that
-  is already assumed lost rather than getting one of its own.
-- **`--forge` is required.** There is no `install.sh` config on this host to
-  read it from, because `install.sh` never runs here.
-- **It asks which host paths jobs may bind-mount.** A volume a workflow asks
-  for and `valid_volumes` does not name is dropped *silently*, so this has to
-  match what your workflows request. `none` allows nothing.
-
-There is no `--dns` to set and no job network to join: its jobs are in the
-host's namespace, which is the grant the tier exists for.
-
-Give it one label that nothing else carries, and grant it to as few
-repositories as you can stand. Then **take the clean snapshot** - see
-[proxmox/README.md](proxmox/README.md) §5. A snapshot taken after the first
-job has run preserves whatever that job left.
+One thing that is not in either page, because no program can do it: **do not
+put a privileged runner on a machine you would mind losing.** Its jobs are
+handed the Docker socket, so the working assumption has to be that a
+compromised job gets root on that host, and handing an existing machine to that
+assumption is not a decision many people would make deliberately.
 
 ---
 

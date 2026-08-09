@@ -546,7 +546,7 @@ else
     say "outside this host: the hypervisor firewall, and the clean snapshot."
     say
     say "Take that snapshot NOW, before the first job runs - see"
-    say "proxmox/README.md section 5. It is worth nothing taken later."
+    say "proxmox/README.md section 4. It is worth nothing taken later."
 fi
 say
 say "  project     $DIR"

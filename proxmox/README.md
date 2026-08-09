@@ -1,6 +1,12 @@
-# Building the sacrificial runner VM
+# Provisioning a runner VM on Proxmox
 
-A runbook, not a script. Everything here is done in the Proxmox web console.
+The node-side half: the VM itself, the firewall applied to it, and its
+snapshots. Everything here is done in the Proxmox web console or on the node.
+
+What happens *inside* the VM is
+[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same
+on any hypervisor. Do this page first, up to the end of §3, then go there — it
+sends you back for §4 twice, once for each snapshot.
 
 That is deliberate. A script that runs `qm create` and writes into
 `/etc/pve/firewall/` is exactly the kind of artifact people paste into a root
@@ -12,9 +18,9 @@ doing while you do it.
 The in-VM half **is** a script: [`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap).
 Running that blind costs you a VM built to be lost.
 
-One step on the node is not console work, because it cannot be: Proxmox
-schedules backups but not rollbacks, so §6 is a three-command cron entry. It
-is printed in full and each part of it is explained, which is the standard the
+One step here is not console work, because it cannot be: Proxmox schedules
+backups but not rollbacks, so the cadence in §4 is a three-command cron entry.
+It is printed in full and each part of it explained, which is the standard the
 rest of this page is held to as well.
 
 ---
@@ -30,8 +36,9 @@ taking that seriously rather than hoping.
 
 Two VMs if you are following [the
 tiering](../README.md#two-tiers-and-you-must-pick-one): one for the privileged
-runner, one for the confined ones. The steps below are the same for both; what
-differs is the `--role` in §4 and the runner you register in §5.
+runner, one for the confined ones. Every step on this page is the same for
+both - the tiers differ only in a flag, and that flag is in
+[docs/building-a-runner.md](../docs/building-a-runner.md).
 
 **The firewall goes on the node, not in the guest.** Root in the VM can flush
 any rule set it can see. It cannot reach one applied to its own tap device.
@@ -84,71 +91,6 @@ first if you let DHCP assign one. `sudo apt-get install -y qemu-guest-agent`
 in the guest is the whole of it. Leaving it out is a defensible choice on a
 machine built for a small surface; leaving it out while the box is ticked just
 looks like the agent is broken.
-
-Install Debian normally, with two things to get right while it runs.
-
-**Leave the root password blank.** Debian reads an empty root password as
-"use sudo", installs it, and puts your first user in the `sudo` group. Set a
-root password instead and it does neither — your user has no `sudo` at all,
-and the bootstrap step below opens with two `sudo` commands that will tell you
-so.
-
-If you have already set one, fix it from the console as root:
-
-```sh
-apt-get install -y sudo
-usermod -aG sudo <your-user>
-```
-
-then log out and back in — group membership is read at login, so the shell you
-are already in will not have it.
-
-**The software selection screen.** This is the one that bites, because it is
-a checklist where the defaults are wrong for this machine and clearing them
-all is worse. Navigate with the arrow keys and toggle with **space** — typing
-does nothing useful, and clearing every entry leaves you without the tools the
-next section assumes.
-
-| Entry | Set it to |
-| --- | --- |
-| Debian desktop environment (and any desktop under it) | **off** |
-| web server | off |
-| **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
-| **standard system utilities** | **on** — the one that quietly costs you the most if it is off; see below. It does *not* give you `git`; see §4 |
-
-Leave SSH server *on*, even though `dejima-ci-bootstrap` configures sshd
-later. Configuring is not installing: skip the task and the VM has no sshd to
-configure and no way in except the Proxmox console.
-
-**Leave standard system utilities on as well.** It is where `sudo` comes from,
-and `dbus` with it. `systemctl` reaches the service manager over the system
-bus, so a host without `dbus` cannot start, stop, enable or reload anything -
-while `systemctl` on a unit that does not exist still answers normally, which
-makes the state easy to miss.
-
-### Addressing: leave it on DHCP for now
-
-A runner wants an address that stays put — you reach this machine by it for the
-life of the VM, and a lease that moves is a machine you have to go and find.
-
-The installer will not have asked. With a working DHCP server on the segment it
-configures the interface and moves on, and there is no static-or-DHCP question
-to answer.
-
-**Do nothing about that here.** §4's `dejima-ci-bootstrap` pins this host to the
-address it already has — same address, same gateway, same resolver, read off
-the running interface rather than typed — so there is nothing to transcribe and
-nothing about reachability changes at the moment it runs. Leaving it until then
-also means the values it copies are ones you have just watched work.
-
-Two things it cannot do for you:
-
-- **Reserve the address**, on your DHCP server or by putting it outside the
-  pool. Until that is done the server is free to hand the same one to something
-  else.
-- **Prove it survives a restart**, which is the only real test of an addressing
-  change. §4 takes a snapshot before any of this, so the way to find out costs
-  nothing.
 
 **What a moving address does *not* break.** Not the firewall. Every rule in the
 next section keys on a *destination*, except the SSH rule, which keys on *your*
@@ -364,107 +306,22 @@ Read them together, because the pattern says which thing is wrong:
 
 ---
 
-## 4. Bootstrap the VM
+## 4. Snapshots and rollback
 
-**Snapshot before you run it.** Everything up to here is a stock Debian with
-its networking settled; everything after is a script making changes across the
-machine. A snapshot at this line costs seconds and turns a bad run into a
-revert rather than an investigation.
+Three moments, and [docs/building-a-runner.md](../docs/building-a-runner.md)
+says when each falls. The mechanics are the same for all of them: **VM →
+Snapshots → Take Snapshot**, with *Include RAM* **unticked**.
 
-Check the base is sound first, so that what you preserve is worth returning to:
+| Name | When | What it is for |
+| --- | --- | --- |
+| `preflight` | after the OS is installed and its network verified, before anything is run on it | a known base to return to while iterating |
+| `clean` | after the runner registers, before its first job | the state the rollback cadence returns to |
 
-```sh
-ip -o -4 addr show scope global      # the address you meant
-ip route | grep default
-getent hosts deb.debian.org          # a public name
-getent hosts <your-forge-hostname>   # and yours
-systemctl is-system-running          # running, not degraded
-```
-
-Then **VM → Snapshots → Take Snapshot**, named `preflight`, with *Include RAM*
-unticked. The bootstrap below changes this host's addressing as well as its
-services, so this is the snapshot that makes both reversible. Roll back to it whenever a run leaves the host in a state you would
-rather not reason about — a second attempt from a known base beats unpicking a
-first one, and it keeps this machine identical to what the runbook describes
-rather than to whatever a half-finished run left.
-
-That is a different snapshot from `clean` in §5, which comes later and holds a
-registered runner. Keep both.
-
-`<vm-ip>` is whatever §2 settled on. If you let DHCP assign it and have not
-installed `qemu-guest-agent`, the Summary pane will not tell you — log in at
-the Proxmox console and run `ip -4 addr`, which needs no network and no
-package.
-
-```sh
-ssh <you>@<vm-ip>
-sudo apt-get update && sudo apt-get install -y git
-git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
-cd dejima-ci-hardener
-sudo ./bin/dejima-ci-bootstrap --role privileged --mgmt <your-management-ip>
-```
-
-**`git` is a real step, not a precaution.** A Debian netinst does not install
-it at any task selection, including "standard system utilities" — that task is
-`sudo` and the base tooling, and `git` is not in it. `dejima-ci-bootstrap`
-installs `git` too, which does not help here: you need it to fetch the script
-that would install it. This one line is the bootstrap's own bootstrap.
-
-Two ways this stalls, both from choices made during the install:
-
-- **`ssh` refuses the connection** — the SSH server task was not selected. Log
-  in at the Proxmox console, which needs no network, and
-  `apt-get install -y openssh-server git`, then `systemctl enable --now ssh`.
-- **`sudo` says you are not in the sudoers file** — a root password was set
-  during the install, so Debian did not add you. See "Leave the root password
-  blank" above for the fix, or just run these as root from the console.
-
-It also offers to pin the addressing. On a host still using DHCP it explains
-what it would do and asks; answering yes writes the address, gateway and
-resolver the interface already has into `/etc/network/interfaces` and
-`/etc/resolv.conf`, disables any DHCP client still running, and changes nothing
-about how the host is reachable right now. `--static-ip` does it without
-asking, and a host already pinned is left alone. Restart the VM afterwards to
-confirm it holds - the `preflight` snapshot is what makes that a cheap thing to
-find out.
-
-`--role confined` for the other tier. Either way the script installs packages,
-hardens sshd, removes listeners a runner has no use for, and sets up
-unattended security upgrades. On `--role confined` it then runs `install.sh`
-for the job allowlist, its resolver and its firewall; on `--role privileged`
-it deliberately does not, because those work by sitting in front of job
-traffic on a bridge and this tier's jobs are in the host's network namespace,
-where there is no bridge to sit on.
-
-It does not register the runner — that needs a token from your forge — and it
-does not enable the host's own egress policy until you have filled in
-`/etc/dejima-ci/host-egress-allow`, because enabling it empty would cut the VM
-off from the forge.
-
----
-
-## 5. Register the runner, then snapshot it clean
-
-The VM is worth losing, which is only true if losing it is cheap.
-
-**Register the runner first**, and confirm it shows *Online* in the forge. The
-registration lives on disk, in the runner's `.runner` file. A snapshot taken
-before that does not contain it, and every later rollback drops the runner off
-the forge — or, if the registration token is still in its environment, has it
-re-register as a *new* runner, accumulating a dead entry per rollback. Neither
-announces itself; you find out when a job sits queued.
-
-Then **VM → Snapshots → Take Snapshot**, named `clean`, described
-*bootstrapped and registered, before any job ran*. Two things about it:
-
-- **Before the first job.** One taken afterwards preserves whatever that job
-  left, which is precisely the thing you want to be able to throw away.
-- **Without RAM.** Leave *Include RAM* unticked. A snapshot with RAM restores
-  the guest's clock along with everything else, so a VM rolled back to last
-  month believes it is last month: TLS verification fails, apt rejects Release
-  files as not yet valid, and every timestamp a job writes is wrong. Nothing
-  in this VM's memory is worth resuming, and a rollback without RAM is smaller
-  and faster besides.
+**Leave *Include RAM* unticked.** A snapshot with RAM restores the guest's
+clock along with everything else, so a VM rolled back to last month believes it
+is last month: TLS verification fails, apt rejects Release files as not yet
+valid, and every timestamp a job writes is wrong. Nothing in this VM's memory
+is worth resuming, and a rollback without RAM is smaller and faster besides.
 
 Roll back from the same tab whenever you want it clean again. The snapshot
 survives being rolled back to, so `clean` stays usable indefinitely —
@@ -476,11 +333,9 @@ Two triggers:
   current enough that rolling back costs you nothing you mind losing.
 - **On a cadence.** This is what bounds how long a foothold can live *without
   your having noticed it* — which is the case the first trigger cannot cover,
-  and the reason the next section exists.
+  and the reason the rest of this section exists.
 
----
-
-## 6. Automate the cadence
+### Automate the cadence
 
 The reactive trigger depends on you noticing. The scheduled one does not, which
 makes it the more valuable of the two — and the one that quietly stops
