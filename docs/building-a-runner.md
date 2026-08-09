@@ -160,7 +160,9 @@ Two ways this stalls, both from choices made during the install:
 
 It checks this host can resolve, offers to [pin the
 addressing](#2-addressing-leave-it-on-dhcp), installs packages, removes
-listeners a runner has no use for, hardens sshd, and enables unattended
+listeners a runner has no use for, hardens sshd, installs `qemu-guest-agent`
+so the hypervisor can freeze this filesystem for a consistent snapshot and shut
+it down by negotiation rather than by ACPI alone, and enables unattended
 security upgrades.
 
 The packages are worth a word, because they are not a list you could usefully

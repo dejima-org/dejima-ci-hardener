@@ -198,9 +198,27 @@ fi
 # means --no-install-recommends here does not add it and an install that never
 # had it, or a host where something removed it as an unused dependency, is
 # indistinguishable from a working one until a unit needs managing.
+# qemu-guest-agent, on a machine otherwise kept to a small surface, so the
+# reasoning is worth stating.
+#
+# It listens on a virtio-serial channel to the hypervisor and on no network
+# socket at all, and job containers have no access to /dev/virtio-ports, so it
+# adds nothing reachable from a job or from the LAN. What it does add is
+# node-to-guest authority - guest-exec and friends are root in here - and that
+# direction is already total: the node owns this disk, can roll it back, power
+# it off and attach a console. The agent grants the node nothing it lacks and
+# grants this guest nothing at all.
+#
+# What it buys is three things the rest of this design already depends on: a
+# filesystem freeze, so a snapshot of a running VM is consistent rather than
+# equivalent to pulling the plug; the address in the hypervisor's summary,
+# which is the first place anyone looks for a machine they cannot reach; and a
+# shutdown that is negotiated rather than an ACPI event hopefully acted on -
+# which matters because the rollback cadence runs `qm shutdown --forceStop 1`,
+# and forceStop is the plug.
 apt-get install -y -qq --no-install-recommends \
     docker.io docker-cli \
-    dbus \
+    dbus qemu-guest-agent \
     openssh-server \
     iptables $tier_packages \
     ca-certificates curl git jq \
@@ -221,6 +239,19 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 say "  docker     $(docker --version 2>&1 | head -1)"
+
+# Said here because the failure is silent at both ends: with the option off the
+# channel does not exist, the agent has nothing to attach to, and the
+# hypervisor reports no address while snapshots of a running VM stay
+# crash-consistent - with nothing anywhere saying why.
+if [ -e /dev/virtio-ports/org.qemu.guest_agent.0 ]; then
+    say "  agent      qemu-guest-agent, channel present"
+else
+    say "  agent      qemu-guest-agent installed, but this VM has no agent"
+    say "             channel - the hypervisor's Qemu Agent option is off. Turn"
+    say "             it on for consistent live snapshots and for this machine's"
+    say "             address to appear in its summary."
+fi
 
 # Checked rather than assumed, for the same reason as docker above: apt
 # reporting success is not the same as the thing working, and every remaining

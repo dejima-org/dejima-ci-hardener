@@ -82,15 +82,13 @@ The Firewall checkbox is easy to miss and easy to uncheck later without
 noticing. If it is off, the per-VM rules do not apply to the interface and the
 VM is simply on your LAN.
 
-**Qemu Agent is two halves, and this is only one of them.** The tick opens a
+**Qemu Agent is two halves, and this tick is one of them.** It opens a
 virtio-serial channel on the host side; answering on it takes the
-`qemu-guest-agent` package inside the guest, which the Debian install does not
-add and nothing later in this runbook does either. Until it is installed the
-VM's Summary pane shows no IP address — which is the field you would reach for
-first if you let DHCP assign one. `sudo apt-get install -y qemu-guest-agent`
-in the guest is the whole of it. Leaving it out is a defensible choice on a
-machine built for a small surface; leaving it out while the box is ticked just
-looks like the agent is broken.
+`qemu-guest-agent` package inside the guest, which `dejima-ci-bootstrap`
+installs and which tells you if this tick is missing. Leave it on: without the
+channel the agent has nothing to attach to, the Summary pane shows no address,
+`qm shutdown` falls back to hoping ACPI is acted on, and a snapshot of a
+running VM stays crash-consistent.
 
 **What a moving address does *not* break.** Not the firewall. Every rule in the
 next section keys on a *destination*, except the SSH rule, which keys on *your*
@@ -318,17 +316,18 @@ down**, then **VM → Snapshots → Take Snapshot**, with *Include RAM*
 | `preflight` | after the OS is installed and its network verified, before anything is run on it | a known base to return to while iterating |
 | `clean` | after the runner registers and the VM has been restarted once, before its first job | the state the rollback cadence returns to |
 
-**Shut it down first.** Proxmox will snapshot a running VM, and what you get is
-crash-consistent: the disk as it was at an instant, with whatever was mid-write
-still mid-write. The guest recovers on the next boot by replaying its journal,
-which is usually fine and is exactly what pulling the plug gives you. For a
-state that is restored unattended every week, indefinitely, a snapshot taken
-while nothing is writing is worth the minute it costs.
+**Snapshot with it shut down, unless the guest agent is answering.** Proxmox
+will snapshot a running VM, and without the agent what you get is
+crash-consistent: the disk as it was at an instant, mid-writes included,
+recovered by journal replay on the next boot. That is what pulling the plug
+gives you, and it is a poor thing to restore unattended every week
+indefinitely.
 
-(Proxmox can freeze the guest's filesystems for a consistent snapshot of a
-*running* VM, but only through `qemu-guest-agent`, which the VM's Qemu Agent
-tick enables and does not install. Either install it in the guest, or shut the
-VM down. Ticking the box alone buys nothing here.)
+`qemu-guest-agent` removes the question — Proxmox asks it to freeze the guest's
+filesystems for the duration, so a live snapshot is consistent.
+`dejima-ci-bootstrap` installs it, and §2's Qemu Agent tick is what gives it a
+channel to answer on. With both, snapshot the VM where it stands. With either
+missing, shut it down first.
 
 **And `clean` has an order it depends on**, which is easy to get wrong because
 nothing complains at the time. It must be taken of a state that has already
