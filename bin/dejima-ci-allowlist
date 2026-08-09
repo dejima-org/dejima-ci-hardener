@@ -152,7 +152,7 @@ preflight() {
     {
         printf '%s: cannot run - %d problem(s) with the configuration:\n\n' "$PROG" "${#problems[@]}"
         printf '  - %s\n' "${problems[@]}"
-        printf '\nFix all of them, or re-run install.sh, which prompts for each.\n'
+        printf '\nFix all of them, or re-run `sudo ./install.sh`, which prompts for each.\n'
     } >&2
     # 2, not 1: `check` uses 1 for "there is a pending change", which is an
     # ordinary answer rather than a fault. A caller - install.sh, or a timer's

@@ -578,7 +578,7 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
                  say
                  say "  Fix the entry in $REPOS_FILE - the rest of this"
                  say "  run is unaffected, and re-running this installer or"
-                 say "  '$BIN_DIR/dejima-ci-allowlist render' picks it up." ;;
+                 say "  'sudo $BIN_DIR/dejima-ci-allowlist render' picks it up." ;;
             000) say "  Could not reach $forge_api to check the token."
                  say "  That is the network or the forge, not the token itself." ;;
             *)   say "  The forge answered $status when checking the token against"
@@ -589,12 +589,12 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
         say "  containers get a resolver that answers for nothing."
         say
         if [ "$NONINTERACTIVE" -eq 1 ]; then
-            say "  Continuing - fix the token and run: $BIN_DIR/dejima-ci-allowlist render"
+            say "  Continuing - fix the token and run: sudo $BIN_DIR/dejima-ci-allowlist render"
             break
         fi
         case "$status" in
             30[1278]) say "  Continuing. Fix $REPOS_FILE, then run:"
-                      say "    $BIN_DIR/dejima-ci-allowlist render"
+                      say "    sudo $BIN_DIR/dejima-ci-allowlist render"
                       break ;;
         esac
         ask retry_token "Enter a different token now? (Y/n)" "y"
@@ -776,11 +776,11 @@ if [ "${run_runners,,}" != n ] && [ "${run_runners,,}" != no ]; then
     # correct, and a runner that needs a second attempt should not read as the
     # allowlist having failed.
     "$BIN_DIR/dejima-ci-runners" --role confined || \
-        say "  runner setup did not finish - re-run $BIN_DIR/dejima-ci-runners --role confined"
+        say "  runner setup did not finish - re-run: sudo $BIN_DIR/dejima-ci-runners --role confined"
 else
     say "Skipped. When you are ready:"
     say
-    say "  $BIN_DIR/dejima-ci-runners --role confined"
+    say "  sudo $BIN_DIR/dejima-ci-runners --role confined"
     say
     say "It asks for a label and a count, takes the network and resolver from"
     say "$CONFIG, and tells you which page of your forge mints"
@@ -794,7 +794,7 @@ say "from your forge's UI. dejima ships test/ci-runner.bats for exactly this."
 say "If the DNS checks pass while the egress checks fail, the resolver is fine"
 say "and the firewall is not:"
 say
-say "  $BIN_DIR/dejima-ci-firewall && iptables -S DOCKER-USER"
+say "  sudo $BIN_DIR/dejima-ci-firewall && sudo iptables -S DOCKER-USER"
 say
 say "A runner using host networking is not covered by any of this: its jobs"
 say "are in the host's namespace, no bridge is in front of them, and the rules"
@@ -815,7 +815,7 @@ rc=0
 case "$rc" in
     0) say "Up to date." ;;
     1) say; say "There is a pending change, shown above. Apply it with:"
-       say "  $BIN_DIR/dejima-ci-allowlist render" ;;
+       say "  sudo $BIN_DIR/dejima-ci-allowlist render" ;;
     *) say; say "The configuration is not usable yet - the problems are listed above."
        say "Re-run this installer to fix them."; exit "$rc" ;;
 esac

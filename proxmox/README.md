@@ -246,10 +246,10 @@ nothing:
 
 ```sh
 # what is actually loaded right now
-iptables -S | grep "tap<vmid>i0"
+sudo iptables -S | grep "tap<vmid>i0"
 
 # what Proxmox would generate from the current config
-pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
+sudo pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
 
 **What you are looking for.** Proxmox names the per-VM chains after the tap

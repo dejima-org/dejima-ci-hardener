@@ -234,18 +234,23 @@ Confined-tier commands. A privileged host installs none of them, which is the
 point of that tier rather than a gap in it.
 
 ```sh
-dejima-ci-allowlist check    # what would change, without changing it
-dejima-ci-allowlist render   # fetch, validate, install, reload if changed
-dejima-ci-allowlist show     # what is installed right now
-dejima-ci-firewall           # reapply the egress rules
+sudo dejima-ci-allowlist check    # what would change, without changing it
+sudo dejima-ci-allowlist render   # fetch, validate, install, reload if changed
+sudo dejima-ci-allowlist show     # what is installed right now
+sudo dejima-ci-firewall           # reapply the egress rules
 ```
+
+All four need root, `show` included: every one of them reads
+`/etc/dejima-ci/config`, which names a forge token's path and is `0640 root` in
+a `0750 root` directory. Without `sudo` they cannot see it — and say that,
+rather than reporting it as absent.
 
 `dejima-ci-runners` is installed on both tiers, and is how the runners
 themselves are changed:
 
 ```sh
-dejima-ci-runners --role confined --count 5 --non-interactive   # grow the pool
-dejima-ci-runners --role confined                               # change anything else
+sudo dejima-ci-runners --role confined --count 5 --non-interactive   # grow the pool
+sudo dejima-ci-runners --role confined                               # change anything else
 ```
 
 Exit codes are distinguishable on purpose, because a timer's alerting has to

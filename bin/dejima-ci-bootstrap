@@ -502,7 +502,7 @@ elif [ "$ROLE" = privileged ]; then
     say "  installed  /usr/local/sbin/dejima-ci-runners"
     say
     /usr/local/sbin/dejima-ci-runners --role privileged || \
-        say "  runner setup did not finish - re-run dejima-ci-runners --role privileged"
+        say "  runner setup did not finish - re-run: sudo dejima-ci-runners --role privileged"
 else
     say
     say "Running install.sh for the allowlist, resolver and job firewall..."
@@ -765,7 +765,7 @@ cat >&2 <<EOF
    writes the compose project and the runner config together, so nothing has
    to be kept in step by hand:
 
-     dejima-ci-runners --role $ROLE
+     sudo dejima-ci-runners --role $ROLE
 
    It needs a registration token from your forge and names the exact page to
    mint one on. Grant it to as few repositories as you can stand.
@@ -821,8 +821,8 @@ asking the forge, and that is what fails.
 Fix the cause, then run either of these - the first re-prompts for every
 setting, the second only re-renders:
 
-  $SRC/install.sh
-  /usr/local/sbin/dejima-ci-allowlist render
+  sudo $SRC/install.sh
+  sudo /usr/local/sbin/dejima-ci-allowlist render
 
 Nothing needs undoing first. Both are idempotent.
 EOF
