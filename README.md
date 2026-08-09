@@ -35,6 +35,7 @@ boundary sits**, and therefore what you have to build to have one at all.
 | Docker socket in job containers | no | **yes** |
 | Job networking | its own bridge | the host's namespace |
 | Egress allowlist in front of jobs | yes, from each repo's `main` | **none, by design** |
+| A compromised job reaches | only the declared domains | the whole public internet |
 | The boundary is | in the host | on the hypervisor |
 | Treat this host as | expected to hold | already lost |
 | Runs `install.sh` | yes | no, deliberately |
@@ -50,6 +51,47 @@ Docker image, or dejima's own runtime tests, which assert things about a real
 daemon and a real host network. Both grants are root-equivalent on the host,
 and neither can be reduced without breaking the job they exist for. That tier
 needs a machine built to be lost, not a machine you own.
+
+### Why confine anything, if the hypervisor holds either way
+
+Worth answering directly, because the objection is sound as far as it goes. The
+node firewall's guarantee is identical on both tiers — *reaches the internet,
+not your network* — and it is enforced somewhere neither tier can touch. If
+your LAN were the whole of the threat, the confined tier would be ceremony.
+
+What that guarantee leaves open is the internet, and the internet is where the
+damage in this threat model actually happens. A prompt-injected session, or a
+dependency that ships something unwanted, has no need of your LAN. It needs
+somewhere to send a checkout, a token or a set of CI secrets, and somewhere to
+fetch its next instruction from. Every one of those is a public address, and
+the node firewall permits all of them by design.
+
+The confined tier closes that, in two places at once:
+
+- **Its jobs are handed no Docker socket**, so the ordinary compromise stays
+  inside a job container instead of becoming root on the host.
+- **Their egress is deny-by-default.** An unlisted name does not resolve, and
+  an unlisted address is unreachable even when named as a literal IP — the
+  resolver and the packet filter are separate controls, and a job has to get
+  past both. Reaching anywhere off the list at all means escaping the container
+  first.
+
+The list is the part that carries the most weight, and it is not a file on the
+host. It is `.dejima/allowed-domains` on each served repository's `main`, so
+widening it is a reviewed, attributable diff on a branch a pull request cannot
+write. **A branch cannot grant itself a destination**, which is the property
+the whole tool exists for.
+
+So the tiers bound different things, and neither is a weaker version of the
+other. The privileged tier bounds the catastrophic case — an attacker on your
+network — and accepts the ordinary one, since a job there reaches the whole
+internet by design. That is why that machine is built to be lost and rolled
+back on a schedule. The confined tier bounds the ordinary case, which is the
+one that actually happens, and which a hypervisor firewall cannot see: it is
+all outbound traffic to legitimate public addresses.
+
+Put the other way round: the node firewall decides *whose* network a job can
+reach. Only the confined tier decides *what it can say and to whom*.
 
 ### The privileged tier has no egress allowlist, on purpose
 
