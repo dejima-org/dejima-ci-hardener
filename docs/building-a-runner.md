@@ -160,8 +160,8 @@ Two ways this stalls, both from choices made during the install:
 
 It checks this host can resolve, offers to [pin the
 addressing](#2-addressing-leave-it-on-dhcp), installs packages, removes
-listeners a runner has no use for, hardens sshd, installs the host's own egress
-policy, and enables unattended security upgrades.
+listeners a runner has no use for, hardens sshd, and enables unattended
+security upgrades.
 
 The packages are worth a word, because they are not a list you could usefully
 paste from a README. `install.sh` needs Docker; `dejima-ci-runners` needs
@@ -175,11 +175,20 @@ result rather than trusting apt's exit code.
 ### What it does only on `--role confined`
 
 It then runs `install.sh`, which builds the job network, its allowlisting
-resolver and the DOCKER-USER rules that filter job egress. That is the whole
-of the difference between the tiers at build time, and it is
-[deliberate](../README.md#the-privileged-tier-has-no-egress-allowlist-on-purpose):
-a privileged job could remove any of it, so installing it there would leave a
-host that looks filtered and is not.
+resolver and the DOCKER-USER rules that filter job egress. And it installs the
+host's own outbound policy, denying this machine every RFC1918 destination
+except its resolvers and its forge — both derived rather than asked for, the
+resolvers from `/etc/resolv.conf` and the forge from the URL `install.sh` just
+recorded — then turns it on and checks the forge still resolves, taking it
+back off if it does not.
+
+None of that happens on `--role privileged`, and the reason is the same for
+every part of it: a job there holds the Docker socket and runs in this host's
+network namespace, so it can flush any of those rules in one command.
+Installing them would leave a host that
+[looks filtered and is not](../README.md#the-privileged-tier-has-no-egress-allowlist-on-purpose),
+which is worse than one that plainly is not. What contains that tier is the
+hypervisor's firewall, which the guest cannot reach.
 
 
 ---

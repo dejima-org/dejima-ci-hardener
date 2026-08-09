@@ -380,7 +380,92 @@ else
     say "  written    $sshd_drop"
 fi
 
+# --- automatic security updates ---------------------------------------------
+# A machine that exists to run untrusted code should not also be behind on
+# kernel and container-runtime fixes.
+say "Enabling unattended security upgrades..."
+dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+
+# --- the hardener itself ----------------------------------------------------
+# Only for the confined tier, and the reason is the same one this whole
+# arrangement rests on: the privileged tier's jobs run in the HOST network
+# namespace. No bridge sits in front of them, so a job network, its resolver
+# and its DOCKER-USER rules never see their traffic. Installing that machinery
+# here would take a working evening and protect nothing, and - worse - would
+# leave a privileged host that looks like it has an egress allowlist.
+#
+# What protects the privileged host is the node's firewall. That is the whole
+# list.
+if [ "$SKIP_HARDENER" -eq 1 ]; then
+    say
+    say "Skipping install.sh (--skip-hardener)."
+elif [ "$ROLE" = privileged ]; then
+    say
+    say "Not running install.sh on a privileged host, deliberately."
+    say
+    say "Its jobs run in the host network namespace - that is the grant the tier"
+    say "exists for - so no bridge is in front of them and a job network, its"
+    say "resolver and its DOCKER-USER rules would never see their traffic."
+    say "Installing them would leave this host looking like it has an egress"
+    say "allowlist while having nothing of the sort."
+    say
+    say "What protects this host is the Proxmox node's firewall, and that is the"
+    say "entire list. See proxmox/README.md."
+    say
+    say "If this machine also runs confined runners - not recommended, and not"
+    say "what the tiering is for - run ./install.sh by hand."
+
+    # The runner itself still has to be built, and on this role install.sh is
+    # not there to do it. Install the generator and its templates directly, so
+    # that this host ends up with the same "re-run it to change something"
+    # story as a confined one rather than a hand-written compose file.
+    install -m 0755 "$SRC/bin/dejima-ci-runners" /usr/local/sbin/dejima-ci-runners
+    install -d -m 0755 /usr/local/share/dejima-ci/templates
+    for tpl in "$SRC"/examples/*; do
+        [ -f "$tpl" ] && install -m 0644 "$tpl" "/usr/local/share/dejima-ci/templates/${tpl##*/}"
+    done
+    say
+    say "  installed  /usr/local/sbin/dejima-ci-runners"
+    say
+    /usr/local/sbin/dejima-ci-runners --role privileged || \
+        say "  runner setup did not finish - re-run dejima-ci-runners --role privileged"
+else
+    say
+    say "Running install.sh for the allowlist, resolver and job firewall..."
+    say
+    # Recorded rather than fatal. Dying here skips the summary below, and by
+    # this point the host is most of the way configured - packages in, sshd
+    # hardened, units installed, quite possibly runners registered and taking
+    # jobs. An operator who is told only "install.sh did not complete" has to
+    # work out for themselves which of those happened. The run still fails, at
+    # the end, after saying what state the machine is in.
+    HARDENER_FAILED=0
+    "$SRC/install.sh" || HARDENER_FAILED=1
+fi
+
 # --- the VM's own egress ----------------------------------------------------
+# Confined only, and for the same reason install.sh is confined only: on the
+# privileged tier a job holds the Docker socket and runs in this host's network
+# namespace, so it can flush an OUTPUT chain in one command. Installing one
+# there would leave a host that looks like it restricts its own egress and does
+# not - which is the failure this project argues against everywhere else, and
+# it would be no less true here for being our own rule set.
+#
+# The node's firewall drops the same destinations and cannot be reached from
+# the guest at all, so on that tier it is not a weaker copy of this: it is the
+# only copy, and it is the real one.
+if [ "$ROLE" = privileged ]; then
+    if systemctl list-unit-files dejima-ci-host-egress.service >/dev/null 2>&1; then
+        say
+        say "Removing the host egress policy - a privileged job can flush it, so"
+        say "it is not a control on this tier. The node's firewall is."
+        systemctl disable --now dejima-ci-host-egress >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/dejima-ci-host-egress.service \
+              /usr/local/sbin/dejima-ci-host-egress
+        systemctl daemon-reload
+        say "  removed    dejima-ci-host-egress"
+    fi
+else
 # Defence in depth, and labelled as such. A job that escapes its container
 # reaches root here and can flush this in one command; what it cannot flush is
 # the node's firewall. This exists for the case that does NOT escape, and to
@@ -526,68 +611,56 @@ fi
 systemctl daemon-reload
 say "  installed  dejima-ci-host-egress.service (not enabled yet - see below)"
 
-# --- automatic security updates ---------------------------------------------
-# A machine that exists to run untrusted code should not also be behind on
-# kernel and container-runtime fixes.
-say "Enabling unattended security upgrades..."
-dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
-
-# --- the hardener itself ----------------------------------------------------
-# Only for the confined tier, and the reason is the same one this whole
-# arrangement rests on: the privileged tier's jobs run in the HOST network
-# namespace. No bridge sits in front of them, so a job network, its resolver
-# and its DOCKER-USER rules never see their traffic. Installing that machinery
-# here would take a working evening and protect nothing, and - worse - would
-# leave a privileged host that looks like it has an egress allowlist.
+# --- fill it in and turn it on ----------------------------------------------
+# The two destinations this host cannot work without are the resolver and the
+# forge. The script derives the resolver from /etc/resolv.conf; the forge is
+# derived here, from the URL install.sh just recorded, and resolved to
+# addresses with the resolver that is about to be allowed.
 #
-# What protects the privileged host is the node's firewall. That is the whole
-# list.
-if [ "$SKIP_HARDENER" -eq 1 ]; then
-    say
-    say "Skipping install.sh (--skip-hardener)."
-elif [ "$ROLE" = privileged ]; then
-    say
-    say "Not running install.sh on a privileged host, deliberately."
-    say
-    say "Its jobs run in the host network namespace - that is the grant the tier"
-    say "exists for - so no bridge is in front of them and a job network, its"
-    say "resolver and its DOCKER-USER rules would never see their traffic."
-    say "Installing them would leave this host looking like it has an egress"
-    say "allowlist while having nothing of the sort."
-    say
-    say "What protects this host is the Proxmox node's firewall, and that is the"
-    say "entire list. See proxmox/README.md."
-    say
-    say "If this machine also runs confined runners - not recommended, and not"
-    say "what the tiering is for - run ./install.sh by hand."
+# Asking for it instead would be one more value to transcribe, and the failure
+# from getting it wrong is a host that cannot reach its forge - which presents
+# as the runner going quiet rather than as a firewall rule.
+forge_host=$(sed -n 's|^ *forge_api *= *||p' /etc/dejima-ci/config 2>/dev/null \
+             | head -1 | sed 's|https\?://||; s|/.*||; s|:.*||')
+forge_ips=""
+[ -z "$forge_host" ] || forge_ips=$(getent ahostsv4 "$forge_host" 2>/dev/null \
+                                    | awk '{print $1}' | sort -u | tr '\n' ' ')
 
-    # The runner itself still has to be built, and on this role install.sh is
-    # not there to do it. Install the generator and its templates directly, so
-    # that this host ends up with the same "re-run it to change something"
-    # story as a confined one rather than a hand-written compose file.
-    install -m 0755 "$SRC/bin/dejima-ci-runners" /usr/local/sbin/dejima-ci-runners
-    install -d -m 0755 /usr/local/share/dejima-ci/templates
-    for tpl in "$SRC"/examples/*; do
-        [ -f "$tpl" ] && install -m 0644 "$tpl" "/usr/local/share/dejima-ci/templates/${tpl##*/}"
-    done
-    say
-    say "  installed  /usr/local/sbin/dejima-ci-runners"
-    say
-    /usr/local/sbin/dejima-ci-runners --role privileged || \
-        say "  runner setup did not finish - re-run dejima-ci-runners --role privileged"
+if [ -n "$forge_ips" ]; then
+    {
+        echo "# Written by $PROG. host port [proto] - LAN destinations this host"
+        echo "# may reach beyond the resolvers it works out for itself."
+        echo "#"
+        echo "# Derived from forge_api in /etc/dejima-ci/config: $forge_host"
+        for ip in $forge_ips; do echo "$ip 443 tcp"; done
+    } > /etc/dejima-ci/host-egress-allow
+    chmod 640 /etc/dejima-ci/host-egress-allow
+    say "  written    /etc/dejima-ci/host-egress-allow ($forge_host: $forge_ips)"
+
+    systemctl enable --now dejima-ci-host-egress >/dev/null 2>&1 \
+        && say "  enabled    dejima-ci-host-egress" \
+        || say "  NOTE: could not enable dejima-ci-host-egress"
+
+    # Verified rather than assumed, and rolled back if it does not hold. This
+    # policy has exactly one way to go wrong and it takes the host off the
+    # network, at which point the reason is no longer reachable either.
+    if getent hosts "$forge_host" >/dev/null 2>&1; then
+        say "  verified   $forge_host still resolves with the policy applied"
+    else
+        say
+        say "  The policy is on and $forge_host no longer resolves, so it is"
+        say "  removing something this host needs. Taking it back off."
+        systemctl disable --now dejima-ci-host-egress >/dev/null 2>&1 || true
+        say "  removed    dejima-ci-host-egress - fix the cause and re-run this"
+    fi
 else
-    say
-    say "Running install.sh for the allowlist, resolver and job firewall..."
-    say
-    # Recorded rather than fatal. Dying here skips the summary below, and by
-    # this point the host is most of the way configured - packages in, sshd
-    # hardened, units installed, quite possibly runners registered and taking
-    # jobs. An operator who is told only "install.sh did not complete" has to
-    # work out for themselves which of those happened. The run still fails, at
-    # the end, after saying what state the machine is in.
-    HARDENER_FAILED=0
-    "$SRC/install.sh" || HARDENER_FAILED=1
+    say "  NOTE: could not work out the forge's address, so"
+    say "        /etc/dejima-ci/host-egress-allow is left as it is and the"
+    say "        egress policy is NOT enabled. Enabling it without the forge in"
+    say "        that file would cut this host off from it."
 fi
+fi
+
 
 cat >&2 <<EOF
 
@@ -614,26 +687,7 @@ fi
 
 cat >&2 <<EOF
 
-1. Put the forge's address in /etc/dejima-ci/host-egress-allow, then enable
-   the host's own egress policy:
-
-     systemctl enable --now dejima-ci-host-egress
-
-   It denies this host every RFC1918 destination except the ones in that file
-   and this host's own resolvers, which it reads from /etc/resolv.conf rather
-   than asking you to copy. Enabling it with the file still empty therefore
-   costs you the forge - the runner keeps working on connections it already
-   has and fails to make new ones - so fill it in first.
-
-   To take it back off, including when it is what locked you out:
-
-     systemctl stop dejima-ci-host-egress
-
-   On a privileged host this is the only egress control inside the VM, and it
-   is still not a boundary: root here can drop it. The node's firewall is the
-   boundary.
-
-2. If you skipped the runner setup above, or it did not finish, run it. It
+1. If you skipped the runner setup above, or it did not finish, run it. It
    writes the compose project and the runner config together, so nothing has
    to be kept in step by hand:
 
@@ -642,7 +696,7 @@ cat >&2 <<EOF
    It needs a registration token from your forge and names the exact page to
    mint one on. Grant it to as few repositories as you can stand.
 
-3. In the Proxmox console, once step 2 shows the runner Online, snapshot this
+2. In the Proxmox console, once step 1 shows the runner Online, snapshot this
    VM - BEFORE the first job runs, and with 'Include RAM' UNTICKED:
 
      VM -> Snapshots -> Take Snapshot, named 'clean'
@@ -652,7 +706,7 @@ cat >&2 <<EOF
    worried you. Include RAM and the guest's clock comes back with it, so a
    rolled-back VM cannot verify a certificate.
 
-4. Schedule the rollback on the NODE - nothing in here can be trusted to
+3. Schedule the rollback on the NODE - nothing in here can be trusted to
    revert this VM, and a cadence you perform by hand is one you stop
    performing. Proxmox schedules backups, not rollbacks, so it is cron:
 
