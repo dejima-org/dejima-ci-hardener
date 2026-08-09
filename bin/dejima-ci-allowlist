@@ -324,9 +324,16 @@ case "$cmd" in
         new=$(render); trap 'rm -f "$new"' EXIT
         if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
             echo "up to date: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
-        else
+        elif [ -f "${CFG[out]}" ]; then
             echo "would change:"
-            diff -u "${CFG[out]:-/dev/null}" "$new" || true
+            diff -u "${CFG[out]}" "$new" || true
+            exit 1
+        else
+            # :- substitutes an EMPTY variable, not a missing file, so this
+            # used to hand diff a path that is not there and print its
+            # complaint - on a first install, where nothing is wrong at all.
+            echo "would install ${CFG[out]}: $(( $(wc -l < "$new") - 1 )) names"
+            diff -u /dev/null "$new" || true
             exit 1
         fi
         ;;

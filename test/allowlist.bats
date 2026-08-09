@@ -239,6 +239,22 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [[ "$output" == *"unknown key"* ]]
 }
 
+@test "a first install reports what it would install, not a diff error" {
+    # The allowlist does not exist yet on a first run, which is the ordinary
+    # case and not a fault. Handing diff a path that is not there prints its
+    # complaint instead of the answer, on the one run where the operator is
+    # least able to tell the difference.
+    mkdir -p "$STUB_DIR/owner"
+    printf 'example.com\ndeb.debian.org\n' > "$STUB_DIR/owner/repo.body"
+    [ ! -f "$T/out/ci-allow.conf" ]
+    run_tool check
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"would install"* ]]
+    [[ "$output" == *"2 names"* ]]
+    [[ "$output" != *"No such file"* ]]
+    [ ! -f "$T/out/ci-allow.conf" ]
+}
+
 @test "check reports a pending change without installing it" {
     mkdir -p "$STUB_DIR/owner"; echo example.com > "$STUB_DIR/owner/repo.body"
     run_tool check
