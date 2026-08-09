@@ -7,8 +7,22 @@
      -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
      light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
      which is committed alongside for exactly that. One line, on the mirror,
-     where someone can see whether it worked. -->
-<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+     where someone can see whether it worked.
+     Every &nbsp; here is spacing, and it has to be a character rather than CSS
+     or a presentation attribute. Gitea's sanitizer strips `style` from the tag
+     and from any wrapper, `hspace`/`vspace` survive sanitizing only to be
+     ignored by browsers that dropped HTML4 presentation attributes, and a bare
+     <br> ends a line nothing follows, which browsers collapse to no height.
+     &nbsp; survives as a real U+00A0: on its own line it fills a paragraph
+     that would otherwise be empty, and immediately before the tag it sits
+     inline and indents the image by one space. -->
+&nbsp;
+
+&nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+
+---
+
+&nbsp;
 
 # Continuous Integration Hardener
 
