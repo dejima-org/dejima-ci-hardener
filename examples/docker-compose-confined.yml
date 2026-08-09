@@ -1,8 +1,8 @@
-# The ordinary runners: several on one host, sharing one config file and
+# The confined runners: several on one host, sharing one config file and
 # therefore one label, so a job naming that label lands on whichever is free.
 #
 # The privileged runner is NOT here. It has its own compose file, because it
-# belongs on its own host - see ci/docker-compose-runtime.example.yml.
+# belongs on its own host - see examples/docker-compose-privileged.yml.
 #
 # The thing to understand before reading the rest: compose's networks and the
 # job network are different worlds. Every service below is an act_runner
@@ -10,14 +10,17 @@
 # created by the Docker daemon, on the network named by `container.network` in
 # each runner's config.yaml, and compose knows nothing about them. Attaching a
 # service here to a network does not put its jobs there, and vice versa. See
-# ci/README.md for what that means for isolating jobs from each other.
+# docs/reference.md for what that means for isolating jobs from each other.
 #
-# Not runnable as written: substitute your own instance URL, image tag and
-# subnet, and create the job network first (ci/README.md, step 2).
+# @@NOTE_BEGIN@@
+# TEMPLATE. `dejima-ci-runners` renders this to ~/runners/docker-compose.yml,
+# substituting the @@MARKER@@ values and repeating the fenced service block
+# once per runner you asked for. This header is replaced in the rendered copy.
+# @@NOTE_END@@
 
-name: dejima-runners
+name: "@@PROJECT@@"
 
-# Shared by every ordinary runner. Volumes are per-service rather than here,
+# Shared by every confined runner. Volumes are per-service rather than here,
 # because each runner needs its own /data - and YAML merge keys merge mappings
 # but not lists, so a volumes: in a service replaces this one rather than
 # adding to it. Repeating them is the honest form.
@@ -25,7 +28,7 @@ x-ci-runner: &ci-runner
   # Pin the tag. These processes execute untrusted code on every pull request,
   # and :latest means the thing doing that can change without you deciding it
   # should.
-  image: gitea/act_runner:0.6.1
+  image: "@@IMAGE@@"
   restart: unless-stopped
   networks: [runners]
 
@@ -35,7 +38,7 @@ x-ci-env: &ci-env
   # every job container and nothing anywhere says so. If you change one thing
   # in a config file and see no effect, check this first.
   CONFIG_FILE: /config.yaml
-  GITEA_INSTANCE_URL: https://gitea.example.com
+  GITEA_INSTANCE_URL: "@@INSTANCE_URL@@"
   # Needed only until each runner has registered; the identity then lives in
   # that runner's own /data volume. Comes from a .env file beside this one
   # (chmod 600) so it is not in the file you commit, and is worth deleting
@@ -44,49 +47,37 @@ x-ci-env: &ci-env
   GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_REGISTRATION_TOKEN:-}
 
 services:
-  # --- ordinary runners -----------------------------------------------------
-  # All three share one config file, and therefore one label and one job
-  # network. That is what makes them a pool: a job naming dejima-ci lands on
-  # whichever is free. Only the name and the data volume differ.
-  ci-1:
+  # --- confined runners -----------------------------------------------------
+  # Every one of them shares this directory's config.yaml, and therefore one
+  # label and one job network. That is what makes them a pool: a job naming
+  # @@LABEL@@ lands on whichever is free. Only the name and the data volume
+  # differ.
+  #
+  # Those names come from @@NAME@@, which identifies this GROUP of runners on
+  # this host, rather than from the label. The two are separate on purpose: a
+  # host can carry a second group registered with a different token - another
+  # organization, or a user account - and both may legitimately answer the
+  # same label. Sharing an identity as well would collide on the compose
+  # project, the container names and the volumes.
+# @@SERVICE_BEGIN@@
+  "@@NAME@@-@@N@@":
     <<: *ci-runner
-    container_name: dejima-ci-1
+    container_name: "@@NAME@@-@@N@@"
     environment:
       <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-1
+      GITEA_RUNNER_NAME: "@@NAME@@-@@N@@"
     volumes:
       # The runner's OWN access to the daemon, so it can create job
       # containers. NOT the same setting as container.docker_host, which
-      # decides whether job containers get the socket - see ci/README.md.
+      # decides whether job containers get the socket - see docs/reference.md.
       - /var/run/docker.sock:/var/run/docker.sock
       # Read-only: a runner has no reason to rewrite the file deciding what
       # its jobs are granted.
-      - ./act-runner-ci.yaml:/config.yaml:ro
+      - ./config.yaml:/config.yaml:ro
       # Its registration identity. One per runner, never shared - two runners
       # cannot share a .runner.
-      - ci-1-data:/data
-
-  ci-2:
-    <<: *ci-runner
-    container_name: dejima-ci-2
-    environment:
-      <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-2
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-ci.yaml:/config.yaml:ro
-      - ci-2-data:/data
-
-  ci-3:
-    <<: *ci-runner
-    container_name: dejima-ci-3
-    environment:
-      <<: *ci-env
-      GITEA_RUNNER_NAME: dejima-ci-3
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./act-runner-ci.yaml:/config.yaml:ro
-      - ci-3-data:/data
+      - "@@NAME@@-@@N@@-data:/data"
+# @@SERVICE_END@@
 
 networks:
   # The runner containers' own network, and nothing else's. They need it only
@@ -96,7 +87,7 @@ networks:
   # would protect nothing.
   #
   # The job network is deliberately absent. It is created by hand with a fixed
-  # bridge name so the firewall can match on it (ci/README.md, step 2), and
+  # bridge name so the firewall can match on it (install.sh does this), and
   # act_runner attaches job containers to it by name. Declaring it here would
   # invite attaching a service to it, which is exactly what must not happen: a
   # process holding the Docker socket has no business sharing a network with
@@ -104,6 +95,6 @@ networks:
   runners:
 
 volumes:
-  ci-1-data:
-  ci-2-data:
-  ci-3-data:
+# @@VOLUME_BEGIN@@
+  "@@NAME@@-@@N@@-data":
+# @@VOLUME_END@@

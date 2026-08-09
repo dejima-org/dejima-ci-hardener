@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/dejima-ci-allowlist render
+ExecStart=@@BIN_DIR@@/dejima-ci-allowlist render
 
 # This reads a token and writes one file. It needs neither a home directory
 # nor the rest of the filesystem.

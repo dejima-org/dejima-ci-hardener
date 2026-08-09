@@ -1,6 +1,12 @@
-# Building the sacrificial runner VM
+# Provisioning a runner VM on Proxmox
 
-A runbook, not a script. Everything here is done in the Proxmox web console.
+The node-side half: the VM itself, the firewall applied to it, and its
+snapshots. Everything here is done in the Proxmox web console or on the node.
+
+What happens *inside* the VM is
+[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same
+on any hypervisor. Do this page first, up to the end of §3, then go there — it
+sends you back for §4 twice, once for each snapshot.
 
 That is deliberate. A script that runs `qm create` and writes into
 `/etc/pve/firewall/` is exactly the kind of artifact people paste into a root
@@ -12,9 +18,9 @@ doing while you do it.
 The in-VM half **is** a script: [`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap).
 Running that blind costs you a VM built to be lost.
 
-One step on the node is not console work, because it cannot be: Proxmox
-schedules backups but not rollbacks, so §6 is a three-command cron entry. It
-is printed in full and each part of it is explained, which is the standard the
+One step here is not console work, because it cannot be: Proxmox schedules
+backups but not rollbacks, so the cadence in §4 is a three-command cron entry.
+It is printed in full and each part of it explained, which is the standard the
 rest of this page is held to as well.
 
 ---
@@ -28,9 +34,11 @@ root-equivalent on their host. So the working assumption is not *if* but
 *when*: a compromised job has root on this VM. Everything below follows from
 taking that seriously rather than hoping.
 
-Two VMs if you are following [the tiering](../README.md#register-scope-is-the-boundary-the-label-is-not):
-one for the privileged runner, one for the ordinary ones. The steps are the
-same; only the runner you register on each differs.
+Two VMs if you are following [the
+tiering](../README.md#two-tiers-and-you-must-pick-one): one for the privileged
+runner, one for the confined ones. Every step on this page is the same for
+both - the tiers differ only in a flag, and that flag is in
+[docs/building-a-runner.md](../docs/building-a-runner.md).
 
 **The firewall goes on the node, not in the guest.** Root in the VM can flush
 any rule set it can see. It cannot reach one applied to its own tap device.
@@ -63,85 +71,85 @@ before you flip it rather than after.
 | --- | --- | --- |
 | General | Name | `oubliette`, or whatever you prefer |
 | OS | ISO | Debian netinst, current stable |
-| System | Qemu Agent | ✓ |
+| System | Qemu Agent | ✓ — and see the note below, the tick alone does nothing |
 | Disks | Size | 64 GB is comfortable for image builds |
 | CPU | Cores | 4 |
 | Memory | | 8192 MB |
 | Network | Bridge | your normal bridge |
 | Network | **Firewall** | **✓ — this is the checkbox everything else depends on** |
 
-That last one is easy to miss and easy to uncheck later without noticing. If
-it is off, the per-VM rules do not apply to the interface and the VM is simply
-on your LAN.
+The Firewall checkbox is easy to miss and easy to uncheck later without
+noticing. If it is off, the per-VM rules do not apply to the interface and the
+VM is simply on your LAN.
 
-Install Debian normally, with two things to get right.
+**Qemu Agent is two halves, and this tick is one of them.** It opens a
+virtio-serial channel on the host side; answering on it takes the
+`qemu-guest-agent` package inside the guest, which `dejima-ci-bootstrap`
+installs and which tells you if this tick is missing. Leave it on: without the
+channel the agent has nothing to attach to, the Summary pane shows no address,
+`qm shutdown` falls back to hoping ACPI is acted on, and a snapshot of a
+running VM stays crash-consistent.
 
-**Static addressing**, not DHCP. The firewall names this VM by address, and a
-lease that moves is a rule that no longer describes it.
+**What a moving address does *not* break.** Not the firewall. Every rule in the
+next section keys on a *destination*, except the SSH rule, which keys on *your*
+management address — and Proxmox applies the whole set to this VM's tap device,
+identified by VMID rather than by IP. Nothing anywhere names this VM by its own
+address, so a rebuilt VM that comes up on a different one is still fully
+firewalled.
 
-**Leave the root password blank.** Debian reads an empty root password as
-"use sudo", installs it, and puts your first user in the `sudo` group. Set a
-root password instead and it does neither — your user has no `sudo` at all,
-and the bootstrap step below opens with two `sudo` commands that will tell you
-so.
-
-If you have already set one, fix it from the console as root:
-
-```sh
-apt-get install -y sudo
-usermod -aG sudo <your-user>
-```
-
-then log out and back in — group membership is read at login, so the shell you
-are already in will not have it.
-
-**The software selection screen.** This is the one that bites, because it is
-a checklist where the defaults are wrong for this machine and clearing them
-all is worse. Navigate with the arrow keys and toggle with **space** — typing
-does nothing useful, and clearing every entry leaves you without the tools the
-next section assumes.
-
-| Entry | Set it to |
-| --- | --- |
-| Debian desktop environment (and any desktop under it) | **off** |
-| web server | off |
-| **SSH server** | **on** — this is how you reach the VM, and nothing here installs it later |
-| **standard system utilities** | **on** — without it you have no `git`, no `sudo`, and very little else |
-
-Leave SSH server *on*. An earlier version of this runbook said to leave it out
-on the grounds that `dejima-ci-bootstrap` configures sshd — it does, and
-configuring is not installing, so following that left a VM with no way in
-except the Proxmox console.
+What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
+later visit. That is reason enough to pin it.
 
 ---
 
 ## 3. The firewall rules
 
-**VM → Firewall → Options** first:
+Every runner VM gets the same eight rules, whichever tier it is, so build them
+once as a **security group** and apply that group to each. Two VMs with two
+hand-entered copies is two chances to get the ordering wrong and one of them to
+drift out of step later.
 
-| | |
-| --- | --- |
-| Firewall | `Yes` |
-| Input Policy | `DROP` |
-| Output Policy | `ACCEPT` |
+### Both tiers get these, for different reasons
 
-Inbound denies by default — this VM offers no service anyone should reach, so
-the exceptions are short and knowable. Outbound accepts by default, and the
-LAN is denied explicitly below.
+Apply them to the confined tier as well as the privileged one. The rules are
+identical; what differs is the job they are doing.
 
-That asymmetry is deliberate, and it is the opposite of what an earlier
-version of this runbook said. Denying outbound and then allowing tcp/80,
-tcp/443 and udp/123 breaks things — apt during a first install, and anything
-else needing a port nobody listed — and each breakage presents as a network
-fault rather than as a firewall rule. It also bought almost nothing: this VM
-is assumed to be owned by an attacker with root, and the guarantee is *reaches
-the internet, not your network*, not *reaches only three ports*. Anyone who
-owns the box tunnels over 443 like everybody else. Deny-by-default earns its
-keep where the protected set is enumerable, which is the LAN; the internet is
-not, and pretending otherwise produced a rule set that looked strict and only
-got in the way.
+On the **privileged** tier this *is* the boundary. Its jobs hold the Docker
+socket and run in the host's network namespace, so root on that VM is the
+working assumption, and anything installed inside it can be removed by whatever
+holds root. These rules are on the hypervisor, applied to the tap device, and
+the guest cannot reach them.
 
-Then **VM → Firewall → Add**, in this order:
+On the **confined** tier the primary control is inside the VM: the job network,
+its allowlisting resolver, and the DOCKER-USER rules. Those are real against a
+job precisely because a job cannot reach them, and they decide job egress by
+name and by address. The node firewall sits behind that as defence in depth. It
+changes nothing the allowlist has already decided; it covers the case the
+allowlist cannot, which is a job that escapes its container and reaches root on
+the host. At that point what is left is this, and it is doing exactly what it
+does on the other tier.
+
+So: primary in the guest and defence in depth on the node for confined, nothing
+in the guest and everything on the node for privileged.
+
+**One thing to weigh before applying them to a confined host.** Rules 5–8 drop
+every RFC1918 destination, including ones a *job* might legitimately want. If a
+served repository declares an internal name in `.dejima/allowed-domains` — a
+package mirror, an internal registry — the allowlist will resolve it and the
+node firewall will drop the connection, which reads as the allowlist not
+working. An internal NTP server is the same story. Give anything in that
+position its own pinhole above the DROPs, or keep it off the allowlist so the
+failure is at least honest about where it comes from.
+
+And one value that has to agree: the resolver in rules 3–4 must be the same
+address as `upstream` in `/etc/dejima-ci/config`, since that is where the
+confined tier's dnsmasq forwards allowed queries. Point them at different
+servers and every job fails to resolve while the host itself is fine.
+
+### Build the group once
+
+**Datacenter → Firewall → Security Group → Create**, named
+`dejima-ci-hardener`. Then **Add** these to it, in this order:
 
 | # | Direction | Action | Protocol | Dest. port | Source / Dest | Why |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -154,7 +162,45 @@ Then **VM → Firewall → Add**, in this order:
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
 | 8 | out | DROP | — | — | **Dest:** `169.254.0.0/16` | Link-local, incl. metadata services |
 
-**Order matters, and it is the one thing here that is easy to get wrong.**
+### Then apply it, per VM
+
+A security group carries **rules and nothing else**. The policies are not part
+of it, so each VM still needs its own:
+
+**VM → Firewall → Options**
+
+| | |
+| --- | --- |
+| Firewall | `Yes` |
+| Input Policy | `DROP` |
+| Output Policy | `ACCEPT` |
+
+Inbound denies by default — this VM offers no service anyone should reach, so
+the exceptions are short and knowable. Outbound accepts by default, and the LAN
+is denied explicitly by the group.
+
+That asymmetry is deliberate, and it is worth resisting the obvious-looking
+alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123. That
+breaks things — apt during a first install, and anything else needing a port
+nobody listed — and each breakage presents as a network fault rather than as a
+firewall rule. It also buys almost nothing: this VM is assumed to be owned by
+an attacker with root, and the guarantee being made is *reaches the internet,
+not your network*, not *reaches only three ports*. Anyone who owns the box
+tunnels over 443 like everybody else.
+
+Deny-by-default earns its keep where the protected set is enumerable, which is
+the LAN. The internet is not, and treating it as though it were gets you a rule
+set that looks strict and only gets in the way.
+
+Then **VM → Firewall → Add → Security Group**, and select
+`dejima-ci-hardener`. That single entry is the whole rule set, in the order the
+group defines, and it is the only firewall rule the VM needs.
+
+Adding another runner later is that one step. The ordering below was got right
+once, in one place, and cannot drift between hosts.
+
+**Order matters within the group, and it is the one thing here that is easy to
+get wrong.**
 Rules are evaluated top to bottom and the first match wins. Your forge and
 your resolver are *inside* the ranges rules 5–8 drop, so if either pinhole
 ends up below them it is dead and the runner cannot reach the forge or resolve
@@ -171,9 +217,9 @@ Nothing follows rule 8. The public internet is reached by the default policy.
 ### Values that must agree
 
 Three pairs here are entered in two places each, and each pair is silent when
-the halves disagree. Read the real value off the machine rather than
-recalling it — that is the whole of the advice, and every one of these has
-been got wrong at least once.
+the halves disagree. Read the real value off the machine rather than recalling
+it — that is the whole of the advice, and every one of these is easy to get
+wrong from memory.
 
 | This | Must equal this | Read the truth from |
 | --- | --- | --- |
@@ -200,10 +246,10 @@ nothing:
 
 ```sh
 # what is actually loaded right now
-iptables -S | grep "tap<vmid>i0"
+sudo iptables -S | grep "tap<vmid>i0"
 
 # what Proxmox would generate from the current config
-pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
+sudo pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
 
 **What you are looking for.** Proxmox names the per-VM chains after the tap
@@ -258,62 +304,46 @@ Read them together, because the pattern says which thing is wrong:
 
 ---
 
-## 4. Bootstrap the VM
+## 4. Snapshots and rollback
 
-```sh
-ssh <you>@<vm-ip>
-sudo apt-get update && sudo apt-get install -y git   # if the install left it out
-git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
-cd dejima-ci-hardener
-sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-management-ip>
-```
+Three moments, and [docs/building-a-runner.md](../docs/building-a-runner.md)
+says when each falls. The mechanics are the same for all of them: **shut the VM
+down**, then **VM → Snapshots → Take Snapshot**, with *Include RAM*
+**unticked**, then start it again.
 
-Two ways this stalls, both from choices made during the install:
+| Name | When | What it is for |
+| --- | --- | --- |
+| `preflight` | after the OS is installed and its network verified, before anything is run on it | a known base to return to while iterating |
+| `clean` | after the runner registers and the VM has been restarted once, before its first job | the state the rollback cadence returns to |
 
-- **`ssh` refuses the connection** — the SSH server task was not selected. Log
-  in at the Proxmox console, which needs no network, and
-  `apt-get install -y openssh-server git`, then `systemctl enable --now ssh`.
-- **`sudo` says you are not in the sudoers file** — a root password was set
-  during the install, so Debian did not add you. See "Leave the root password
-  blank" above for the fix, or just run these as root from the console.
+**Snapshot with it shut down, unless the guest agent is answering.** Proxmox
+will snapshot a running VM, and without the agent what you get is
+crash-consistent: the disk as it was at an instant, mid-writes included,
+recovered by journal replay on the next boot. That is what pulling the plug
+gives you, and it is a poor thing to restore unattended every week
+indefinitely.
 
-`--role ci` for the ordinary tier. Either way the script installs packages,
-hardens sshd, removes listeners a runner has no use for, and sets up
-unattended security upgrades. On `--role ci` it then runs `install.sh` for the
-job allowlist, its resolver and its firewall; on `--role runtime` it
-deliberately does not, because those work by sitting in front of job traffic
-on a bridge and this tier's jobs are in the host's network namespace, where
-there is no bridge to sit on.
+`qemu-guest-agent` removes the question — Proxmox asks it to freeze the guest's
+filesystems for the duration, so a live snapshot is consistent.
+`dejima-ci-bootstrap` installs it, and §2's Qemu Agent tick is what gives it a
+channel to answer on. With both, snapshot the VM where it stands. With either
+missing, shut it down first.
 
-It does not register the runner — that needs a token from your forge — and it
-does not enable the host's own egress policy until you have filled in
-`/etc/dejima-ci/host-egress-allow`, because enabling it empty would cut the VM
-off from the forge.
+**And `clean` has an order it depends on**, which is easy to get wrong because
+nothing complains at the time. It must be taken of a state that has already
+booted successfully at least once *since the last change to the machine's
+network configuration*. Rolling back is a cold boot - the disk is restored, the
+VM is started - so every rollback re-applies whatever is in
+`/etc/network/interfaces` and re-runs every unit. If that configuration is
+wrong, the rollback is when it takes effect, and every rollback after it does
+the same thing. Restart once and check the machine comes back before taking
+`clean`, and the cadence cannot surprise you later.
 
----
-
-## 5. Register the runner, then snapshot it clean
-
-The VM is worth losing, which is only true if losing it is cheap.
-
-**Register the runner first**, and confirm it shows *Online* in the forge. The
-registration lives on disk, in the runner's `.runner` file. A snapshot taken
-before that does not contain it, and every later rollback drops the runner off
-the forge — or, if the registration token is still in its environment, has it
-re-register as a *new* runner, accumulating a dead entry per rollback. Neither
-announces itself; you find out when a job sits queued.
-
-Then **VM → Snapshots → Take Snapshot**, named `clean`, described
-*bootstrapped and registered, before any job ran*. Two things about it:
-
-- **Before the first job.** One taken afterwards preserves whatever that job
-  left, which is precisely the thing you want to be able to throw away.
-- **Without RAM.** Leave *Include RAM* unticked. A snapshot with RAM restores
-  the guest's clock along with everything else, so a VM rolled back to last
-  month believes it is last month: TLS verification fails, apt rejects Release
-  files as not yet valid, and every timestamp a job writes is wrong. Nothing
-  in this VM's memory is worth resuming, and a rollback without RAM is smaller
-  and faster besides.
+**Leave *Include RAM* unticked.** A snapshot with RAM restores the guest's
+clock along with everything else, so a VM rolled back to last month believes it
+is last month: TLS verification fails, apt rejects Release files as not yet
+valid, and every timestamp a job writes is wrong. Nothing in this VM's memory
+is worth resuming, and a rollback without RAM is smaller and faster besides.
 
 Roll back from the same tab whenever you want it clean again. The snapshot
 survives being rolled back to, so `clean` stays usable indefinitely —
@@ -325,11 +355,9 @@ Two triggers:
   current enough that rolling back costs you nothing you mind losing.
 - **On a cadence.** This is what bounds how long a foothold can live *without
   your having noticed it* — which is the case the first trigger cannot cover,
-  and the reason the next section exists.
+  and the reason the rest of this section exists.
 
----
-
-## 6. Automate the cadence
+### Automate the cadence
 
 The reactive trigger depends on you noticing. The scheduled one does not, which
 makes it the more valuable of the two — and the one that quietly stops

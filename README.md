@@ -1,101 +1,20 @@
 # dejima-ci-hardener
 
-Hardens a CI runner that executes agent-authored code on every pull request,
-and gives it as little as possible to execute it with: no Docker socket in job
-containers, and deny-by-default egress whose allowlist comes from
-`.dejima/allowed-domains` on each served repository's `main`.
+Hardens a CI runner host that executes agent-authored code on every pull
+request, and gives its jobs as little as possible to execute it with.
 
 **This is the only thing you clone onto a CI box.** It is self-contained -
 there is no step that copies files out of a dejima checkout, and dejima itself
 never needs to be present here.
 
+There are two kinds of runner host. Both are built by the same runbook and the
+same command, differing in one flag; what differs is what a job on them is
+granted, and so where the boundary containing it sits. Pick the tier first -
+only one of the two halves below applies.
+
 For *why* any of this is necessary - what a CI run adds over a sandbox, and
-why no approval gate is offered - see dejima's `docs/ci.md`. You do not need
-it to follow this.
-
-## The runner host itself
-
-`install.sh` hardens the runners on a machine you already have. For the
-privileged tier that is the wrong starting point - its jobs get the Docker
-socket, so the assumption has to be that a compromised job gets root on that
-host, and handing an existing machine to that assumption is not a decision
-many people would make deliberately.
-
-**[proxmox/README.md](proxmox/README.md)** builds one instead: a runbook for
-the Proxmox web console, then one script inside the VM.
-
-```sh
-# inside the new VM, once the console steps are done
-sudo ./bin/dejima-ci-bootstrap --role runtime --mgmt <your-ip>
-```
-
-On `--role runtime` that deliberately stops short of running `install.sh`. The
-job network, its resolver and its DOCKER-USER rules all work by sitting in
-front of job traffic on a bridge, and this tier's jobs are in the host's
-network namespace where no bridge is. Installing them would cost an evening
-and leave a host that looks like it has an egress allowlist.
-
-The node half is a runbook rather than a script on purpose. Something that
-runs `qm create` and writes into `/etc/pve/firewall/` is exactly what gets
-pasted into a root shell unread, and the blast radius is every VM on the node.
-The in-VM half is a script, because running that one blind costs you a machine
-built to be lost.
-
-### The boundary is on the node, not in the VM
-
-The privileged tier hands job containers the Docker socket, which is
-root-equivalent on their host. So the working assumption is that a compromised
-job **has root in that VM** — and root can flush any firewall it can see.
-
-Everything installed inside the VM is therefore defence in depth: real against
-a compromised job that has not escaped its container, which is the ordinary
-case, and worth nothing against one that has.
-
-What holds either way is the Proxmox firewall, applied to the VM's tap device
-and unreachable from the guest. It denies the VM every RFC1918 destination
-except two pinholes — the forge on 443 and a resolver on 53 — and those two
-are the entire remaining LAN exposure.
-
-Public egress is deliberately *not* restricted there - not by address and not
-by port. An address allowlist on the node would break on every CDN rotation,
-and a port allowlist buys nothing: an earlier version permitted only tcp/80,
-tcp/443 and udp/123, which broke apt on a first install, and anyone who owns
-that box tunnels over 443 like everybody else. Neither would hold against VM
-root in any case.
-
-Note what that leaves. On this tier there is no egress allowlist in front of
-job containers either - they are in the host's network namespace, so nothing
-is in front of them. A privileged job reaches the whole public internet by
-design. What it does not reach is your LAN.
-
-The guarantee is narrower and honest, and it is the one worth making: an
-attacker who owns that VM reaches the internet, and not your network.
-
-One thing to check rather than assume, because its absence looks exactly like
-it working: **the datacenter firewall must be enabled** (Datacenter → Firewall
-→ Options → Firewall: Yes), and the VM's network device must have its own
-**Firewall** checkbox ticked. Without either, the per-VM rules apply to
-nothing. `pve-firewall compile` on the node is the check, and
-[proxmox/README.md](proxmox/README.md) has a from-inside-the-VM check that
-does not rely on reading configuration at all.
-
-### Snapshot, and roll back on a cadence
-
-The VM is worth losing, which is only true if losing it is cheap. Register the
-runner, then snapshot — **VM → Snapshots → Take Snapshot**, named `clean`,
-**before the first job runs** and with *Include RAM* unticked. One taken later
-preserves whatever that job left; one taken before registration drops the
-runner off the forge on every rollback; one with RAM restores the guest's clock
-along with it, and a VM that thinks it is last month cannot verify a
-certificate.
-
-Rolling back after anything suspicious is not optional. Rolling back *on a
-schedule* is the more valuable of the two, because it does not depend on your
-having noticed — and it is the one that stops happening once doing it by hand
-gets old. Proxmox schedules backups, not rollbacks, so it is a cron entry on
-the node; [proxmox/README.md](proxmox/README.md) §6 has the line, why each part
-of it is what it is, how to confirm it is still running, and why the baseline
-needs refreshing every month or two.
+why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md). You do
+not need it to follow this.
 
 ## Do not install this next to dejima
 
@@ -105,84 +24,142 @@ makes either worth anything, and this program holds a forge token and rewrites
 a resolver's configuration - neither of which belongs within reach of a
 sandbox session.
 
-## Install
+## Two tiers, and you must pick one
+
+The difference is not how much a job is granted. It is **where the security
+boundary sits**, and therefore what you have to build to have one at all.
+
+| | **confined** | **privileged** |
+| --- | --- | --- |
+| Built by | `--role confined` | `--role privileged` |
+| Docker socket in job containers | no | **yes** |
+| Job networking | its own bridge | the host's namespace |
+| Egress allowlist in front of jobs | yes, from each repo's `main` | **none, by design** |
+| A compromised job reaches | only the declared domains | the whole public internet |
+| The boundary is | in the host | on the hypervisor |
+| Treat this host as | expected to hold | already lost |
+| Runs `install.sh` | yes | no, deliberately |
+| For | tests, lint, anything needing no daemon | image builds, tests needing a real daemon or host networking |
+
+**Confined** is where everything belongs that can go there. Its jobs get no
+Docker socket, run on a bridge this tool creates, and reach only the domains
+the served repositories declare in `.dejima/allowed-domains` on their `main`.
+`dejima-ci-bootstrap --role confined` builds all of it.
+
+**Privileged** exists for the jobs that cannot work otherwise: building a
+Docker image, or dejima's own runtime tests, which assert things about a real
+daemon and a real host network. Both grants are root-equivalent on the host,
+and neither can be reduced without breaking the job they exist for. That tier
+needs a machine built to be lost, not a machine you own.
+
+### Why confine anything, if the hypervisor holds either way
+
+Worth answering directly, because the objection is sound as far as it goes. The
+node firewall's guarantee is identical on both tiers — *reaches the internet,
+not your network* — and it is enforced somewhere neither tier can touch. If
+your LAN were the whole of the threat, the confined tier would be ceremony.
+
+What that guarantee leaves open is the internet, and the internet is where the
+damage in this threat model actually happens. A prompt-injected session, or a
+dependency that ships something unwanted, has no need of your LAN. It needs
+somewhere to send a checkout, a token or a set of CI secrets, and somewhere to
+fetch its next instruction from. Every one of those is a public address, and
+the node firewall permits all of them by design.
+
+The confined tier closes that, in two places at once:
+
+- **Its jobs are handed no Docker socket**, so the ordinary compromise stays
+  inside a job container instead of becoming root on the host.
+- **Their egress is deny-by-default.** An unlisted name does not resolve, and
+  an unlisted address is unreachable even when named as a literal IP — the
+  resolver and the packet filter are separate controls, and a job has to get
+  past both. Reaching anywhere off the list at all means escaping the container
+  first.
+
+The list is the part that carries the most weight, and it is not a file on the
+host. It is `.dejima/allowed-domains` on each served repository's `main`, so
+widening it is a reviewed, attributable diff on a branch a pull request cannot
+write. **A branch cannot grant itself a destination**, which is the property
+the whole tool exists for.
+
+So the tiers bound different things, and neither is a weaker version of the
+other. The privileged tier bounds the catastrophic case — an attacker on your
+network — and accepts the ordinary one, since a job there reaches the whole
+internet by design. That is why that machine is built to be lost and rolled
+back on a schedule. The confined tier bounds the ordinary case, which is the
+one that actually happens, and which a hypervisor firewall cannot see: it is
+all outbound traffic to legitimate public addresses.
+
+Put the other way round: the node firewall decides *whose* network a job can
+reach. Only the confined tier decides *what it can say and to whom*.
+
+### The privileged tier has no egress allowlist, on purpose
+
+This is the split's most important consequence and the easiest to read as an
+omission, so plainly: it is not one.
+
+The confined tier's allowlist works because its jobs cannot reach it. The
+rules sit on a bridge their traffic has to cross, in a network namespace they
+are not in, enforced by a kernel they hold no privileged access to.
+
+A privileged job has all three. It holds the Docker socket, which is
+root-equivalent on that host, and it runs in the host's own network namespace.
+Any filter installed there is one it can flush in a single command. Installing
+it anyway would cost an evening and leave a host that *looks* like it has an
+egress allowlist, which is worse than one that plainly does not: the next
+person to reason about that machine reasons from the label.
+
+So `dejima-ci-bootstrap --role privileged` deliberately stops short of running
+`install.sh`, and the boundary moves outward - to the hypervisor's firewall,
+applied to the VM's tap device, where the guest cannot reach it.
+
+The guarantee that survives is narrower and honest, and it is the one worth
+making: **an attacker who owns that VM reaches the internet, and not your
+network.**
+
+---
+
+# Build one
+
+Two pages, in this order. Neither repeats the other.
+
+1. **Your hypervisor.** On Proxmox:
+   [proxmox/README.md](proxmox/README.md) — the VM, the firewall applied to
+   it, and its snapshots. On anything else, the equivalent is a VM that
+   reaches the internet and, on your LAN, only your forge and a resolver.
+2. **The host inside it.**
+   [docs/building-a-runner.md](docs/building-a-runner.md) — the Debian
+   install, one bootstrap command, and the runners. The same on any
+   hypervisor, and the same for both tiers bar one flag.
+
+The whole of the tier decision is that flag, which the second page runs for
+you at the point it belongs:
 
 ```sh
-sudo apt-get install ipset iptables dnsmasq
-git clone https://gitbox.branderson.io/branderson/dejima-ci-hardener.git
-cd dejima-ci-hardener
-sudo ./install.sh
+--role confined      --role privileged
 ```
 
-`install.sh` prompts for each value, offering whatever is already configured
-as the default, and does the whole job: creates the Docker network with a
-fixed bridge name, writes the resolver config, installs
-`dejima-ci-allowlist` and `dejima-ci-firewall`, installs and enables the
-systemd units, and renders the first allowlist.
+On `confined` the bootstrap additionally runs `install.sh`, which builds the job network,
+its allowlisting resolver and the egress rules. On `privileged` it stops short
+of that, for [the reason above](#the-privileged-tier-has-no-egress-allowlist-on-purpose).
 
-**Idempotent** - re-running and pressing Enter at every prompt changes
-nothing, so it is also how to change one setting later.
-`--non-interactive` re-installs from the existing configuration.
+One thing that is not in either page, because no program can do it: **do not
+put a privileged runner on a machine you would mind losing.** Its jobs are
+handed the Docker socket, so the working assumption has to be that a
+compromised job gets root on that host, and handing an existing machine to that
+assumption is not a decision many people would make deliberately.
 
-What it asks for:
+---
 
-| | |
-| --- | --- |
-| Job network | name, bridge, gateway and subnet - a **private** range |
-| Forge URL | `https://gitea.example.com` - the API root is derived |
-| Upstream resolver | see below; it offers what this host already uses |
-| Forge token | read access only, never echoed, kept if one is already installed |
-| Repositories | `owner/repo` per line - adding one trusts that repository's `main` |
-| Base domains | allowed regardless of any project declaration |
+# Both tiers
 
-### The upstream resolver
-
-The one setting that is genuinely ambiguous, so: it is the resolver **dnsmasq
-forwards allowed queries to** - the one that actually knows the answers.
-
-It is *not* the dnsmasq this configures (that would loop), and *not* the job
-bridge gateway. It is whatever this host already resolves with:
-
-```sh
-grep nameserver /etc/resolv.conf
-```
-
-On a host running systemd-resolved that gives you `127.0.0.53`, the local
-stub, which is not an answer - `resolvectl status | grep 'DNS Servers'` is,
-and names the servers behind it. Anywhere else `resolvectl` is simply absent,
-including on a VM built by the runbook above. Do not install it to find this
-out; `/etc/resolv.conf` is the answer on that machine.
-
-It has to resolve everything on the allowlist, **including your forge** - so
-if that name is internal, this has to be your internal DNS. `no-resolv` in the
-dnsmasq config means it will not read `/etc/resolv.conf` itself, which is why
-it must be named explicitly.
-
-### The runners
-
-`install.sh` does not register runners - that needs a token from your forge
-and is the one step it cannot do for you. `examples/` has the configuration
-they need:
-
-| File | Install as |
-| --- | --- |
-| `examples/act-runner-ci.yaml` | the ordinary runner's `config.yaml` |
-| `examples/act-runner-runtime.yaml` | the privileged runner's, on its own host |
-| `examples/docker-compose.yml` | several ordinary runners on one host |
-| `examples/docker-compose-runtime.yml` | the privileged one |
-| `examples/docker-daemon.json` | `/etc/docker/daemon.json` - merge, do not overwrite |
-
-Set `--dns=<your gateway>` in the ordinary runner's `container.options`, and
-register at **repository or organization** scope. That last part is not
-housekeeping — see below.
-
-### Register scope is the boundary; the label is not
+## Register scope is the boundary; the label is not
 
 A dedicated label routes honest jobs to the runner you prepared. It stops
 nothing else, because `runs-on:` lives in the workflow file and the workflow
 file lives in the branch. A branch can name any label it likes, so a session
 that changes `runs-on: dejima-ci` to `runs-on: ubuntu-latest` and opens a pull
-request has stepped outside everything this tool installs — provided some
+request has stepped outside everything this tool installs - provided some
 runner answering that label will take the job.
 
 Whether one will depends on where your runners are registered:
@@ -213,20 +190,67 @@ less than it appears to. In rough order of preference:
 
 Two failures matter here and both look exactly like success from inside a job:
 a job container that was handed the Docker socket, and a job that can reach an
-off-list address. Neither shows up as a red run.
+off-list address. Neither shows up as a red run. They show up as nothing at
+all.
 
-dejima ships `test/ci-runner.bats` for exactly this, run by its own CI as
-`runner-env (sandbox)` and `runner-env (host-docker)`. Point it at your runner
-and it will tell you which half is wrong - if the DNS checks pass while the
-egress checks fail, the resolver is fine and the packet filter is not.
+Nothing else in this repository can catch either. `install.sh` reports what it
+wrote; `dejima-ci-runners` reports that a runner registered and is reading the
+config it generated - and a runner can do all of that while granting its jobs
+everything. The properties the tool exists for are only observable from inside
+a job on the runner.
+
+So `test/ci-runner.bats` runs there. It takes the tier from `DEJIMA_CI_TIER`
+rather than sniffing it, so landing on the wrong runner fails instead of
+quietly selecting a different set of assertions, and it skips entirely when
+that variable is unset - which is why `bats test/` is still safe to run on a
+laptop.
+
+| | `confined` | `privileged` |
+| --- | --- | --- |
+| Docker socket absent | asserted | asserted **present** |
+| Host network namespace | — | asserted |
+| Allowlisted name resolves and connects | asserted | n/a |
+| Off-list name refused | asserted | n/a |
+| Off-list resolver on `:53` unreachable | asserted | n/a |
+| Off-list address on `:443` unreachable | asserted | n/a |
+| IPv6 not an unfiltered way around | asserted | n/a |
+
+The egress half is scoped to the confined tier on purpose. The privileged
+tier's jobs are in the host's network namespace, so the bridge rules are not
+in front of them at all and asserting an allowlist there would test nothing
+and pass anyway - which is the failure mode the file exists to catch.
+
+Read the two together. If the DNS checks pass while the egress checks fail,
+the resolver is fine and the packet filter is not. Each failure message names
+the setting and the command to check it.
+
+`.gitea/workflows/tests.yml` runs both tiers as `runner-env (confined)` and
+`runner-env (privileged)`, one red check each, so a broken runner says which
+one it was. A failure there means the machine needs attention, not the branch.
 
 ## Use
 
+Confined-tier commands. A privileged host installs none of them, which is the
+point of that tier rather than a gap in it.
+
 ```sh
-dejima-ci-allowlist check    # what would change, without changing it
-dejima-ci-allowlist render   # fetch, validate, install, reload if changed
-dejima-ci-allowlist show     # what is installed right now
-dejima-ci-firewall           # reapply the egress rules
+sudo dejima-ci-allowlist check    # what would change, without changing it
+sudo dejima-ci-allowlist render   # fetch, validate, install, reload if changed
+sudo dejima-ci-allowlist show     # what is installed right now
+sudo dejima-ci-firewall           # reapply the egress rules
+```
+
+All four need root, `show` included: every one of them reads
+`/etc/dejima-ci/config`, which names a forge token's path and is `0640 root` in
+a `0750 root` directory. Without `sudo` they cannot see it — and say that,
+rather than reporting it as absent.
+
+`dejima-ci-runners` is installed on both tiers, and is how the runners
+themselves are changed:
+
+```sh
+sudo dejima-ci-runners --role confined --count 5 --non-interactive   # grow the pool
+sudo dejima-ci-runners --role confined                               # change anything else
 ```
 
 Exit codes are distinguishable on purpose, because a timer's alerting has to
@@ -272,145 +296,27 @@ every job has unrestricted egress.
 bats test/
 ```
 
-Runs against a stubbed `curl` and `dnsmasq`.
+Runs against a stubbed `curl`, `dnsmasq` and `docker`, so it needs none of
+them and tells you what these programs decide rather than what the system does
+afterwards.
 
----
+`.gitea/workflows/tests.yml` runs that suite on every pull request, plus one
+check the stubs cannot make: it renders both tiers with the real generator and
+hands the output to a real `docker compose config`. A compose file can be
+valid YAML - which is all `bats test/` establishes - and still be rejected by
+Docker for a misspelled key or an anchor that does not merge. That job needs a
+Docker daemon and the host's own egress, so it runs on the privileged tier,
+and failing it means the runner needs attention rather than the branch.
 
-# Reference
+## Further reading
 
-Everything below is background. You do not need it to complete the setup.
+| | |
+| --- | --- |
+| [docs/](docs/) | Index of everything below |
+| [docs/reference.md](docs/reference.md) | The two `docker.sock` settings, `CONFIG_FILE`, the `/data` volume, compose networks against job networks, sharing a job network between runners, why the privileged runner is separate, why the resolver is per-runner, the cache server |
+| [proxmox/README.md](proxmox/README.md) | Building the sacrificial VM: node firewall rules, bootstrap, snapshot, scheduled rollback |
+| [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md) | Why a CI runner needs any of this, and why there is no approval gate |
 
-## The two settings named `docker.sock`
+## License
 
-The compose bind and `container.docker_host` name the same path and do
-opposite jobs. This is the easiest thing here to conflate:
-
-| | Effect | Needed? |
-| --- | --- | --- |
-| The compose bind | The runner can reach the daemon | Yes — without it nothing runs |
-| `docker_host: "-"` | Job containers *cannot* | Yes — without it every job is root on this host |
-
-Setting the second does not remove the first, and removing the first does not
-make jobs safe — it just stops the runner working.
-
-Whether a job gets the socket is a property of **the runner**, not of the job:
-a job asking for nothing unusual still receives whatever its runner grants
-everything it runs.
-
-## `CONFIG_FILE`, and why an edit can appear to do nothing
-
-Without `CONFIG_FILE=/config.yaml` in the environment, `act_runner` does not
-read the config file **at all** — it starts happily on built-in defaults,
-which means the socket goes into every job container and nothing in any log
-says so. If a config change appears to have no effect, check this first.
-
-Mount the config read-only: a runner has no reason to rewrite the file that
-decides what its jobs are granted.
-
-## The `/data` volume
-
-It holds `.runner`, written at registration: the runner's identity and its
-credential for your forge (`runner.file: .runner`, resolved against the
-container's working directory, which is `/data` in the official image).
-
-- **Keep it** and `--force-recreate`, an image bump or a reboot brings back
-  *the same registered runner*. Without it the container comes up with no
-  identity — with a token still in the environment it silently registers a
-  *new* runner, leaving a dead entry in your forge's runner list; without one
-  it fails to start.
-- **Delete it deliberately** to re-register: a runner moved to another
-  instance, or a label set you would rather establish fresh.
-- **It is the only state.** Nothing else in the container is worth preserving,
-  which is what lets the rest of this treat a runner as disposable.
-
-Labels come from `runner.labels` on every start rather than being frozen at
-registration, so changing one is an edit and a restart.
-
-## Compose networks and the job network are different worlds
-
-Running several runners from one compose file makes them share a network — and
-that is not the network worth worrying about.
-
-Every service in that file is an `act_runner` *process*. The containers that
-execute agent-authored code are created by the *daemon*, on the network named
-by `container.network`, and compose knows nothing about them. Attaching a
-service to a compose network does not put its jobs there.
-
-So the shared network holds runner processes and nothing else, and those are
-mutually trusted — each already holds the Docker socket, so separating them
-protects nothing. The example names one `runners` network explicitly rather
-than relying on the implicit `default`, so nothing joins it later by accident.
-
-The compose file deliberately does **not** attach a runner to the job network
-(a process holding the socket has no business sharing a network with untrusted
-code), and does **not** put the runner behind the egress allowlist (those rules
-filter the job bridge only — the runner is trusted, the jobs are not).
-
-## Several runners, and whether they should share a job network
-
-What *is* shared, with one compose file or five, is the job network: every
-runner whose config names `dejima-ci` puts its jobs on that bridge. With N
-runners at `capacity: 1` you get up to N jobs there at once, able to reach each
-other and each other's service containers.
-
-- **One shared job network** — the default, and why several runners can share
-  one config file. Every job on it has the same egress allowlist and none can
-  reach the host or the runners, so the added exposure is strictly job-to-job.
-  If the concern is a prompt-injected session reaching *outward*, this already
-  covers it.
-- **One per runner** — worth it if concurrent jobs come from repositories that
-  should not interfere, or if service containers hold anything a neighbour
-  should not see. Costs a config file and a `docker network create` each, and
-  the firewall rules looped over each bridge.
-
-  The `ci-allow` ipset is shared either way — it holds destinations, not
-  per-bridge state, so one set and one dnsmasq serve every bridge. The wrinkle
-  is DNS: `daemon.json`'s `dns` is a single daemon-wide address that would sit
-  on one bridge and be unreachable from the others. Give dnsmasq a stable
-  address on a dummy interface, point `daemon.json` there, and let each
-  bridge's `INPUT` rule allow port 53 to it.
-
-## Why the privileged runner is separate
-
-It is handed the Docker daemon and the host's network namespace, because one
-job cannot work without them and neither grant can be reduced without breaking
-it. A job on it can take the machine it runs on — so that machine should exist
-for nothing else. A separate compose file makes a separate host the default,
-rather than something to disentangle later.
-
-Where the two tiers do share a machine, be clear about what that is: **label
-tiering, not host separation.** A job denied the socket still shares a kernel
-with a runner that has it. A real reduction over granting everything to
-everything; not isolation between the tiers.
-
-It needs no bind for `/tmp/dejima-ci` — the job container gets that path
-because the workflow asks for it and `container.valid_volumes` permits it, and
-the host daemon resolves the source host-side.
-
-## Why the resolver is set per-runner, not daemon-wide
-
-`daemon.json` has a `dns` key, and pointing it at the allowlisting resolver is
-the obvious way to make job containers use it. It is also wrong here, and the
-failure is not obvious.
-
-That setting applies to **every container the daemon starts**. On a host that
-also runs the privileged tier, that includes containers created by its jobs
-over the Docker socket — which are not job containers and were never meant to
-be behind the CI resolver.
-
-A dejima sandbox is exactly such a container, and it has a firewall of its
-own. It allowlists precisely one host address: its own bridge gateway, taken
-from its default route. A resolver on a *different* bridge is therefore
-rejected by the sandbox's own rules, so nothing inside it resolves — and the
-symptom is not "DNS is misconfigured" but the sandbox's startup self-check
-reporting that a host it allows is unreachable.
-
-`--dns` in `container.options` scopes the resolver to the containers that
-runner starts, which is the set that should have it.
-
-## The cache server
-
-`act_runner` enables it by default, and it binds on the host *specifically* so
-job containers can reach it — an inbound service exposed to untrusted code. The
-firewall here blocks exactly that. Leave it off, or add a rule knowing what you
-are exposing.
+GPL-3.0-or-later. See [LICENSE](LICENSE).

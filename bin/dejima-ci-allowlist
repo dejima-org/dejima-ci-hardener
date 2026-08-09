@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
 # dejima-ci-allowlist - render a CI job network's DNS allowlist from the
 # .dejima/allowed-domains declarations of the repositories this runner serves,
 # read from the branch the operator controls.
@@ -69,6 +72,21 @@ read_config() {
     # user saw for a file that was sitting right there - sending them to
     # create something that already existed.
     if [ ! -e "$file" ]; then
+        # -e cannot tell "absent" from "I am not allowed to look". The config
+        # lives in a 0750 root-owned directory, so every unprivileged run lands
+        # here - and being told to run install.sh, when install.sh has already
+        # run and the only thing missing is sudo, sends someone to redo work
+        # that is already done.
+        local dir; dir=$(dirname "$file")
+        if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+            die "cannot tell whether $file exists: $dir is not searchable by $(id -un).
+
+It is mode $(stat -c %a "$dir" 2>/dev/null || echo '?') and owned by $(stat -c %U "$dir" 2>/dev/null || echo '?'), so only that owner can look
+inside it. This says nothing about whether the configuration is there.
+
+Run the same command with sudo. This writes the resolver's configuration and
+reloads it, so it needs root regardless of what it can read."
+        fi
         die "no config at $file - run install.sh to create it"
     elif [ ! -r "$file" ]; then
         die "$file exists but is not readable by $(id -un) - it is mode $(stat -c %a "$file" 2>/dev/null || echo '?') and owned by $(stat -c %U "$file" 2>/dev/null || echo '?'). Run this as root, or with sudo."
@@ -103,7 +121,7 @@ declare -A HINT=(
     [out]="where the generated allowlist is written, e.g. /etc/dnsmasq.d/ci-allow.conf"
     [ref]="the branch treated as operator-approved, normally main"
     [reload]="the command that reloads the resolver, e.g. systemctl reload dnsmasq"
-    [token_file]="a file holding a READ-ONLY forge token, mode 0600"
+    [token_file]="a file holding a read-only forge API token, mode 0600 - from the forge's Settings -> Applications page, NOT a runner registration token"
     [repos_file]="one owner/repo per line - the repositories allowed to widen this runner's allowlist"
     [base_file]="names allowed regardless of any project declaration, one per line"
 )
@@ -134,7 +152,7 @@ preflight() {
     {
         printf '%s: cannot run - %d problem(s) with the configuration:\n\n' "$PROG" "${#problems[@]}"
         printf '  - %s\n' "${problems[@]}"
-        printf '\nFix all of them, or re-run install.sh, which prompts for each.\n'
+        printf '\nFix all of them, or re-run `sudo ./install.sh`, which prompts for each.\n'
     } >&2
     # 2, not 1: `check` uses 1 for "there is a pending change", which is an
     # ordinary answer rather than a fault. A caller - install.sh, or a timer's
@@ -180,6 +198,56 @@ fetch_repo() {
     case "$http" in
         200) cat "$body" ;;
         404) ;;  # no declaration is a normal state, not an error
+        # 401 and 403 are the two an operator will actually meet, and they mean
+        # different things: rejected outright, against accepted but not allowed
+        # to read this. "unexpected HTTP 401" named neither, and left the one
+        # credential this program holds as the last place anyone would look.
+        401) rm -f "$body"
+             die "the forge rejected the token (HTTP 401) reading $repo.
+
+The token in ${CFG[token_file]} is present and not empty - an empty one is
+refused before this point - so it is wrong rather than missing. Mistyped or
+truncated when pasted, revoked since, expired, or carrying a stray space or
+carriage return picked up on the way in.
+
+Check first that it is an API token at all. This wants one from the forge's
+Settings -> Applications page, with read access to repository contents. A
+RUNNER REGISTRATION token - the one from Actions -> Runners, which registers a
+runner and is what dejima-ci-runners asks for - is a different string that the
+API rejects exactly like this. Swapping the two is easy and looks like nothing
+else.
+
+Reproduce it by hand with the request this just made:
+
+  curl -sS -o /dev/null -w '%{http_code}\\n' \\
+    -H \"Authorization: token \$(cat ${CFG[token_file]})\" \\
+    '${CFG[forge_api]}/repos/$repo/raw/.dejima/allowed-domains?ref=${CFG[ref]}'
+
+200 or 404 means the token is good. Re-run install.sh to replace it." ;;
+        403) rm -f "$body"
+             die "the forge accepted the token but refused the read (HTTP 403) for $repo.
+
+The token in ${CFG[token_file]} authenticates, so this is permission rather
+than identity. Either it lacks the scope to read repository contents - Gitea
+tokens are scoped, and one created with none selected authenticates and can
+read nothing - or the account behind it cannot see $repo.
+
+Read access to repository contents is all this needs, and all it should have:
+it only ever GETs one file per repository." ;;
+        # Not followed. curl would follow this happily, and the whole premise
+        # of this program is that the allowlist comes from a named branch of a
+        # named repository - so quietly reading whatever the forge points at
+        # instead is the one thing it must not do. A rename is also the most
+        # likely cause, and saying so beats reporting a number.
+        30[1278]) rm -f "$body"
+             die "the forge redirected (HTTP $http) for $repo.
+
+That repository has been renamed or moved to another owner, and this does not
+follow redirects: the allowlist is read from a repository you named, and
+following one would mean reading whichever repository the forge points at now.
+
+Update the entry in ${CFG[repos_file]} to its current owner/repo and run this
+again. Nothing has been changed; the previous allowlist is still in place." ;;
         *)   rm -f "$body"; die "unexpected HTTP $http for $repo" ;;
     esac
     rm -f "$body"
@@ -188,6 +256,14 @@ fetch_repo() {
 collect() {
     local token repo
     token=$(< "${CFG[token_file]}")
+    # Trimmed, because the failure it prevents is invisible. Command
+    # substitution strips trailing newlines and nothing else, so a token file
+    # written with a trailing space, or saved by an editor that left a carriage
+    # return, produces an Authorization header the forge rejects - and the file
+    # looks correct in every way a person would check it, including `cat`.
+    token="${token//$'\r'/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
     [ -n "$token" ] || die "empty token in ${CFG[token_file]}"
 
     # The base set first: what the runner needs regardless of any project.
@@ -263,9 +339,16 @@ case "$cmd" in
         new=$(render); trap 'rm -f "$new"' EXIT
         if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
             echo "up to date: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
-        else
+        elif [ -f "${CFG[out]}" ]; then
             echo "would change:"
-            diff -u "${CFG[out]:-/dev/null}" "$new" || true
+            diff -u "${CFG[out]}" "$new" || true
+            exit 1
+        else
+            # :- substitutes an EMPTY variable, not a missing file, so this
+            # used to hand diff a path that is not there and print its
+            # complaint - on a first install, where nothing is wrong at all.
+            echo "would install ${CFG[out]}: $(( $(wc -l < "$new") - 1 )) names"
+            diff -u /dev/null "$new" || true
             exit 1
         fi
         ;;

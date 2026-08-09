@@ -1,0 +1,17 @@
+# Domains this repository's CI jobs need, read from this file on `main` by
+# dejima-ci-allowlist and rendered into the confined tier's resolver.
+#
+# This repository is served by a runner it configured, which makes it its own
+# first consumer: the runner-env (confined) job installs bats from Debian and
+# then asserts that an off-list name does NOT resolve, so this file is what
+# separates the two outcomes.
+#
+# deb.debian.org is also in install.sh's suggested base-domains, so on most
+# hosts this is a restatement rather than a widening. Stated anyway: a job that
+# depends on the operator having accepted a suggestion is a job that breaks on
+# a host configured slightly differently, and the whole point of this format is
+# that a repository declares what it needs rather than inheriting it.
+#
+# One name per line. Adding one here widens what every job on that runner can
+# reach, so keep it to what the workflow actually fetches.
+deb.debian.org

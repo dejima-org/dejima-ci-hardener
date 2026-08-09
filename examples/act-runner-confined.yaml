@@ -1,5 +1,5 @@
 # act_runner configuration for a runner that executes agent-authored code and
-# is granted nothing to execute it with. This is the ordinary tier: everything
+# is granted nothing to execute it with. This is the confined tier: everything
 # except the one job that genuinely needs a Docker daemon belongs here.
 #
 # Written against act_runner v0.6.1. Check yours with `act_runner --version`,
@@ -7,10 +7,16 @@
 # defaults are what most of this is overriding, and a new release can change
 # one without anything in a job's output looking different.
 #
-# Not runnable as written: pick your own network name, subnet and label, and
-# see ci/README.md for the order things have to be created in.
+# @@NOTE_BEGIN@@
+# TEMPLATE. `dejima-ci-runners` renders this to ~/runners/config.yaml,
+# substituting the @@MARKER@@ values from what install.sh already knows and
+# what it asks you. Those are exactly the values that have to agree with
+# something else on the host, which is why they are not left for a person to
+# keep in step. This header is replaced in the rendered copy.
+# @@NOTE_END@@
 #
-# See docs/ci.md for why each of these is here.
+# See dejima's docs/ci.md for why each of these is here:
+# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
 
 log:
   level: info
@@ -31,7 +37,7 @@ runner:
   # Deliberately NOT ubuntu-latest or any other generic label. A generic label
   # is an invitation for any repository on the instance to schedule work here.
   labels:
-    - "dejima-ci:docker://node:20-bookworm"
+    - "@@LABEL@@:docker://@@JOB_IMAGE@@"
 
   # Register at REPOSITORY scope, not instance scope (that is a choice made at
   # `act_runner register` time, not here): an unrelated repository should not
@@ -72,11 +78,11 @@ container:
   # A network created ahead of time, with a named bridge, so that the
   # interface name and gateway are stable enough to write firewall rules
   # against. Left empty, act_runner creates one per job and there is nothing
-  # fixed to match on. See ci/iptables-ci.example.sh.
+  # fixed to match on. See bin/dejima-ci-firewall.
   #
   # NOT `host`: that would put jobs in this machine's network namespace, where
   # no bridge-based filtering applies to them at all.
-  network: dejima-ci
+  network: "@@NETWORK@@"
 
   privileged: false
 
@@ -97,7 +103,7 @@ container:
   # rejected by its own firewall and nothing inside it resolves at all.
   #
   # Must match listen-address in the dnsmasq config.
-  options: "--dns=203.0.113.1 --init --security-opt=no-new-privileges --cap-drop=NET_ADMIN --cap-drop=NET_RAW --cap-drop=SYS_ADMIN --cap-drop=SYS_MODULE --cap-drop=SYS_PTRACE --pids-limit=2048"
+  options: "--dns=@@GATEWAY@@ --init --security-opt=no-new-privileges --cap-drop=NET_ADMIN --cap-drop=NET_RAW --cap-drop=SYS_ADMIN --cap-drop=SYS_MODULE --cap-drop=SYS_PTRACE --pids-limit=2048"
 
   # Empty is the default and it is the right value: no host path can be
   # mounted into a job container. Stated explicitly so that adding one has to

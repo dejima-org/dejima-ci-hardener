@@ -1,0 +1,596 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
+# Build this host's act_runner compose project, start it, and check that it
+# actually registered.
+#
+# The steps this replaces were a numbered list in install.sh's closing output,
+# and every one of them was a value that had to agree with a value somewhere
+# else: container.network with the network install.sh created, --dns with the
+# resolver's listen-address, CONFIG_FILE with the path the compose file mounts
+# to. A list of things to keep in step by hand is a list of things that drift,
+# and each of these drifts silently - the runner comes up, jobs run, and the
+# grant you thought you removed is still there.
+#
+# So nothing here is copied by a person. What install.sh already knows is read
+# from its config; the rest is asked once and rendered into both files at the
+# same time.
+#
+# Idempotent: re-running and pressing Enter at every prompt changes nothing, so
+# it is also how to add a runner or change the label later.
+
+set -euo pipefail
+
+PROG=${0##*/}
+CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
+CONFIG="$CONF_DIR/config"
+REPOS_FILE="$CONF_DIR/repos"
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# Installed templates first, the checkout second. The generator is installed to
+# /usr/local/sbin and has to keep working once the clone it came from is gone.
+TEMPLATE_DIR=${TEMPLATE_DIR:-}
+if [ -z "$TEMPLATE_DIR" ]; then
+    for d in /usr/local/share/dejima-ci/templates "$SRC/examples"; do
+        [ -d "$d" ] && { TEMPLATE_DIR="$d"; break; }
+    done
+fi
+
+ROLE=""
+DIR=""
+FORGE=""
+OPT_NAME=""
+OPT_LABEL=""
+OPT_COUNT=""
+OPT_VOLUMES=""
+OPT_JOB_IMAGE=""
+OPT_ACT_IMAGE=""
+NONINTERACTIVE=0
+START=1
+[ -t 0 ] || NONINTERACTIVE=1
+
+usage() {
+    cat >&2 <<EOF
+Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
+                  [--no-start] [--non-interactive]
+
+  --role confined    a pool of runners whose jobs get no Docker socket, on the
+                     job network install.sh created, behind its allowlist
+  --role privileged  one runner whose jobs get the socket and this host's
+                     network namespace
+  --dir PATH         where the compose project goes (default ~/runners of the
+                     user who invoked sudo)
+  --forge URL        the forge, e.g. https://gitea.example.com. Read from
+                     $CONFIG when install.sh has run; required on a privileged
+                     host, where it has not
+  --name NAME        identifies this group of runners on this host: its
+                     directory, compose project, containers and volumes. Give
+                     a second group its own name to register a second token -
+                     another organization, or a user account - alongside the
+                     first. Defaults to the label
+  --label NAME       the label a workflow names in runs-on:
+  --count N          how many runners (confined only; privileged is always 1)
+  --volumes PATHS    host paths jobs may bind-mount, space-separated, or
+                     'none' (privileged only)
+  --job-image IMAGE  the image jobs run in
+  --runner-image IMG the act_runner image
+  --no-start         write the files and stop, rather than bringing them up
+  --non-interactive  take every default; do not prompt
+
+Every flag supplies the default for its prompt, so the two modes agree: with
+--non-interactive the flag IS the answer, and without it you still see and can
+change what was passed. That makes changing one thing later a single line -
+'--count 5 --non-interactive' adds two runners to a pool of three.
+EOF
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --role) ROLE="${2:?}"; shift ;;
+        --dir) DIR="${2:?}"; shift ;;
+        --forge) FORGE="${2:?}"; shift ;;
+        --name) OPT_NAME="${2:?}"; shift ;;
+        --label) OPT_LABEL="${2:?}"; shift ;;
+        --count) OPT_COUNT="${2:?}"; shift ;;
+        --volumes) OPT_VOLUMES="${2:?}"; shift ;;
+        --job-image) OPT_JOB_IMAGE="${2:?}"; shift ;;
+        --runner-image) OPT_ACT_IMAGE="${2:?}"; shift ;;
+        --no-start) START=0 ;;
+        -n|--non-interactive) NONINTERACTIVE=1 ;;
+        -h|--help) usage ;;
+        *) echo "$PROG: unknown argument: $1" >&2; usage ;;
+    esac
+    shift
+done
+case "$ROLE" in
+    confined|privileged) ;;
+    ci)      echo "$PROG: --role ci is now --role confined" >&2;        ROLE=confined ;;
+    runtime) echo "$PROG: --role runtime is now --role privileged" >&2; ROLE=privileged ;;
+    *) usage ;;
+esac
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+say() { printf '%s\n' "$*" >&2; }
+
+[ -n "$TEMPLATE_DIR" ] && [ -d "$TEMPLATE_DIR" ] \
+    || die "no templates found - looked in /usr/local/share/dejima-ci/templates and $SRC/examples"
+
+command -v docker >/dev/null 2>&1 || die "docker is not installed"
+docker compose version >/dev/null 2>&1 \
+    || die "docker compose v2 is not usable - 'docker compose version' fails"
+
+# --- prompting --------------------------------------------------------------
+# From the terminal rather than stdin, so this still works when invoked from a
+# script that arrived on a pipe.
+ask() {
+    local __var="$1" prompt="$2" def="${3:-}" reply=""
+    if [ "$NONINTERACTIVE" -eq 0 ]; then
+        if [ -n "$def" ]; then printf '%s [%s]: ' "$prompt" "$def" >&2
+        else printf '%s: ' "$prompt" >&2; fi
+        IFS= read -r reply </dev/tty || reply=""
+    fi
+    [ -n "$reply" ] || reply="$def"
+    printf -v "$__var" '%s' "$reply"
+}
+
+write_if_changed() {
+    local path="$1" mode="$2" content="$3"
+    if [ -f "$path" ] && [ "$content" = "$(cat "$path")" ]; then
+        say "  unchanged  $path"
+        chmod "$mode" "$path"
+        return 0
+    fi
+    printf '%s\n' "$content" > "$path.new"
+    chmod "$mode" "$path.new"
+    mv "$path.new" "$path"
+    say "  written    $path"
+}
+
+# install.sh's config, parsed the same way it writes it.
+cfg_get() {
+    local key="$1" line
+    [ -r "$CONFIG" ] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        [[ "$line" == *=* ]] || continue
+        [ "$(echo "${line%%=*}" | tr -d '[:space:]')" = "$key" ] || continue
+        echo "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+        return 0
+    done < "$CONFIG"
+}
+
+# --- where it goes ----------------------------------------------------------
+# The invoking user's home, not root's. Whoever runs `docker compose` here is a
+# person, and putting the project somewhere they cannot cd to without sudo is
+# how a directory ends up edited as root and owned by root.
+target_user="${SUDO_USER:-$(id -un)}"
+target_home=$(getent passwd "$target_user" | cut -d: -f6)
+[ -n "$target_home" ] || target_home="$HOME"
+
+say "=============================================================="
+say " Runner setup - $ROLE tier"
+say "=============================================================="
+say
+
+# --- values install.sh already knows ----------------------------------------
+network="$(cfg_get network)"
+gateway="$(cfg_get gateway)"
+forge_api="$(cfg_get forge_api)"
+instance="${forge_api%/api/v1}"
+
+if [ "$ROLE" = confined ]; then
+    # Not prompted, deliberately. These three are the ones whose halves
+    # disagreeing produces a runner that starts, runs jobs, and filters
+    # nothing - so they come from the file that recorded what was actually
+    # built rather than from a person recalling it.
+    [ -n "$network" ] || die "no job network in $CONFIG - run install.sh first.
+The confined tier's runners attach jobs to the network install.sh creates; there
+is nothing to point them at until it has run."
+    [ -n "$gateway" ] || die "no gateway in $CONFIG - re-run install.sh"
+    say "From $CONFIG, not asked again:"
+    say "  job network   $network      (container.network)"
+    say "  resolver      $gateway      (--dns, the allowlisting resolver)"
+    say
+else
+    # No install.sh on this tier, so there is no config to read and nothing on
+    # the host that a wrong answer here would silently disagree with.
+    say "This tier runs no allowlist and no job network - its jobs are in this"
+    say "host's network namespace. Nothing here is read from $CONFIG, because"
+    say "install.sh does not run on a privileged host."
+    say
+fi
+
+# --forge wins over the config, so a host serving a second forge does not need
+# its config edited first.
+[ -z "$FORGE" ] || instance="$FORGE"
+if [ -z "$instance" ]; then
+    ask instance "Forge URL (e.g. https://gitea.example.com)" ""
+    [ -n "$instance" ] || die "a forge URL is required - pass --forge URL, or run install.sh first"
+fi
+instance="${instance%/}"
+instance="${instance%/api/v1}"
+say "  forge         $instance"
+say
+
+# --- what it asks -----------------------------------------------------------
+
+default_label="dejima-$ROLE"
+say
+say "The runner label. A workflow reaches these runners by naming it in"
+say "runs-on:, and no other runner on the instance may carry it - if one does,"
+say "a job naming it can land there instead, on a host nothing here hardened."
+say
+ask label "Runner label" "${OPT_LABEL:-$default_label}"
+[ -n "$label" ] || die "a label is required"
+# The group's identity, kept separate from its label. Two groups on one host
+# may share a label - that is the point of registering one at organization
+# scope and another for a user account, so either scope's workflows reach the
+# same pool - but they cannot share a compose project, container names or
+# volumes without colliding.
+say
+say "A name for this group of runners on this host. It names the directory,"
+say "the compose project, the containers and the volumes - not anything a"
+say "workflow sees. Give a second group its own name to register a second"
+say "token alongside this one."
+ask name "Group name" "${OPT_NAME:-$label}"
+[ -n "$name" ] || die "a group name is required"
+case "$name" in
+    */*|*' '*) die "a group name cannot contain a slash or a space: $name" ;;
+esac
+: "${DIR:=$target_home/runners/$name}"
+
+say
+say "Where this group's compose project goes. One directory per group, so a"
+say "second group registered later sits beside this one rather than replacing"
+say "it - which is why the default carries the group name."
+ask DIR "Compose project directory" "$DIR"
+[ -n "$DIR" ] || die "a directory is required"
+
+case "$label" in
+    ubuntu-*|ubuntu|latest|self-hosted)
+        say
+        say "  WARNING: '$label' is a label other runners commonly carry. The point"
+        say "  of a label here is that nothing else answers it. Continuing anyway." ;;
+esac
+
+say
+ask job_image "Image jobs run in" "${OPT_JOB_IMAGE:-node:20-bookworm}"
+ask act_image "act_runner image" "${OPT_ACT_IMAGE:-gitea/act_runner:0.6.1}"
+
+if [ "$ROLE" = confined ]; then
+    say
+    say "How many runners. Each takes one job at a time (capacity: 1), and all"
+    say "of them share this label and this job network, so they are a pool: a"
+    say "job naming $label lands on whichever is free."
+    while :; do
+        say
+        ask count "Number of runners" "${OPT_COUNT:-3}"
+        [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -ge 1 ] && [ "$count" -le 32 ] && break
+        say "  a whole number between 1 and 32"
+        # A bad --count would otherwise be re-offered forever without a tty to
+        # correct it on.
+        [ "$NONINTERACTIVE" -eq 0 ] || die "--count must be a whole number between 1 and 32"
+        OPT_COUNT=""
+    done
+else
+    # One, and not asked. The tier's premise is that this whole machine is
+    # forfeit if any job on it is hostile; a second runner on the same host
+    # adds jobs to that machine without adding a second machine.
+    count=1
+    say
+    say "One runner, not asked: this tier's premise is that a hostile job takes"
+    say "the whole host, so a second runner here would share the machine that is"
+    say "already assumed lost rather than getting one of its own."
+fi
+
+if [ "$ROLE" = privileged ]; then
+    say
+    say "Host paths a workflow may bind-mount into its job containers. A volume"
+    say "a workflow asks for and this list does not name is dropped SILENTLY,"
+    say "so this has to match what your workflows request."
+    say
+    say "Type 'none' to allow no host paths at all. Pressing Enter takes the"
+    say "default shown, which is not the same thing."
+    say
+    ask valid_volumes "Allowed volume paths (space-separated, or none)" "${OPT_VOLUMES:-/tmp/dejima-ci}"
+    [ "${valid_volumes,,}" != none ] || valid_volumes=""
+fi
+
+# --- render -----------------------------------------------------------------
+project="${name}-runners"
+
+install -d -m 0755 "$DIR" || die "cannot create $DIR"
+
+# Repeat the fenced block once per runner, substituting the index. Everything
+# outside the fence is emitted once. The fence markers are comments, so the
+# template on disk is still a readable, parseable example of a single runner.
+#
+# The match is on the WHOLE line, not a substring. The template's own header
+# names these markers while explaining them, and a substring match treated that
+# sentence as the opening fence - swallowing the project name, the anchors and
+# the services: key into the repeated block, which then rendered three runners
+# and nothing to hang them on.
+expand_block() {
+    local text="$1" begin="$2" end="$3" n="$4"
+    awk -v begin="# $2" -v end="# $3" -v n="$n" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+        trim($0) == begin { inblk = 1; blk = ""; next }
+        trim($0) == end   {
+            inblk = 0
+            for (i = 1; i <= n; i++) { b = blk; gsub(/@@N@@/, i, b); printf "%s", b }
+            next
+        }
+        inblk { blk = blk $0 "\n"; next }
+        { print }
+    ' <<< "$text"
+}
+
+# Swap a fenced block for something else entirely. Used where the value is a
+# YAML structure rather than a scalar: a bare @@MARKER@@ cannot stand in for
+# one, because `@` is a reserved indicator in YAML and a plain scalar may not
+# begin with it - so a template written that way stops being parseable, and
+# the annotated original is meant to be read in an editor that highlights it.
+replace_block() {
+    local text="$1" begin="# $2" end="# $3" repl="$4"
+    awk -v begin="$begin" -v end="$end" -v repl="$repl" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+        trim($0) == begin { inblk = 1; if (repl != "") print repl; next }
+        trim($0) == end   { inblk = 0; next }
+        inblk { next }
+        { print }
+    ' <<< "$text"
+}
+
+subst() {
+    # Values here are hostnames, image tags, label strings and paths, none of
+    # which may contain the delimiter. Anything that does is refused above or
+    # would break the YAML anyway.
+    sed -e "s|@@PROJECT@@|$project|g" \
+        -e "s|@@LABEL@@|$label|g" \
+        -e "s|@@NAME@@|$name|g" \
+        -e "s|@@IMAGE@@|$act_image|g" \
+        -e "s|@@JOB_IMAGE@@|$job_image|g" \
+        -e "s|@@INSTANCE_URL@@|$instance|g" \
+        -e "s|@@NETWORK@@|$network|g" \
+        -e "s|@@GATEWAY@@|$gateway|g"
+}
+
+compose_tpl="$TEMPLATE_DIR/docker-compose-$ROLE.yml"
+config_tpl="$TEMPLATE_DIR/act-runner-$ROLE.yaml"
+for f in "$compose_tpl" "$config_tpl"; do
+    [ -r "$f" ] || die "missing template: $f"
+done
+
+# The rendered copy says it is generated, rather than inheriting the template's
+# note about being a template. Those are opposite instructions, and the one
+# that ends up on the host is the one that matters: an operator editing
+# ~/runners/config.yaml loses the edit at the next run, so the file has to say
+# so itself rather than relying on them having read the repository.
+#
+# No timestamp in it, deliberately. A generated-on line would differ on every
+# run and defeat the unchanged check below, which is what makes re-running this
+# safe to do casually.
+generated_header() {
+    printf '%s\n' \
+"# Generated by $PROG --role $ROLE. DO NOT EDIT." \
+"#" \
+"# Re-running the generator overwrites this file, so an edit made here is lost" \
+"# at the next run. Change a value by re-running it instead - that is also how" \
+"# to add a runner, change the label, or move to a new act_runner image." \
+"#" \
+"# The annotated original, which explains why each setting is what it is:" \
+"#   ${1#"$TEMPLATE_DIR/"}  (in $TEMPLATE_DIR)"
+}
+
+compose_out="$(cat "$compose_tpl")"
+compose_out="$(expand_block "$compose_out" '@@NOTE_BEGIN@@' '@@NOTE_END@@' 0)"
+if [ "$ROLE" = confined ]; then
+    compose_out="$(expand_block "$compose_out" '@@SERVICE_BEGIN@@' '@@SERVICE_END@@' "$count")"
+    compose_out="$(expand_block "$compose_out" '@@VOLUME_BEGIN@@'  '@@VOLUME_END@@'  "$count")"
+fi
+compose_out="$(generated_header "$compose_tpl"; subst <<< "$compose_out")"
+
+config_out="$(cat "$config_tpl")"
+config_out="$(expand_block "$config_out" '@@NOTE_BEGIN@@' '@@NOTE_END@@' 0)"
+if [ "$ROLE" = privileged ]; then
+    if [ -n "${valid_volumes:-}" ]; then
+        vols="  valid_volumes:"
+        for v in $valid_volumes; do vols="$vols"$'\n'"    - $v"; done
+    else
+        vols="  valid_volumes: []"
+    fi
+    config_out="$(replace_block "$config_out" '@@VOLUMES_BEGIN@@' '@@VOLUMES_END@@' "$vols")"
+fi
+config_out="$(generated_header "$config_tpl"; subst <<< "$config_out")"
+
+say
+write_if_changed "$DIR/docker-compose.yml" 0644 "$compose_out"
+write_if_changed "$DIR/config.yaml"        0644 "$config_out"
+
+# --- the token --------------------------------------------------------------
+# The one thing this cannot do for you: it is minted by the forge, in a UI this
+# host has no credential for. So name the exact page rather than describing
+# where to look.
+ENV_FILE="$DIR/.env"
+existing_token=""
+if [ -r "$ENV_FILE" ]; then
+    existing_token=$(sed -n 's/^GITEA_RUNNER_REGISTRATION_TOKEN=//p' "$ENV_FILE" | head -1)
+fi
+
+if [ -n "$existing_token" ]; then
+    say
+    say "A registration token is already in $ENV_FILE."
+    say
+    ask replace_token "Replace it? (y/N)" "n"
+else
+    replace_token=y
+    org=""
+    [ -r "$REPOS_FILE" ] && org=$(grep -vE '^\s*(#|$)' "$REPOS_FILE" 2>/dev/null | head -1 | cut -d/ -f1 || true)
+    say
+    say "=============================================================="
+    say " Get a registration token"
+    say "=============================================================="
+    say
+    say "This is minted by your forge and is the one value this cannot fetch."
+    say "Open whichever scope you want these runners to serve:"
+    say
+    if [ -n "$org" ]; then
+        say "  organization   $instance/org/$org/settings/actions/runners"
+        say "                 (every repository in $org)"
+    else
+        say "  organization   $instance/org/<org>/settings/actions/runners"
+    fi
+    say "  repository     $instance/<owner>/<repo>/settings/actions/runners"
+    say "                 (narrower, and the safer default)"
+    say
+    say "Do NOT use the instance-level page unless you mean it: a runner"
+    say "registered there serves every repository on the instance, and a"
+    say "workflow on any of them can then reach these runners."
+    say
+    say "Click 'Create new runner' and copy the registration token."
+    say
+fi
+
+if [ "${replace_token,,}" = y ] || [ "${replace_token,,}" = yes ]; then
+    token=""
+    if [ "$NONINTERACTIVE" -eq 0 ]; then
+        say
+        printf 'Registration token (not echoed, Enter to skip): ' >&2
+        IFS= read -rs token </dev/tty || true
+        printf '\n' >&2
+    fi
+    [ -n "$token" ] || token="$existing_token"
+else
+    token="$existing_token"
+fi
+
+# 0600 and owned by the person who will run compose here. The token is a
+# credential: anyone holding it can register a runner on your forge and start
+# receiving jobs, secrets included.
+write_if_changed "$ENV_FILE" 0600 "# Written by $PROG. Read by docker compose from this directory.
+#
+# Needed only until each runner has registered - the identity then lives in
+# that runner's own data volume. Worth emptying once they are online.
+GITEA_RUNNER_REGISTRATION_TOKEN=$token"
+
+chown -R "$target_user" "$DIR" 2>/dev/null || true
+
+if [ -z "$token" ]; then
+    say
+    say "No token yet, so nothing is started. Put one in $ENV_FILE:"
+    say
+    say "  GITEA_RUNNER_REGISTRATION_TOKEN=<token from your forge>"
+    say
+    say "then re-run this, or bring them up yourself:"
+    say
+    say "  cd $DIR && docker compose up -d"
+    exit 0
+fi
+
+if [ "$START" -eq 0 ]; then
+    say
+    say "--no-start given. Bring them up with:"
+    say "  cd $DIR && docker compose up -d"
+    exit 0
+fi
+
+# --- start ------------------------------------------------------------------
+say
+say "Starting $count runner(s)..."
+( cd "$DIR" && docker compose up -d ) || die "docker compose up failed in $DIR"
+
+# --- verify -----------------------------------------------------------------
+# Facts, not log lines. act_runner's messages change between releases, and a
+# grep that silently stops matching reports success forever.
+#
+# /data/.runner is written only on successful registration, so its presence is
+# the registration having happened rather than a message about it.
+say
+say "Checking each runner actually registered..."
+services=$( cd "$DIR" && docker compose config --services )
+failed=0
+for svc in $services; do
+    ok=0
+    for _ in $(seq 1 30); do
+        if ( cd "$DIR" && docker compose exec -T "$svc" test -s /data/.runner ) 2>/dev/null; then
+            ok=1; break
+        fi
+        # A container that has stopped will never register, so stop waiting for
+        # it rather than spending the full timeout on a decided outcome.
+        state=$( cd "$DIR" && docker compose ps -a --format '{{.State}}' "$svc" 2>/dev/null | head -1 )
+        case "$state" in running|starting|restarting|"") ;; *) break ;; esac
+        sleep 2
+    done
+
+    if [ "$ok" -eq 1 ]; then
+        # CONFIG_FILE is the failure that makes every other setting inert: with
+        # it unset act_runner never reads the file at all and runs on defaults,
+        # which on the confined tier means the socket in every job container
+        # and nothing anywhere saying so.
+        cfgenv=$( cd "$DIR" && docker compose exec -T "$svc" printenv CONFIG_FILE 2>/dev/null | tr -d '\r' || true )
+        if [ "$cfgenv" != "/config.yaml" ]; then
+            say "  FAIL       $svc  registered, but CONFIG_FILE=${cfgenv:-unset}"
+            say "             The config file is not being read; every default applies."
+            failed=1
+            continue
+        fi
+        if ( cd "$DIR" && docker compose exec -T "$svc" cat /config.yaml ) 2>/dev/null \
+             | diff -q - "$DIR/config.yaml" >/dev/null 2>&1; then
+            say "  ok         $svc  registered, config mounted and current"
+        else
+            say "  FAIL       $svc  registered, but /config.yaml differs from $DIR/config.yaml"
+            failed=1
+        fi
+    else
+        say "  FAIL       $svc  did not register within 60s"
+        say "             Most often a bad or already-used registration token, or"
+        say "             a forge this host cannot reach. Its own account:"
+        ( cd "$DIR" && docker compose logs --tail 15 "$svc" 2>&1 | sed 's/^/               /' >&2 ) || true
+        failed=1
+    fi
+done
+
+say
+if [ "$failed" -ne 0 ]; then
+    say "Some runners did not come up. Nothing has been rolled back - fix the"
+    say "cause and re-run this; it is idempotent."
+    exit 1
+fi
+
+say "=============================================================="
+say " Up, and what is still unverified"
+say "=============================================================="
+say
+say "Every runner registered, is reading the config written here, and shows"
+say "the configuration this generated. Confirm they show Online in your forge."
+say
+say "What none of that establishes is the property the tier exists for."
+if [ "$ROLE" = confined ]; then
+    say "That job containers get NO Docker socket and cannot reach off-list"
+    say "addresses cannot be seen from out here - it needs a job to run. A"
+    say "runner that is misconfigured in exactly that way looks identical to"
+    say "one that is not, from every check above and from the forge's UI."
+    say
+    say "Run the runner-environment checks against it before trusting it. dejima"
+    say "ships test/ci-runner.bats for this; see 'Verify' in the README."
+else
+    say "This tier grants the socket and host networking on purpose, so there is"
+    say "nothing here to verify about confinement. What matters instead is"
+    say "outside this host: the hypervisor firewall, and the clean snapshot."
+    say
+    say "Take that snapshot NOW, before the first job runs - see"
+    say "proxmox/README.md section 4. It is worth nothing taken later."
+fi
+say
+say "  project     $DIR"
+say "  token       $ENV_FILE  (0600 - empty it once they are Online)"
+say "  restart     cd $DIR && docker compose restart"
+say "  change      re-run $PROG --role $ROLE --name $name"
+say
+say "To register a second token on this host - another organization, or a user"
+say "account - run this again with a different --name. The label may be the"
+say "same; everything else is kept apart:"
+say
+say "  $PROG --role $ROLE --name <other>"
