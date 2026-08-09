@@ -52,13 +52,20 @@ services:
   # label and one job network. That is what makes them a pool: a job naming
   # @@LABEL@@ lands on whichever is free. Only the name and the data volume
   # differ.
+  #
+  # Those names come from @@NAME@@, which identifies this GROUP of runners on
+  # this host, rather than from the label. The two are separate on purpose: a
+  # host can carry a second group registered with a different token - another
+  # organization, or a user account - and both may legitimately answer the
+  # same label. Sharing an identity as well would collide on the compose
+  # project, the container names and the volumes.
 # @@SERVICE_BEGIN@@
-  "@@LABEL@@-@@N@@":
+  "@@NAME@@-@@N@@":
     <<: *ci-runner
-    container_name: "@@LABEL@@-@@N@@"
+    container_name: "@@NAME@@-@@N@@"
     environment:
       <<: *ci-env
-      GITEA_RUNNER_NAME: "@@LABEL@@-@@N@@"
+      GITEA_RUNNER_NAME: "@@NAME@@-@@N@@"
     volumes:
       # The runner's OWN access to the daemon, so it can create job
       # containers. NOT the same setting as container.docker_host, which
@@ -69,7 +76,7 @@ services:
       - ./config.yaml:/config.yaml:ro
       # Its registration identity. One per runner, never shared - two runners
       # cannot share a .runner.
-      - "@@LABEL@@-@@N@@-data:/data"
+      - "@@NAME@@-@@N@@-data:/data"
 # @@SERVICE_END@@
 
 networks:
@@ -89,5 +96,5 @@ networks:
 
 volumes:
 # @@VOLUME_BEGIN@@
-  "@@LABEL@@-@@N@@-data":
+  "@@NAME@@-@@N@@-data":
 # @@VOLUME_END@@

@@ -226,6 +226,48 @@ privileged() {
     done
 }
 
+@test "two groups on one host can share a label without colliding" {
+    # The reason to register a second token at all: one group at organization
+    # scope and another for a user account, both answering the same label so
+    # either scope's workflows reach a runner. Sharing the label is the point;
+    # sharing a compose project, container names or volumes would mean the
+    # second group quietly replacing the first.
+    confined --name org --label shared --count 2
+    [ "$status" -eq 0 ]
+
+    OUT="$TMP/second" confined --name user --label shared --count 2
+    [ "$status" -eq 0 ]
+
+    grep -q '^name: "org-runners"$'  "$TMP/runners/docker-compose.yml"
+    grep -q '^name: "user-runners"$' "$TMP/second/docker-compose.yml"
+    grep -q 'container_name: "org-1"'  "$TMP/runners/docker-compose.yml"
+    grep -q 'container_name: "user-1"' "$TMP/second/docker-compose.yml"
+    grep -q '"org-1-data":'  "$TMP/runners/docker-compose.yml"
+    grep -q '"user-1-data":' "$TMP/second/docker-compose.yml"
+
+    # Nothing identifying one group appears in the other.
+    ! grep -q 'user-' "$TMP/runners/docker-compose.yml"
+    ! grep -q '\borg-' "$TMP/second/docker-compose.yml"
+
+    # ...while both answer the same label, which is what a workflow names.
+    grep -q '"shared:docker://' "$TMP/runners/config.yaml"
+    grep -q '"shared:docker://' "$TMP/second/config.yaml"
+}
+
+@test "the group name defaults to the label, so one group needs no --name" {
+    confined --label solo
+    [ "$status" -eq 0 ]
+    grep -q '^name: "solo-runners"$' "$OUT/docker-compose.yml"
+    grep -q 'container_name: "solo-1"' "$OUT/docker-compose.yml"
+}
+
+@test "a group name that would break a path or a compose project is refused" {
+    confined --name 'a/b'
+    [ "$status" -ne 0 ]
+    confined --name 'a b'
+    [ "$status" -ne 0 ]
+}
+
 @test "both rendered files are parseable YAML" {
     if ! command -v js-yaml >/dev/null 2>&1 && ! python3 -c 'import yaml' 2>/dev/null; then
         skip "no YAML parser available"

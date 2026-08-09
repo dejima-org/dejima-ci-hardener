@@ -337,6 +337,31 @@ Give it one label that nothing else carries, and grant it to as few
 repositories as you can stand. Then take the clean snapshot, which §7 below
 covers for both tiers.
 
+### More than one registration token on the same host
+
+A registration token is minted at a scope — an organization, or a user
+account — and serves only repositories inside it. To serve two scopes from one
+host, register two groups:
+
+```sh
+sudo dejima-ci-runners --role confined --name dejima     --label ci-shared
+sudo dejima-ci-runners --role confined --name branderson --label ci-shared
+```
+
+Each gets its own directory, compose project, containers, volumes and `.env`,
+so the tokens never meet and either group can be changed or removed without
+touching the other. Run the command again per group; it is idempotent, so the
+first is undisturbed by the second.
+
+**The label may be the same for both, and usually should be.** It is what a
+workflow names in `runs-on:`, and a job from either scope should be able to
+reach a runner. That is why the group name is a separate thing: sharing an
+identity as well would collide on the compose project and the container names,
+and the second group would replace the first rather than join it.
+
+What the group name must not be shared with is another group. Everything the
+host uses to tell them apart is derived from it.
+
 ---
 
 ## 7. Snapshot it clean, once the runner is registered

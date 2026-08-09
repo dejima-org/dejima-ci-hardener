@@ -40,6 +40,7 @@ fi
 ROLE=""
 DIR=""
 FORGE=""
+OPT_NAME=""
 OPT_LABEL=""
 OPT_COUNT=""
 OPT_VOLUMES=""
@@ -63,6 +64,11 @@ Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
   --forge URL        the forge, e.g. https://gitea.example.com. Read from
                      $CONFIG when install.sh has run; required on a privileged
                      host, where it has not
+  --name NAME        identifies this group of runners on this host: its
+                     directory, compose project, containers and volumes. Give
+                     a second group its own name to register a second token -
+                     another organization, or a user account - alongside the
+                     first. Defaults to the label
   --label NAME       the label a workflow names in runs-on:
   --count N          how many runners (confined only; privileged is always 1)
   --volumes PATHS    host paths jobs may bind-mount, space-separated, or
@@ -85,6 +91,7 @@ while [ $# -gt 0 ]; do
         --role) ROLE="${2:?}"; shift ;;
         --dir) DIR="${2:?}"; shift ;;
         --forge) FORGE="${2:?}"; shift ;;
+        --name) OPT_NAME="${2:?}"; shift ;;
         --label) OPT_LABEL="${2:?}"; shift ;;
         --count) OPT_COUNT="${2:?}"; shift ;;
         --volumes) OPT_VOLUMES="${2:?}"; shift ;;
@@ -161,7 +168,6 @@ cfg_get() {
 target_user="${SUDO_USER:-$(id -un)}"
 target_home=$(getent passwd "$target_user" | cut -d: -f6)
 [ -n "$target_home" ] || target_home="$HOME"
-: "${DIR:=$target_home/runners}"
 
 say "=============================================================="
 say " Runner setup - $ROLE tier"
@@ -219,6 +225,23 @@ say "a job naming it can land there instead, on a host nothing here hardened."
 say
 ask label "Runner label" "${OPT_LABEL:-$default_label}"
 [ -n "$label" ] || die "a label is required"
+# The group's identity, kept separate from its label. Two groups on one host
+# may share a label - that is the point of registering one at organization
+# scope and another for a user account, so either scope's workflows reach the
+# same pool - but they cannot share a compose project, container names or
+# volumes without colliding.
+say
+say "A name for this group of runners on this host. It names the directory,"
+say "the compose project, the containers and the volumes - not anything a"
+say "workflow sees. Give a second group its own name to register a second"
+say "token alongside this one."
+ask name "Group name" "${OPT_NAME:-$label}"
+[ -n "$name" ] || die "a group name is required"
+case "$name" in
+    */*|*' '*) die "a group name cannot contain a slash or a space: $name" ;;
+esac
+: "${DIR:=$target_home/runners/$name}"
+
 case "$label" in
     ubuntu-*|ubuntu|latest|self-hosted)
         say
@@ -270,7 +293,7 @@ if [ "$ROLE" = privileged ]; then
 fi
 
 # --- render -----------------------------------------------------------------
-project="${label}-runners"
+project="${name}-runners"
 
 install -d -m 0755 "$DIR" || die "cannot create $DIR"
 
@@ -320,6 +343,7 @@ subst() {
     # would break the YAML anyway.
     sed -e "s|@@PROJECT@@|$project|g" \
         -e "s|@@LABEL@@|$label|g" \
+        -e "s|@@NAME@@|$name|g" \
         -e "s|@@IMAGE@@|$act_image|g" \
         -e "s|@@JOB_IMAGE@@|$job_image|g" \
         -e "s|@@INSTANCE_URL@@|$instance|g" \
@@ -557,4 +581,10 @@ say
 say "  project     $DIR"
 say "  token       $ENV_FILE  (0600 - empty it once they are Online)"
 say "  restart     cd $DIR && docker compose restart"
-say "  change      re-run $PROG --role $ROLE"
+say "  change      re-run $PROG --role $ROLE --name $name"
+say
+say "To register a second token on this host - another organization, or a user"
+say "account - run this again with a different --name. The label may be the"
+say "same; everything else is kept apart:"
+say
+say "  $PROG --role $ROLE --name <other>"
