@@ -219,6 +219,20 @@ read nothing - or the account behind it cannot see $repo.
 
 Read access to repository contents is all this needs, and all it should have:
 it only ever GETs one file per repository." ;;
+        # Not followed. curl would follow this happily, and the whole premise
+        # of this program is that the allowlist comes from a named branch of a
+        # named repository - so quietly reading whatever the forge points at
+        # instead is the one thing it must not do. A rename is also the most
+        # likely cause, and saying so beats reporting a number.
+        30[1278]) rm -f "$body"
+             die "the forge redirected (HTTP $http) for $repo.
+
+That repository has been renamed or moved to another owner, and this does not
+follow redirects: the allowlist is read from a repository you named, and
+following one would mean reading whichever repository the forge points at now.
+
+Update the entry in ${CFG[repos_file]} to its current owner/repo and run this
+again. Nothing has been changed; the previous allowlist is still in place." ;;
         *)   rm -f "$body"; die "unexpected HTTP $http for $repo" ;;
     esac
     rm -f "$body"

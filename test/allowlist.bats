@@ -151,6 +151,22 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     grep -q 'Authorization: token tok123$' "$STUB_DIR/last-headers"
 }
 
+@test "a renamed repository is named as such, and not followed" {
+    # Gitea 301s the old path after a rename or a transfer. Following it would
+    # mean reading the allowlist from whichever repository the forge points at
+    # now, which is the one thing this program must not do - the whole premise
+    # is that the list comes from a branch of a repository the operator named.
+    mkdir -p "$STUB_DIR/owner"
+    echo 301 > "$STUB_DIR/owner/repo.status"
+    echo example.com > "$T/base"
+    run_tool render
+    [ "$status" -ne 0 ]
+    [ ! -f "$T/out/ci-allow.conf" ]
+    [[ "$output" == *"renamed or moved"* ]]
+    [[ "$output" == *"$T/repos"* ]]
+    [[ "$output" != *"unexpected HTTP"* ]]
+}
+
 @test "an empty collection is refused rather than installed" {
     mkdir -p "$STUB_DIR/owner"; : > "$STUB_DIR/owner/repo.body"
     run_tool render

@@ -116,6 +116,61 @@ ask_cfg() {
     ask "$__var" "$prompt" "$def"
 }
 
+# Collect a list, with a way to take an entry back and a look at the whole of
+# it before it is written.
+#
+# Entry used to be one-way: a mistyped line was accepted in silence, and the
+# only ways out were to live with it or abandon the run and start the installer
+# again. Neither is proportionate to a typo, and the list this reads decides
+# which repositories may widen a runner's allowlist - somewhere a wrong entry
+# should be easy to notice and cheap to undo.
+read_list() {   # read_list VAR PROMPT VALIDATOR
+    local __var="$1" prompt="$2" validate="$3" acc="" one ok removed
+    while :; do
+        acc=""
+        say "One per line. '-' takes back the last one. Blank line to finish."
+        while :; do
+            ask one "  $prompt" ""
+            case "$one" in
+                "") break ;;
+                -)  if [ -n "$acc" ]; then
+                        removed="${acc##*$'\n'}"
+                        if [ "$removed" = "$acc" ]; then acc=""; else acc="${acc%$'\n'*}"; fi
+                        say "    took back $removed"
+                    else
+                        say "    nothing to take back"
+                    fi
+                    continue ;;
+            esac
+            "$validate" "$one" || continue
+            acc="${acc:+$acc$'\n'}$one"
+        done
+        if [ -z "$acc" ]; then printf -v "$__var" '%s' ""; return 0; fi
+        say
+        say "  That is:"
+        sed 's/^/    /' <<< "$acc" >&2
+        say
+        ask ok "Is that right? (Y/n)" "y"
+        case "${ok,,}" in n|no) say; continue ;; esac
+        printf -v "$__var" '%s' "$acc"
+        return 0
+    done
+}
+
+# Checked on the way in, so a malformed line is rejected while the person who
+# typed it is still looking at it. Neither of these can tell a real repository
+# from an imagined one - only the forge can - but both catch the shape.
+valid_repo_entry() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && return 0
+    say "    not an owner/repo - e.g. acme/widget"
+    return 1
+}
+valid_domain_entry() {
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] && return 0
+    say "    not a domain name - e.g. deb.debian.org"
+    return 1
+}
+
 # The upstream resolver is the setting people get wrong, so offer what this
 # host already uses rather than making them go and find it.
 detect_upstream() {
@@ -465,11 +520,7 @@ fi
 if [ "${keep_repos,,}" = n ] || [ "${keep_repos,,}" = no ]; then
     repos=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
-        while :; do
-            ask one "  owner/repo" ""
-            [ -n "$one" ] || break
-            repos="${repos:+$repos$'\n'}$one"
-        done
+        read_list repos "owner/repo" valid_repo_entry
     fi
     [ -n "$repos" ] || repos="$existing_repos"
     write_if_changed "$REPOS_FILE" 0640 "$repos"
@@ -520,6 +571,14 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
                  say "  It authenticates, so this is scope rather than identity - a Gitea"
                  say "  token created with no scopes selected reads nothing. It needs read"
                  say "  access to repository contents, and nothing more." ;;
+            30[1278])
+                 say "  The forge redirected ($status) for $probe_repo, which is"
+                 say "  about that repository rather than about the token: it has"
+                 say "  been renamed or moved to another owner."
+                 say
+                 say "  Fix the entry in $REPOS_FILE - the rest of this"
+                 say "  run is unaffected, and re-running this installer or"
+                 say "  '$BIN_DIR/dejima-ci-allowlist render' picks it up." ;;
             000) say "  Could not reach $forge_api to check the token."
                  say "  That is the network or the forge, not the token itself." ;;
             *)   say "  The forge answered $status when checking the token against"
@@ -533,6 +592,11 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
             say "  Continuing - fix the token and run: $BIN_DIR/dejima-ci-allowlist render"
             break
         fi
+        case "$status" in
+            30[1278]) say "  Continuing. Fix $REPOS_FILE, then run:"
+                      say "    $BIN_DIR/dejima-ci-allowlist render"
+                      break ;;
+        esac
         ask retry_token "Enter a different token now? (Y/n)" "y"
         case "${retry_token,,}" in
             n|no) say "  Continuing. Fix $TOKEN_FILE, then run:"
@@ -575,12 +639,7 @@ fi
 if [ "${keep_base,,}" = n ] || [ "${keep_base,,}" = no ]; then
     base=""
     if [ "$NONINTERACTIVE" -eq 0 ]; then
-        say "One name per line, blank line to finish."
-        while :; do
-            ask one "  domain" ""
-            [ -n "$one" ] || break
-            base="${base:+$base$'\n'}$one"
-        done
+        read_list base "domain" valid_domain_entry
     fi
     [ -n "$base" ] || base="$default_base"
 else
