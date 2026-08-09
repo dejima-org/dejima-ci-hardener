@@ -594,7 +594,10 @@ cat >&2 <<EOF
 =============================================================
  What is left
 =============================================================
-$( [ "${PINNED:-0}" -eq 1 ] && cat <<'PINNED_ITEM'
+EOF
+
+if [ "${PINNED:-0}" -eq 1 ]; then
+    cat >&2 <<'EOF'
 
 0. This host's address, gateway and resolver were pinned to what it already
    had, so nothing about reaching it changed - but two things are left, and
@@ -606,9 +609,11 @@ $( [ "${PINNED:-0}" -eq 1 ] && cat <<'PINNED_ITEM'
      - RESTART THIS VM once and check it comes back. The configuration takes
        effect at the next start, which is also the first time it is proven,
        and a snapshot taken before any of this makes that free to find out.
+EOF
+fi
 
-PINNED_ITEM
-)
+cat >&2 <<EOF
+
 1. Put the forge's address in /etc/dejima-ci/host-egress-allow, then enable
    the host's own egress policy:
 
