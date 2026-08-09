@@ -23,6 +23,7 @@ ROLE=""
 MGMT=""
 SKIP_HARDENER=0
 STATIC_IP=0
+PINNED=0
 NONINTERACTIVE=0
 [ -t 0 ] || NONINTERACTIVE=1
 
@@ -160,9 +161,12 @@ if [ "$STATIC_IP" -ne 0 ] || {
     fi
     if [ -n "$pin" ]; then
         say
-        "$SRC/bin/dejima-ci-static-ip" ${NONINTERACTIVE:+} \
-            $( [ "$NONINTERACTIVE" -eq 1 ] && printf '%s' --non-interactive ) \
-            || die "could not pin the address; nothing else has been changed yet"
+        if "$SRC/bin/dejima-ci-static-ip" \
+               $( [ "$NONINTERACTIVE" -eq 1 ] && printf '%s' --non-interactive ); then
+            PINNED=1
+        else
+            die "could not pin the address; nothing else has been changed yet"
+        fi
     fi
 fi
 
@@ -590,7 +594,21 @@ cat >&2 <<EOF
 =============================================================
  What is left
 =============================================================
+$( [ "${PINNED:-0}" -eq 1 ] && cat <<'PINNED_ITEM'
 
+0. This host's address, gateway and resolver were pinned to what it already
+   had, so nothing about reaching it changed - but two things are left, and
+   both are outside this machine:
+
+     - RESERVE THAT ADDRESS on whatever hands out leases, or move it outside
+       the pool. Until then the server is free to give it to something else,
+       and the collision presents as two machines intermittently unreachable.
+     - RESTART THIS VM once and check it comes back. The configuration takes
+       effect at the next start, which is also the first time it is proven,
+       and a snapshot taken before any of this makes that free to find out.
+
+PINNED_ITEM
+)
 1. Put the forge's address in /etc/dejima-ci/host-egress-allow, then enable
    the host's own egress policy:
 
