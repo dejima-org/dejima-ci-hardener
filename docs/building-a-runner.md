@@ -372,11 +372,34 @@ registration drops the runner off the forge on every rollback — and one taken
 after the first job preserves whatever that job left, which is precisely what
 you want to be able to throw away.
 
-So: confirm the runner shows **Online** in your forge, then snapshot, named
+**Restart the VM before you snapshot it**, and check it comes back. This is the
+step that proves the addressing written in §4: a static configuration takes
+effect at boot and not before, so until the machine has booted once with it,
+nobody has tested it — including you.
+
+It matters here rather than anywhere else because rolling back *is* a cold
+boot. The disk is restored and the VM is started, so every rollback re-applies
+that configuration and re-runs every unit. Snapshot a machine whose network
+configuration has never been proven and you have not frozen a working state;
+you have frozen an untested one, and the cadence will apply it unattended, on a
+schedule, every time.
+
+```sh
+ip -o -4 addr show scope global      # the address you pinned, after a real boot
+ip route | grep default
+getent hosts <your-forge-hostname>
+systemctl is-system-running          # running, not degraded
+```
+
+Then confirm the runner shows **Online** in your forge, and snapshot, named
 `clean`, before the first job runs.
 **Proxmox: [§4, Snapshots and rollback](../proxmox/README.md#4-snapshots-and-rollback)**,
 which also covers rolling back on a schedule — the half that does not depend on
 your having noticed anything.
+
+If any of those four fail, fix the cause and restart again before snapshotting.
+A `clean` taken now is the state you return to indefinitely, so it is worth one
+more boot to know it is the state you meant.
 
 ---
 

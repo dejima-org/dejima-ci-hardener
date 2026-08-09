@@ -696,17 +696,24 @@ cat >&2 <<EOF
    It needs a registration token from your forge and names the exact page to
    mint one on. Grant it to as few repositories as you can stand.
 
-2. In the Proxmox console, once step 1 shows the runner Online, snapshot this
-   VM - BEFORE the first job runs, and with 'Include RAM' UNTICKED:
+2. RESTART this VM and check it comes back - address, route, name resolution,
+   and 'systemctl is-system-running' answering rather than degraded. Nothing
+   above has been through a boot yet, and a static network configuration takes
+   effect at boot and not before.
+
+3. Then, once step 1 shows the runner Online, shut this VM down and snapshot it
+   - BEFORE the first job runs, and with 'Include RAM' UNTICKED:
 
      VM -> Snapshots -> Take Snapshot, named 'clean'
 
-   Order matters. Snapshot before registering and every rollback drops the
-   runner off the forge. Snapshot after a job and you have preserved whatever
-   worried you. Include RAM and the guest's clock comes back with it, so a
-   rolled-back VM cannot verify a certificate.
+   Order matters, in four ways. Snapshot before registering and every rollback
+   drops the runner off the forge. Snapshot after a job and you have preserved
+   whatever worried you. Include RAM and the guest's clock comes back with it,
+   so a rolled-back VM cannot verify a certificate. And snapshot before that
+   restart and you have frozen a configuration nobody has tested - a rollback
+   IS a cold boot, so the cadence would apply it unattended, every time.
 
-3. Schedule the rollback on the NODE - nothing in here can be trusted to
+4. Schedule the rollback on the NODE - nothing in here can be trusted to
    revert this VM, and a cadence you perform by hand is one you stop
    performing. Proxmox schedules backups, not rollbacks, so it is cron:
 

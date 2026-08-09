@@ -309,13 +309,36 @@ Read them together, because the pattern says which thing is wrong:
 ## 4. Snapshots and rollback
 
 Three moments, and [docs/building-a-runner.md](../docs/building-a-runner.md)
-says when each falls. The mechanics are the same for all of them: **VM →
-Snapshots → Take Snapshot**, with *Include RAM* **unticked**.
+says when each falls. The mechanics are the same for all of them: **shut the VM
+down**, then **VM → Snapshots → Take Snapshot**, with *Include RAM*
+**unticked**, then start it again.
 
 | Name | When | What it is for |
 | --- | --- | --- |
 | `preflight` | after the OS is installed and its network verified, before anything is run on it | a known base to return to while iterating |
-| `clean` | after the runner registers, before its first job | the state the rollback cadence returns to |
+| `clean` | after the runner registers and the VM has been restarted once, before its first job | the state the rollback cadence returns to |
+
+**Shut it down first.** Proxmox will snapshot a running VM, and what you get is
+crash-consistent: the disk as it was at an instant, with whatever was mid-write
+still mid-write. The guest recovers on the next boot by replaying its journal,
+which is usually fine and is exactly what pulling the plug gives you. For a
+state that is restored unattended every week, indefinitely, a snapshot taken
+while nothing is writing is worth the minute it costs.
+
+(Proxmox can freeze the guest's filesystems for a consistent snapshot of a
+*running* VM, but only through `qemu-guest-agent`, which the VM's Qemu Agent
+tick enables and does not install. Either install it in the guest, or shut the
+VM down. Ticking the box alone buys nothing here.)
+
+**And `clean` has an order it depends on**, which is easy to get wrong because
+nothing complains at the time. It must be taken of a state that has already
+booted successfully at least once *since the last change to the machine's
+network configuration*. Rolling back is a cold boot - the disk is restored, the
+VM is started - so every rollback re-applies whatever is in
+`/etc/network/interfaces` and re-runs every unit. If that configuration is
+wrong, the rollback is when it takes effect, and every rollback after it does
+the same thing. Restart once and check the machine comes back before taking
+`clean`, and the cadence cannot surprise you later.
 
 **Leave *Include RAM* unticked.** A snapshot with RAM restores the guest's
 clock along with everything else, so a VM rolled back to last month believes it
