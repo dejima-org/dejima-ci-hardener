@@ -86,6 +86,13 @@ Two things it cannot do for you:
   change. §4 takes a snapshot before any of this, so the way to find out costs
   nothing.
 
+**If you decline the pinning in §4**, this host stays on DHCP for good, and the
+node firewall then needs [two more rules](../proxmox/README.md#two-more-if-the-vm-gets-its-address-by-dhcp)
+so the lease can be renewed. That applies just as much to an address reserved
+for you on the router: reserved or not, the guest still speaks DHCP. Without
+them nothing breaks at first boot, and the VM drops off the network up to a
+lease time later.
+
 **What a moving address does *not* break.** Not the firewall. Every rule in
 [the node firewall](../proxmox/README.md#3-the-firewall-rules) keys on a
 *destination*, except the SSH rule, which keys on *your* management address —

@@ -58,26 +58,28 @@ policy_out: ACCEPT
 log_level_in: nolog
 log_level_out: nolog
 
-# Uncomment if this VM gets its address by DHCP rather than statically.
-#
-# The four OUT DROPs below cover every RFC1918 range, and a DHCP server is
-# almost always inside one - so a lease renewal at T1, which is a unicast
-# DHCPREQUEST to that server, is dropped. The lease usually survives on the
-# fallback: at T2 the client stops unicasting and rebinds by broadcast, and
-# 255.255.255.255 matches none of those DROPs. That is a protocol's last
-# resort doing routine work, and when it does fail the VM simply drops off
-# the network, which looks nothing like a firewall rule.
-#
-# The alternative to this line is an explicit OUT ACCEPT to the DHCP server on
-# udp/67, which widens the LAN exposure below from two hosts to three. This
-# option is the narrower of the two. Narrower still is not using DHCP.
-# dhcp: 1
+# If this VM gets its address by DHCP, it needs the two rules marked DHCP
+# below. See the note above them. There is no option to set here.
 
 [RULES]
 
 # --- inbound ----------------------------------------------------------------
 # One management host. Everything else, including the rest of your LAN.
 IN ACCEPT -source __MGMT_IP__ -p tcp -dport 22 -log nolog
+
+# DHCP: omit this and the OUT rule below if the address is static in the guest.
+#
+# The reply to a lease request arrives from the server's own address to this
+# VM's, which is not the tuple the request created - the request went to the
+# server, or to 255.255.255.255 when rebinding. Connection tracking is
+# unlikely to match it against policy_in: DROP, so without this line the reply
+# is dropped and the lease is never renewed.
+#
+# This lets anything on the segment send to the client port, which is a
+# spoofed-reply surface. It is close to free: DHCP on a LAN is
+# trust-on-first-use for every host on that segment whatever the firewall does,
+# so a rule permitting the reply does not create the exposure.
+IN ACCEPT -p udp -dport 68 -log nolog
 
 # --- the two LAN exceptions -------------------------------------------------
 # ORDER MATTERS: these must come before the DROPs below, because first match
@@ -91,6 +93,19 @@ IN ACCEPT -source __MGMT_IP__ -p tcp -dport 22 -log nolog
 OUT ACCEPT -dest __FORGE_IP__ -p tcp -dport 443 -log nolog
 OUT ACCEPT -dest __RESOLVER_IP__ -p udp -dport 53 -log nolog
 OUT ACCEPT -dest __RESOLVER_IP__ -p tcp -dport 53 -log nolog
+
+# DHCP: omit this and the IN rule above if the address is static in the guest.
+#
+# A DHCP server almost always sits inside one of the four ranges dropped
+# below, so a unicast renewal at T1 is dropped without this. It names a port
+# and no host, which makes it narrower than an exception naming the server's
+# address: it adds no reachable host to the list above.
+#
+# Do not rely on rebinding instead. At T2 the client stops unicasting and
+# broadcasts to 255.255.255.255, which none of the DROPs match, so the request
+# leaves - but see the IN rule above for why the reply does not come back.
+# Both halves are needed or neither is.
+OUT ACCEPT -p udp -dport 67 -log nolog
 
 # --- everything else on your network ----------------------------------------
 # The four lines the whole VM exists to make true.
