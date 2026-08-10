@@ -16,9 +16,17 @@ setup() {
 }
 
 @test "no unit hard-codes a path to a program the installer places" {
+    # Assert there is something to check first. Without this the test passes
+    # when systemd/ is empty or absent, because grep's own failure to open a
+    # file produces the same non-zero status the assertion is looking for - a
+    # green test asserting nothing, which is the failure this whole file is
+    # about.
+    units=("$REPO"/systemd/*.service)
+    [ -f "${units[0]}" ] || { echo "no units to check"; false; }
+
     # The path belongs to install.sh. Written down a second time it can only
     # agree by luck, and it did not.
-    run grep -nE '^Exec(Start|Stop)=/(usr|opt|bin|sbin)' "$REPO"/systemd/*.service
+    run grep -nE '^Exec(Start|Stop)=/(usr|opt|bin|sbin)' "${units[@]}"
     [ "$status" -ne 0 ]
 }
 

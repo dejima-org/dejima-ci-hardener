@@ -8,6 +8,7 @@ where the second one lives.
 | --- | --- |
 | [building-a-runner.md](building-a-runner.md) | The build, inside the VM: the Debian install, addressing, one bootstrap command, `install.sh`'s settings, and the runners. The same on any hypervisor and for both tiers. Start at your hypervisor's page and it sends you here |
 | [reference.md](reference.md) | The two settings named `docker.sock`, `CONFIG_FILE` and why an edit can appear to do nothing, the `/data` volume, compose networks against job networks, whether several runners should share a job network, why the privileged runner is separate, why public egress is not restricted on the node, why the resolver is set per-runner, the cache server |
+| [threat-model.md](threat-model.md) | The adversary, where each tier's boundary sits, blast radius by layer, and what was rejected |
 | [../proxmox/README.md](../proxmox/README.md) | The node-side half on Proxmox: the VM, the datacenter firewall, the security group and the order its rules go in, and all three snapshot moments including the scheduled rollback |
 | [../proxmox/firewall.fw.template](../proxmox/firewall.fw.template) | The same node firewall as one annotated file, easier to review in one piece than as a table. Reference, not something to install |
 | [../examples/](../examples/) | The annotated templates `dejima-ci-runners` renders into `~/runners`. Every setting carries the reasoning for its value, which the generated copies do not - read them here rather than reading what lands on the host |

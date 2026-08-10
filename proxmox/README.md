@@ -236,14 +236,28 @@ group defines, and it is the only firewall rule the VM needs.
 Adding another runner later is that one step. The ordering below was got right
 once, in one place, and cannot drift between hosts.
 
-**Order matters within the group, and it is the one thing here that is easy to
-get wrong.**
-Rules are evaluated top to bottom and the first match wins. Your forge and
-your resolver are *inside* the ranges rules 5–8 drop, so if either pinhole
-ends up below them it is dead and the runner cannot reach the forge or resolve
-anything. The console appends new rules at the bottom, so adding them in the
-order above is all it takes — but check the list afterwards, and drag rows if
-they are out of sequence.
+**Order matters within the group, and the console works against you here.**
+
+Rules are evaluated top to bottom and the first match wins. Your forge and your
+resolver are *inside* the ranges rules 5–8 drop, so if either pinhole ends up
+below them it is dead and the runner cannot reach the forge or resolve anything.
+
+**The console inserts each new rule at the TOP of the list, not the bottom.** So
+entering rules 1 to 8 in the order they are written above leaves you with them
+in reverse: the four DROPs on top, every pinhole beneath them, and a runner that
+cannot reach its forge. Following the table without watching the list is enough
+to produce exactly the failure this section is warning about.
+
+Two ways through it. **Drag each rule to the bottom as you add it**, which keeps
+the list matching the table at every step and is the easier one to check. Or
+enter them in reverse, from 8 up to 1, and let the insertions stack into the
+right order — quicker, and you are reading the table backwards while doing it,
+which is its own way to get one wrong.
+
+Either way, **read the finished list top to bottom and compare it against the
+table** before you trust it. That is the only step here that catches the
+mistake, because nothing else will: a dead pinhole looks exactly like a working
+firewall until something tries to reach the forge.
 
 Rules 2–4 are the entire remaining LAN exposure, and they are why "no LAN
 access" is not literally true. Both destinations are pinned to one host and
@@ -324,20 +338,33 @@ setting up yet.
 try() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null \
         && echo "  CONNECTED  $1:$2" || echo "  blocked    $1:$2"; }
 
-try <some-other-lan-ip> 22     # must be blocked - any LAN host but the two
+gw=$(ip -4 route show default | awk '{print $3; exit}')
+
+try "$gw" 443                  # must be blocked - your own first hop
 try <forge-ip> 443             # must connect
 try deb.debian.org 80          # must connect - the public internet
 getent hosts deb.debian.org && echo "  resolved" || echo "  DNS FAILED"
 ```
 
-Read them together, because the pattern says which thing is wrong:
+**The first probe targets your gateway, and not some other host on your LAN.**
+Naming another host would mean writing down something worth attacking on a
+machine this page tells you to treat as already lost. The gateway avoids that
+and is the better probe besides: its address is already in the routing table,
+so it reveals nothing; it is guaranteed to be alive, which an arbitrary host is
+not; and it sits inside the ranges the DROP rules cover, so with the rules
+applied it must be unreachable *as a destination* while traffic *through* it to
+the internet is untouched.
+
+Read the four together, because the pattern says which thing is wrong:
 
 - **First one connects** → the firewall is not in force at all. Check the
   Network device's Firewall checkbox and the datacenter switch.
 - **Second or third fails while the fourth works** → a pinhole is below the
   LAN DROPs. Check the rule order.
-- **Everything fails** → the VM has no working route or DNS at all, which is
-  a networking problem rather than a firewall one.
+- **Everything fails** → the VM has no working route or DNS at all, which is a
+  networking problem rather than a firewall one. Note that this also makes the
+  first probe's "blocked" meaningless: silence proves nothing when nothing is
+  getting through, so re-read it only once the other three pass.
 
 ---
 
