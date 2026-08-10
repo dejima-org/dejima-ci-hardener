@@ -162,6 +162,43 @@ servers and every job fails to resolve while the host itself is fine.
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
 | 8 | out | DROP | — | — | **Dest:** `169.254.0.0/16` | Link-local, incl. metadata services |
 
+#### Two more, if the VM gets its address by DHCP
+
+Skip both if you pinned the address in the guest with `dejima-ci-static-ip`.
+Add both if you did not, including when the address is reserved for you on the
+router: reserved or not, the guest still speaks DHCP.
+
+| # | Direction | Action | Protocol | Dest. port | Source / Dest | Why |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1a | in | ACCEPT | udp | 68 | — | Let the lease reply back in |
+| 4a | out | ACCEPT | udp | 67 | — | Let the lease request out |
+
+Place `1a` with the other inbound rule and `4a` above the DROPs, as the
+numbering suggests. Both name a port and no host, which makes them narrower
+than an exception naming your DHCP server: they add no reachable host to the
+list above.
+
+**Both or neither.** Rule `4a` alone gets the request out and the VM still
+never renews, because the reply arrives from the server's address to the VM's,
+which is not the tuple the request created. Connection tracking is unlikely to
+match that against `Input Policy: DROP`, so `1a` is what actually lets the
+lease complete.
+
+Do not count on rebinding to save you. At T2 the client stops unicasting and
+broadcasts to `255.255.255.255`, which none of the DROPs match, so the request
+does leave without rule `4a` — but the reply still needs `1a`. Half a working
+path renews nothing.
+
+This failure is slow and does not look like a firewall. Nothing breaks at
+reboot or at first boot. The VM simply stops renewing, and somewhere up to a
+full lease time later it drops off the network.
+
+Rule `1a` lets anything on the segment send to the client port, which is a
+spoofed-reply surface. It is close to free: DHCP on a LAN is trust-on-first-use
+for every host on that segment whatever the firewall does, so permitting the
+reply does not create that exposure. Not using DHCP is still narrower, and
+`dejima-ci-static-ip` exists for it.
+
 ### Then apply it, per VM
 
 A security group carries **rules and nothing else**. The policies are not part
