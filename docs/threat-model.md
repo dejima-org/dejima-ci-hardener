@@ -8,6 +8,27 @@ The sister project, [dejima-devbox-hardener](https://gitbox.branderson.io/dejima
 has a document of the same name for a machine that cannot be rolled back. The
 difference between them is the whole reason there are two projects.
 
+## What this tool assumes
+
+**That `main` is reviewed before it is merged.** Not a nicety attached to the
+end of a security document. A dependency of the controls in it.
+
+`dejima-ci-allowlist` reads `.dejima/allowed-domains` from `origin/main`, never
+from a branch and never from a local checkout, and treats what it finds there
+as already reviewed. That is the whole mechanism by which a branch is denied
+the ability to widen its own egress: the answer comes from somewhere a branch
+cannot write. The only way content reaches `main` is a pull request somebody
+merged, so **the allowlist is exactly as trustworthy as the merges are.**
+
+Merging a diff without reading it is therefore not a lapse this tool
+compensates for. It is how a widened allowlist arrives, with the tool then
+serving it faithfully and correctly.
+
+dejima's [responsible-use.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/responsible-use.md#safe-and-responsible-are-not-the-same-thing)
+draws the line as safe against responsible: what a session can reach is the
+sandbox's business, what you let out of it is yours. Nothing here does the
+second job, and several things here depend on it being done.
+
 ## The adversary
 
 A pull request. Specifically, a branch whose contents were written by an agent
@@ -115,6 +136,13 @@ session pushing a branch to the same repository is not.
 **Review cannot gate the run, because it happens after it.** The chain from a
 session writing code to a runner executing it needs no operator action at any
 step. By the time there is a diff for anyone to read, it has already run.
+
+That is a statement about the run and about nothing else. **Review still gates
+the merge, that is still the operator's job, and this repository depends on it
+being done** - see [What this tool assumes](#what-this-tool-assumes). The two
+are different controls at different points, and neither substitutes for the
+other: bounding what a run can reach does not make a diff safe to merge
+unread, and reading the diff does not stop the run that already happened.
 
 **There is one control that works, and it sits upstream of everything here: do
 not grant the session push access.** No push, no branch, no pull request, no
