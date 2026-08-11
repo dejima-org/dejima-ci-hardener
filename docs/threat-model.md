@@ -161,7 +161,15 @@ the case that makes it concrete is an eager agent rather than a compromised one.
 
 dejima states that in full, including what it costs the people on the other end
 of an unsolicited pull request, at [GitHub push: blocked by default](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/security.md#github-push-blocked-by-default-optional-opt-in).
-It is not restated here, so that there is one copy of it to keep right.
+The argument is not restated here, so that there is one copy of it to keep
+right.
+
+**How strongly it is enforced does belong here**, because it decides whether
+this counts as a control at all. It is not a hook that a branch could route
+around: GitHub's address ranges are allowlisted on port 443 only, so a session
+can clone, fetch and call the API, and port 22 is simply unreachable. An SSH
+push has no transport, whatever `git-push-guard.sh` does or does not catch.
+`--allow-github-push` is what opens it, per launch.
 
 Closing the CI chain follows from that principle. It is not the reason for it.
 
