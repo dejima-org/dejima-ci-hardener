@@ -1,5 +1,11 @@
 # Threat model
 
+**And none of it has been reviewed by anyone else.** This is early development:
+the reasoning here is one person's, the tests assert what that person thought to
+check, and no outside audit or adversarial testing has happened. Read what
+follows as claims awaiting scrutiny rather than claims that have survived it.
+See [SECURITY.md](../SECURITY.md).
+
 What this defends, what it does not, and which options were rejected on
 purpose. The last section matters most: it exists so a decision can be
 overturned on new information rather than re-argued from nothing.
@@ -149,21 +155,15 @@ not grant the session push access.** No push, no branch, no pull request, no
 run.
 
 That is not a workaround for CI, and reading it as one gets the order backwards.
-It stands on a narrower principle that holds whether or not CI exists anywhere:
-a session that is not being used to push to a forge should not be able to push
-to it.
+It rests on a principle that holds whether or not CI exists anywhere - a session
+that is not being used to push to a forge should not be able to push to it - and
+the case that makes it concrete is an eager agent rather than a compromised one.
 
-The case that makes it concrete is not a compromised agent but an eager one. It
-finds a real bug in an unrelated open-source project and helpfully pushes a fix
-branch to somebody else's repository. Nothing about that is an attack, the
-change might even be good, and it is still something the operator should have
-decided rather than discovered afterwards. Closing the CI chain falls out of
-that principle; it is not the reason for it.
+dejima states that in full, including what it costs the people on the other end
+of an unsolicited pull request, at [GitHub push: blocked by default](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/security.md#github-push-blocked-by-default-optional-opt-in).
+It is not restated here, so that there is one copy of it to keep right.
 
-dejima's default matches. GitHub push is blocked at the network layer rather
-than by a hook: port 22 to GitHub is unreachable unless `--allow-github-push`
-is passed, so there is no transport for an SSH push regardless of what any
-guard does or does not catch.
+Closing the CI chain follows from that principle. It is not the reason for it.
 
 **This repository exists so that it is not the only answer.** Granting push
 access should be a decision about how you want to work, not a decision to
