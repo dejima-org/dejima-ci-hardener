@@ -13,6 +13,18 @@ Neither tier holds against an attacker who is already root on the box.
 The README's [How it fails](README.md#how-it-fails) section covers this in
 detail.
 
+## This is not proven software
+
+These projects are in early development. Nothing in them has been through
+outside review, an external audit, or adversarial testing by anyone other than
+the people who wrote them. Where a design argument is stated it is one person's
+reasoning; where a test asserts something it asserts what that person thought
+to check.
+
+Treat every security property described in any of these repositories as a claim
+awaiting scrutiny rather than one that has survived it, and do not deploy them
+where being wrong would matter.
+
 ## Reporting a vulnerability
 
 Email **dejima@branderson.io**. Please do not open a public issue for a
