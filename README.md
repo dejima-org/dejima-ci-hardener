@@ -352,6 +352,7 @@ and failing it means the runner needs attention rather than the branch.
 | | |
 | --- | --- |
 | [docs/](docs/) | Index of everything below |
+| [docs/threat-model.md](docs/threat-model.md) | The adversary, where each tier's boundary sits, blast radius by layer, and what was rejected |
 | [docs/reference.md](docs/reference.md) | The two `docker.sock` settings, `CONFIG_FILE`, the `/data` volume, compose networks against job networks, sharing a job network between runners, why the privileged runner is separate, why the resolver is per-runner, the cache server |
 | [proxmox/README.md](proxmox/README.md) | Building the sacrificial VM: node firewall rules, bootstrap, snapshot, scheduled rollback |
 | [SECURITY.md](SECURITY.md) | What this software claims and where to report a vulnerability; links on to the organisation-wide policy for the rest |

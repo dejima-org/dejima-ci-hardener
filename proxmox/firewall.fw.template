@@ -84,8 +84,12 @@ IN ACCEPT -p udp -dport 68 -log nolog
 # --- the two LAN exceptions -------------------------------------------------
 # ORDER MATTERS: these must come before the DROPs below, because first match
 # wins and both of these addresses are inside the ranges those DROPs cover.
-# The console appends new rules at the bottom, so adding them in this order is
-# the whole trick.
+#
+# In the web console this is harder than it looks. New rules are inserted at
+# the TOP of the list, so entering them in the order written here produces the
+# reverse of it - DROPs above the pinholes, and a runner that cannot reach its
+# forge. Drag each one to the bottom as you add it, or enter them backwards.
+# proxmox/README.md section 3 says this where someone following it will see it.
 #
 # These are the entire remaining LAN exposure, and they are why "no LAN
 # access" is not literally true: the runner cannot fetch jobs without the
