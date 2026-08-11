@@ -43,9 +43,17 @@ For *why* any of this is necessary - what a CI run adds over a sandbox, and
 why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md). You do
 not need it to follow this.
 
+**Early development. Not ready to be depended on.** Nothing here has been
+through outside review, an external audit, or adversarial testing by anyone but
+the person who wrote it. Every security property this describes is a claim
+awaiting scrutiny, not one that has survived it. Do not put this anywhere that
+being wrong about it would matter.
+
 **One maintainer, no support.** Nothing about this is promised: not a reply,
 not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
 where to report a vulnerability rather than in a public issue.
+
+[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
 ## Do not install this next to dejima
 
