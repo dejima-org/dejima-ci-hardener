@@ -99,11 +99,33 @@ follows from that one sentence.
 
 Recorded so they are not re-proposed without new information.
 
-**An approval gate before CI runs.** Rejected upstream rather than here; see
-[dejima's docs/ci.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md).
-The short version is that a human approving a diff they have not read is a
-control in name only, and the ones who do read it are the bottleneck the agent
-workflow exists to remove.
+**An approval gate before CI runs.** Not rejected as a weak control. There is
+no forge feature that provides one.
+
+[dejima's docs/ci.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md#why-this-document-offers-no-approval-gate)
+works through each version and each fails mechanically rather than in
+practice: changing the trigger does not help, because the workflow file lives
+in the tree the branch controls; dispatching by hand does not, because a token
+that can open a pull request generally covers the dispatch endpoint too;
+leaving the runner stopped does not, because a job that cannot land on your
+runner lands on someone else's. Gitea's own approval requirement comes closest
+and applies to pull requests **from forks**, which is precisely the case a
+session pushing a branch to the same repository is not.
+
+**Review cannot gate the run, because it happens after it.** The chain from a
+session writing code to a runner executing it needs no operator action at any
+step. By the time there is a diff for anyone to read, it has already run.
+
+**There is one control that works, and it sits upstream of everything here: do
+not grant the session push access.** No push, no branch, no pull request, no
+run. That is a real answer, it is why dejima blocks GitHub push by default, and
+for a project where an agent has no need to open pull requests it may be the
+right one.
+
+**This repository exists so that it is not the only answer.** Granting push
+access should be a decision about how you want to work, not a decision to
+accept unbounded code execution on your network. Bounding what the run can
+reach is what leaves the first choice genuinely open.
 
 **Inverting `policy_out` to deny-by-default with a port allowlist.** Rejected in
 full in `proxmox/firewall.fw.template`, and the argument is not repeated here so
