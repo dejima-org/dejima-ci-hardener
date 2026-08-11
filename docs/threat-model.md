@@ -146,9 +146,24 @@ unread, and reading the diff does not stop the run that already happened.
 
 **There is one control that works, and it sits upstream of everything here: do
 not grant the session push access.** No push, no branch, no pull request, no
-run. That is a real answer, it is why dejima blocks GitHub push by default, and
-for a project where an agent has no need to open pull requests it may be the
-right one.
+run.
+
+That is not a workaround for CI, and reading it as one gets the order backwards.
+It stands on a narrower principle that holds whether or not CI exists anywhere:
+a session that is not being used to push to a forge should not be able to push
+to it.
+
+The case that makes it concrete is not a compromised agent but an eager one. It
+finds a real bug in an unrelated open-source project and helpfully pushes a fix
+branch to somebody else's repository. Nothing about that is an attack, the
+change might even be good, and it is still something the operator should have
+decided rather than discovered afterwards. Closing the CI chain falls out of
+that principle; it is not the reason for it.
+
+dejima's default matches. GitHub push is blocked at the network layer rather
+than by a hook: port 22 to GitHub is unreachable unless `--allow-github-push`
+is passed, so there is no transport for an SSH push regardless of what any
+guard does or does not catch.
 
 **This repository exists so that it is not the only answer.** Granting push
 access should be a decision about how you want to work, not a decision to
