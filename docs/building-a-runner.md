@@ -4,11 +4,16 @@ Everything done *inside* the VM, for either tier. Nothing here is specific to
 a hypervisor: it assumes a fresh Debian on a machine you are willing to lose,
 with whatever isolation your hypervisor provides already in place.
 
-**On Proxmox, do [the node-side steps](../proxmox/README.md) first** — the
-datacenter firewall, the VM itself, and the firewall rules applied to it. Come
-back here once the installer has booted. On anything else, the equivalent is:
-a VM that reaches the internet and, on your LAN, only your forge and a
-resolver.
+**On Proxmox, the two pages interleave**, and
+[the order](../proxmox/README.md#what-order-to-do-this-in) there is the
+authoritative version. In short: do its §1 and §2, come here for §1 below and
+install the OS, go back for its §3, then return here and carry on from §2.
+
+The reason is that its §3 finishes by testing the firewall from inside the VM,
+and there is nothing to test from until an OS is running.
+
+On anything else, the equivalent of the node side is: a VM that reaches the
+internet and, on your LAN, only your forge and a resolver.
 
 Two moments below need your hypervisor rather than this page, both snapshots.
 They are one line each and linked where they fall.

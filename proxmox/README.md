@@ -4,9 +4,10 @@ The node-side half: the VM itself, the firewall applied to it, and its
 snapshots. Everything here is done in the Proxmox web console or on the node.
 
 What happens *inside* the VM is
-[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same
-on any hypervisor. Do this page first, up to the end of §3, then go there — it
-sends you back for §4 twice, once for each snapshot.
+[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same on
+any hypervisor. The two pages interleave rather than running one after the
+other; [the order](#what-order-to-do-this-in) below is the sequence that
+works.
 
 That is deliberate. A script that runs `qm create` and writes into
 `/etc/pve/firewall/` is exactly the kind of artifact people paste into a root
@@ -45,6 +46,33 @@ any rule set it can see. It cannot reach one applied to its own tap device.
 Everything `dejima-ci-bootstrap` installs inside the VM is defence in depth —
 real against a job that has not escaped its container, worth nothing against
 one that has.
+
+---
+
+## What order to do this in
+
+Doing this page straight through does not work, and the reason is worth knowing
+before you hit it: §3 finishes by testing the firewall *from inside the VM*, and
+there is nothing to test from until an operating system is running on it.
+
+1. **§1 and §2 here.** Datacenter firewall on, VM created.
+2. **[Install the OS](../docs/building-a-runner.md#1-install-debian)**, then
+   come back. That is the guest runbook's §1, and it is all you need from it
+   before returning.
+3. **§3 here.** Build the rules, apply them, and run both halves of the
+   verification - the node-side one and the from-inside one.
+4. **[The rest of the guest runbook](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp)**,
+   from its §2 onward. It sends you back to §4 here twice, once for each
+   snapshot.
+
+**The rules go on after the OS is installed, not before.** The Debian installer
+takes its address by DHCP whatever you pin it to afterwards, and a lease needs
+a reply back in. Apply the group first without the DHCP pair from §3 and the
+installer has no network at all, which presents as a broken mirror or a dead
+link rather than as a firewall you switched on ten minutes earlier.
+
+Ticking the Firewall checkbox in §2 is safe on its own. The group and the
+policies in §3 are what start dropping things.
 
 ---
 
@@ -97,8 +125,19 @@ identified by VMID rather than by IP. Nothing anywhere names this VM by its own
 address, so a rebuilt VM that comes up on a different one is still fully
 firewalled.
 
-What it breaks is you finding the machine: `ssh <you>@<vm-ip>` in §4, and every
-later visit. That is reason enough to pin it.
+What it breaks is you finding the machine: `ssh <you>@<vm-ip>`, and every later
+visit. That is reason enough to pin it.
+
+---
+
+## Now install the OS, then come back
+
+The VM exists and has no operating system. Go to
+**[docs/building-a-runner.md §1](../docs/building-a-runner.md#1-install-debian)**,
+install Debian, and return here for §3.
+
+Nothing else from the guest runbook is needed yet. Coming back with a booted VM
+is what makes the rest of this page checkable rather than assumed.
 
 ---
 
@@ -365,6 +404,18 @@ Read the four together, because the pattern says which thing is wrong:
   networking problem rather than a firewall one. Note that this also makes the
   first probe's "blocked" meaningless: silence proves nothing when nothing is
   getting through, so re-read it only once the other three pass.
+
+---
+
+## The node side is done. Go back to the guest.
+
+Everything above is what a hypervisor does and a guest cannot. The rest is
+inside the VM: addressing, packages, the allowlist, the runners.
+
+**Continue at [docs/building-a-runner.md §2](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp).**
+
+That runbook sends you back here twice, to §4 below, once for each snapshot. It
+says where each falls; this page says how to take them.
 
 ---
 
