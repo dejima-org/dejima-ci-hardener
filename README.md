@@ -279,6 +279,20 @@ sudo dejima-ci-allowlist show     # what is installed right now
 sudo dejima-ci-firewall           # reapply the egress rules
 ```
 
+`dejima-ci-upgrade` applies to **both** tiers, because the node-side half of a
+version does:
+
+```sh
+sudo dejima-ci-upgrade status     # what this runner is missing
+sudo dejima-ci-upgrade check-lan  # does the LAN answer this VM over IPv6?
+```
+
+`install.sh` puts it on the confined tier. A privileged host installs nothing,
+so run it from a checkout there — `sudo ./bin/dejima-ci-upgrade status`. That is
+the better way on either tier anyway: the installed copy knows only the upgrades
+that existed when it was installed, and says so rather than reporting "up to
+date" about versions it has never heard of.
+
 All four need root, `show` included: every one of them reads
 `/etc/dejima-ci/config`, which names a forge token's path and is `0640 root` in
 a `0750 root` directory. Without `sudo` they cannot see it — and say that,
