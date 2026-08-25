@@ -76,16 +76,16 @@ firewall and the scheduled rollback.
 ## The LAN boundary is two boundaries
 
 The node's control against lateral movement is a list of ranges dropped on the
-hypervisor, and a list bounds only what it names. This one named IPv4 ranges
-only, until it was found not to.
+hypervisor, and a list bounds only what it names. So both address families are
+named, separately, because a rule naming an IPv4 range matches no IPv6 traffic
+at all.
 
-That is not the kind of gap where a control turns out weaker than advertised. It
-is the kind where it does not apply, on a path that is open by default on every
-network - including networks with no IPv6 anywhere in them. Every Linux host
-brings up an `fe80::` address on every interface whether or not anything routes
-v6, and a daemon bound to `::` answers on it. So the machine beside a runner was
-reachable across the segment with all four DROPs in force and `ip -4 route`
-showing nothing unusual.
+The second family needs covering even on a network that routes no IPv6. Every
+Linux host brings up an `fe80::` address on every interface whether or not
+anything routes v6, and a daemon bound to `::` answers on it. With every private
+IPv4 range dropped and nothing said about v6, the machine beside a runner is
+still reachable across the segment, over a path that does not appear in
+`ip -4 route` and does not involve the router.
 
 **IPv6 has no RFC 1918.** The v4 list works because three ranges cover every
 private network there is. A v6 network is numbered out of a globally routable
@@ -94,7 +94,7 @@ prefix delegated by an ISP, so no equivalent list can be written down:
 the prefix a neighbour is actually on. The set cannot be enumerated, so the
 family is dropped whole, on the node, as rule 10 of the security group.
 
-**`dejima-ci-firewall` was already doing this one layer in, and it is not the
+**`dejima-ci-firewall` makes the same argument one layer in, and it is not the
 same layer.** It rejects IPv6 on the job network for exactly the reason above -
 an address family with no allowlist is not a smaller hole than the one the v4
 rules close. But it covers a confined job reaching off its bridge. It is not in
@@ -208,8 +208,8 @@ What to check, rather than re-argue:
   below is rejected on the grounds that there is no such feature rather than
   that it would be a weak control;
 - whether the address families, ports and ranges named on the node still cover
-  what a neighbour of this VM can be addressed by. IPv6 was missing from that
-  list for as long as the list existed, and nothing failed in the meantime;
+  every way a neighbour of this VM can be addressed. A list bounds only what it
+  names, and nothing fails visibly when it names too little;
 - whether the rollback is still running, which is the one control here that
   fails silently and completely - `proxmox/README.md` §4 has the check.
 

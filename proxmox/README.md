@@ -183,7 +183,7 @@ failure is at least honest about where it comes from.
 Rule 10 has the same shape and one extra wrinkle: it also drops IPv6 egress to
 the *internet*, not only to your network, because the family goes whole. In
 practice that changes nothing for a confined job, since `dejima-ci-firewall`
-already rejects IPv6 on the job bridge for the same reason. It could matter to a
+rejects IPv6 on the job bridge for the same reason. It could matter to a
 privileged job that fetches from a v6-only host. If you hit that, the honest fix
 is a pinhole for that destination rather than dropping the rule, because
 dropping it reopens the whole LAN.
@@ -236,8 +236,8 @@ rules 5 to 9 can all be in force and the machine beside this one is still one
 `ssh fe80::...%eth0` away. That path does not appear in `ip -4 route`, does not
 involve your router, and is invisible to anyone checking the v4 rules are right.
 
-**`dejima-ci-firewall` already blocks IPv6, and it is not this.** Those rules
-cover a confined job reaching off its bridge. They are not in front of the VM's
+**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Those
+rules cover a confined job reaching off its bridge. They are not in front of the VM's
 own traffic, and on the privileged tier they are not in front of the jobs
 either, since those run in the host's network namespace. Rule 10 is the one that
 covers root on the VM — which on the privileged tier is the ordinary case rather

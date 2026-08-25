@@ -152,7 +152,7 @@ OUT DROP -dest 100.64.0.0/10 -log nolog
 # the five DROPs above can all be in force and the machine beside this one is
 # still one `ssh fe80::...%eth0` away.
 #
-# bin/dejima-ci-firewall already blocks v6 on the job network, and that is a
+# bin/dejima-ci-firewall blocks v6 on the job network too, and that is a
 # different position: it covers a confined job reaching off its bridge, not the
 # VM's own traffic, and the privileged tier's jobs are in the host's namespace
 # where those bridge rules are not in front of them at all. This line is the one
