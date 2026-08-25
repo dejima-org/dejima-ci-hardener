@@ -143,7 +143,7 @@ is what makes the rest of this page checkable rather than assumed.
 
 ## 3. The firewall rules
 
-Every runner VM gets the same eight rules, whichever tier it is, so build them
+Every runner VM gets the same ten rules, whichever tier it is, so build them
 once as a **security group** and apply that group to each. Two VMs with two
 hand-entered copies is two chances to get the ordering wrong and one of them to
 drift out of step later.
@@ -171,14 +171,22 @@ does on the other tier.
 So: primary in the guest and defence in depth on the node for confined, nothing
 in the guest and everything on the node for privileged.
 
-**One thing to weigh before applying them to a confined host.** Rules 5–8 drop
-every RFC1918 destination, including ones a *job* might legitimately want. If a
+**One thing to weigh before applying them to a confined host.** Rules 5–9 drop
+every private destination, including ones a *job* might legitimately want. If a
 served repository declares an internal name in `.dejima/allowed-domains` — a
 package mirror, an internal registry — the allowlist will resolve it and the
 node firewall will drop the connection, which reads as the allowlist not
 working. An internal NTP server is the same story. Give anything in that
 position its own pinhole above the DROPs, or keep it off the allowlist so the
 failure is at least honest about where it comes from.
+
+Rule 10 has the same shape and one extra wrinkle: it also drops IPv6 egress to
+the *internet*, not only to your network, because the family goes whole. In
+practice that changes nothing for a confined job, since `dejima-ci-firewall`
+rejects IPv6 on the job bridge for the same reason. It could matter to a
+privileged job that fetches from a v6-only host. If you hit that, the honest fix
+is a pinhole for that destination rather than dropping the rule, because
+dropping it reopens the whole LAN.
 
 And one value that has to agree: the resolver in rules 3–4 must be the same
 address as `upstream` in `/etc/dejima-ci/config`, since that is where the
@@ -200,6 +208,49 @@ servers and every job fails to resolve while the host itself is fine.
 | 6 | out | DROP | — | — | **Dest:** `172.16.0.0/12` | |
 | 7 | out | DROP | — | — | **Dest:** `192.168.0.0/16` | The three that matter |
 | 8 | out | DROP | — | — | **Dest:** `169.254.0.0/16` | Link-local, incl. metadata services |
+| 9 | out | DROP | — | — | **Dest:** `100.64.0.0/10` | Carrier-grade NAT, where a tailnet lives |
+| 10 | out | DROP | — | — | **Dest:** `::/0` | IPv6, the whole family |
+
+**Rule 9 is for a tailnet.** Tailscale numbers its hosts out of `100.64.0.0/10`,
+which is none of the three RFC 1918 ranges, so without this rule a runner on
+your tailnet reaches every machine you own anywhere — a wider network than the
+one rules 5 to 7 were drawn around, not a narrower one. Add it whether or not
+you run Tailscale today: it costs nothing on a VM with no overlay, and the day
+someone installs one is not a day anyone revisits the firewall.
+
+#### Rule 10, and why IPv6 is dropped whole
+
+Rules 5 to 9 work because the protected set is enumerable. RFC 1918 named three
+ranges, your LAN is inside them, and the list is short enough to read.
+
+**IPv6 has no RFC 1918.** A v6 network is numbered out of a globally routable
+prefix delegated by your ISP, so there is no equivalent list to write down.
+Dropping `fc00::/7` catches unique-local addresses most networks do not use and
+misses the prefix your actual neighbour is on. Since the set cannot be
+enumerated, the family goes.
+
+This is worth having even if you are certain your network has no IPv6. Every
+Linux host brings up an `fe80::` address on every interface whether or not
+anything routes v6, and a daemon bound to `::` answers on it. Without rule 10,
+rules 5 to 9 can all be in force and the machine beside this one is still one
+`ssh fe80::...%eth0` away. That path does not appear in `ip -4 route`, does not
+involve your router, and is invisible to anyone checking the v4 rules are right.
+
+**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Those
+rules cover a confined job reaching off its bridge. They are not in front of the VM's
+own traffic, and on the privileged tier they are not in front of the jobs
+either, since those run in the host's network namespace. Rule 10 is the one that
+covers root on the VM — which on the privileged tier is the ordinary case rather
+than the worst one.
+
+**Do not do this in the guest instead.** `net.ipv6.conf.all.disable_ipv6=1` looks
+equivalent and is not: it is a setting on a machine this page tells you to treat
+as already lost, and root sets it back. The rule belongs on the node for the
+same reason every other rule here does.
+
+If the console rejects `::/0`, the same coverage is four rules — `fe80::/10`,
+`fc00::/7`, `ff00::/8`, `2000::/3` — placed together in rule 10's position.
+Prefer the single line: four entries are four chances to enter three.
 
 #### Two more, if the VM gets its address by DHCP
 
@@ -282,8 +333,8 @@ resolver are *inside* the ranges rules 5–8 drop, so if either pinhole ends up
 below them it is dead and the runner cannot reach the forge or resolve anything.
 
 **The console inserts each new rule at the TOP of the list, not the bottom.** So
-entering rules 1 to 8 in the order they are written above leaves you with them
-in reverse: the four DROPs on top, every pinhole beneath them, and a runner that
+entering rules 1 to 10 in the order they are written above leaves you with them
+in reverse: the six DROPs on top, every pinhole beneath them, and a runner that
 cannot reach its forge. Following the table without watching the list is enough
 to produce exactly the failure this section is warning about.
 
@@ -338,15 +389,24 @@ nothing:
 # what is actually loaded right now
 sudo iptables -S | grep "tap<vmid>i0"
 
+# the same, for the other address family. Rule 10 lands here and nowhere else
+sudo ip6tables -S | grep "tap<vmid>i0"
+
 # what Proxmox would generate from the current config
 sudo pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
 
+**Run both, not just the first.** A rule with an IPv6 destination is compiled
+into `ip6tables` and is absent from `iptables -S` — so checking only the v4
+table shows rule 10 missing whether it is there or not, and shows it identically
+either way.
+
 **What you are looking for.** Proxmox names the per-VM chains after the tap
 interface — `tap<vmid>i0-IN` and `tap<vmid>i0-OUT` for the first NIC — and
-your rules appear inside them, in the order you added them. In the `-OUT`
-chain that means the three pinhole ACCEPTs first, then the four LAN DROPs,
-then whatever Proxmox appends for the policy.
+your rules appear inside them, in the order you added them. In the v4 `-OUT`
+chain that means the three pinhole ACCEPTs first, then the five LAN DROPs, then
+whatever Proxmox appends for the policy. The v6 `-OUT` chain holds rule 10 and
+none of the pinholes, because every one of them names an IPv4 address.
 
 **What each failure looks like.**
 
@@ -356,34 +416,58 @@ then whatever Proxmox appends for the policy.
 | Chains exist but hold none of your rules | The rules are on a different VM id, or were added at datacenter or node level rather than to this VM |
 | A LAN DROP above a pinhole ACCEPT | The ordering trap. The runner will not reach the forge or resolve anything; drag the pinholes above the DROPs |
 | Rules present and correct, DNS still failing | The address in rules 3–4 is not the VM's nameserver. The gateway is the usual wrong answer — see "Values that must agree" |
+| v4 chain right, `ip6tables -S` empty | Rule 10 was not entered, or the console rejected `::/0` and the error was missed. Nothing about the v4 half will look wrong |
 
 `pve-firewall status` is the quicker sanity check of whether the service is
 running and enabled at all, but it says nothing about *these* rules — it is
-the datacenter switch it reports on, not your eight lines.
+the datacenter switch it reports on, not your ten lines.
 
 **Both commands describe configuration.** They are worth reading, and they are
 not proof: a rule that is loaded and a rule that does what you meant are
 different claims. The checks from inside the VM below are the ones that test
 behaviour, which is why they follow rather than replace this.
 
-and from inside the VM, once it is up. Two of these must fail and two must
+and from inside the VM, once it is up. Three of these must fail and two must
 succeed, which is what makes the set diagnostic rather than reassuring:
 
-Nothing here needs installing: `bash` can open a TCP connection on its own and
-`getent` is part of libc, which matters on a machine you have not finished
-setting up yet.
+Only the last one needs anything installed. `bash` can open a TCP connection on
+its own and `getent` is part of libc, which matters on a machine you have not
+finished setting up yet; `ping` is `iputils-ping`, which Debian has by default.
 
 ```sh
 try() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null \
         && echo "  CONNECTED  $1:$2" || echo "  blocked    $1:$2"; }
 
 gw=$(ip -4 route show default | awk '{print $3; exit}')
+dev=$(ip -4 route show default | awk '{for (i=1;i<NF;i++) if ($i=="dev") print $(i+1); exit}')
 
 try "$gw" 443                  # must be blocked - your own first hop
 try <forge-ip> 443             # must connect
 try deb.debian.org 80          # must connect - the public internet
 getent hosts deb.debian.org && echo "  resolved" || echo "  DNS FAILED"
+
+# must find nobody but this VM - rule 10
+sudo ping -6 -n -c 2 -W 1 -I "$dev" ff02::1
 ```
+
+**The last one asks the whole LAN who is there, over IPv6.** `ff02::1` is the
+all-nodes link-local multicast address and every IPv6 host answers it — and
+every Linux host is an IPv6 host, because the `fe80::` address exists whether or
+not the network routes v6. Replies from an address that is not this VM's own
+mean rule 10 is not in force and the segment is reachable over a family none of
+the checks above it touch.
+
+Like the gateway probe, it writes down no target: `ff02::1` is the same address
+on every network there has ever been, so naming it describes nothing about
+yours.
+
+**This one is a by-hand check and stays one.** Everything else this repository
+verifies, it verifies from inside a job, in `test/ci-runner.bats` — and a job is
+the wrong vantage point for this question, because rule 10 is about the VM's own
+reach and a confined job's traffic is stopped by `dejima-ci-firewall` before it
+ever gets to the tap. The sister project checks the equivalent automatically
+because it has an in-VM audit to hang it on; this one does not, so run it when
+you build the group and after any change to it.
 
 **The first probe targets your gateway, and not some other host on your LAN.**
 Naming another host would mean writing down something worth attacking on a
@@ -394,12 +478,15 @@ not; and it sits inside the ranges the DROP rules cover, so with the rules
 applied it must be unreachable *as a destination* while traffic *through* it to
 the internet is untouched.
 
-Read the four together, because the pattern says which thing is wrong:
+Read them together, because the pattern says which thing is wrong:
 
 - **First one connects** → the firewall is not in force at all. Check the
   Network device's Firewall checkbox and the datacenter switch.
 - **Second or third fails while the fourth works** → a pinhole is below the
   LAN DROPs. Check the rule order.
+- **Only the last one finds neighbours** → the v4 half is right and rule 10 is
+  missing. This is the failure that looks like success from every other angle,
+  which is why it has its own probe.
 - **Everything fails** → the VM has no working route or DNS at all, which is a
   networking problem rather than a firewall one. Note that this also makes the
   first probe's "blocked" meaningless: silence proves nothing when nothing is

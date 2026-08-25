@@ -73,6 +73,39 @@ network namespace. Root on that VM is the working assumption, not the worst
 case, and root can flush any rule set it can see. The boundary is the hypervisor
 firewall and the scheduled rollback.
 
+## The LAN boundary is two boundaries
+
+The node's control against lateral movement is a list of ranges dropped on the
+hypervisor, and a list bounds only what it names. So both address families are
+named, separately, because a rule naming an IPv4 range matches no IPv6 traffic
+at all.
+
+The second family needs covering even on a network that routes no IPv6. Every
+Linux host brings up an `fe80::` address on every interface whether or not
+anything routes v6, and a daemon bound to `::` answers on it. With every private
+IPv4 range dropped and nothing said about v6, the machine beside a runner is
+still reachable across the segment, over a path that does not appear in
+`ip -4 route` and does not involve the router.
+
+**IPv6 has no RFC 1918.** The v4 list works because three ranges cover every
+private network there is. A v6 network is numbered out of a globally routable
+prefix delegated by an ISP, so no equivalent list can be written down:
+`fc00::/7` catches unique-local addresses most networks do not use and misses
+the prefix a neighbour is actually on. The set cannot be enumerated, so the
+family is dropped whole, on the node, as rule 10 of the security group.
+
+**`dejima-ci-firewall` makes the same argument one layer in, and it is not the
+same layer.** It rejects IPv6 on the job network for exactly the reason above -
+an address family with no allowlist is not a smaller hole than the one the v4
+rules close. But it covers a confined job reaching off its bridge. It is not in
+front of the VM's own traffic, and on the privileged tier it is not in front of
+the jobs either, because those run in the host's network namespace where the
+bridge rules do not apply.
+
+So the in-guest rule and the node rule cover different rows of the table below,
+and the row the node rule covers is the one the privileged tier reaches during
+ordinary operation rather than under attack.
+
 ## Blast radius by layer
 
 | Layer | Reached by | Radius |
@@ -80,7 +113,7 @@ firewall and the scheduled rollback.
 | Confined job | normal operation | the allowlist, and nothing else on the LAN |
 | Privileged job | normal operation | the Docker socket, which is root on the runner VM |
 | Runner VM, root | a privileged job, or an escape from a confined one | the whole VM and its network position, until the next rollback |
-| LAN | any of the above, if unbounded | every host the VM can route to |
+| LAN | any of the above, if unbounded | every host the VM can route to, in either address family |
 | Hypervisor | out of scope | named for completeness |
 
 Two rows are worth reading twice. A privileged job reaches root **by design**,
@@ -121,6 +154,64 @@ still open. It buys time, not diagnosis.
 This is exactly the control the sister project cannot have, because a devbox
 holds uncommitted work. Everything that differs between the two repositories
 follows from that one sentence.
+
+## Not bounded
+
+Everything above is organised by control, which leaves the reader to assemble
+the negative space themselves. Most will not. So, in one place, what a runner
+built this way is *not* protected from. Each line has its argument somewhere
+above or below; this list exists so nobody has to go looking to find out whether
+there is one.
+
+- **A job running hostile code.** That is what CI is. Nothing here tries to stop
+  the code running.
+- **Root on a privileged runner.** Granted by design, not defended. The tier
+  exists to hand out the Docker socket.
+- **Exfiltration, and command-and-control.** Egress to the internet is unbounded
+  from the VM, deliberately. The confined tier's allowlist bounds it for a job,
+  and an escape to root on the VM is precisely what leaves that behind.
+- **The forge and the resolver.** Both are reachable from this VM on the ports
+  listed, by anything on it. "No LAN access" is not literally true.
+- **The forge credential the runner registers with.** It is on the box, and
+  rollback restores it rather than rotating it.
+- **What a merge lets through.** The allowlist is exactly as trustworthy as the
+  merges are - see "What this tool assumes". A widened allowlist arrives through
+  a reviewed-in-name-only pull request and this tool then serves it correctly.
+- **Detection, and forensics.** Rollback destroys the evidence along with the
+  intruder, and will happily rebuild a VM compromised through a route that is
+  still open. It buys time, not diagnosis.
+- **Inbound exposure.** One management address is the whole inbound list, and
+  keeping it that way is yours. Nothing here checks it.
+- **The hypervisor itself.** Out of scope, and it is the layer everything above
+  is standing on.
+
+## This page has a date on it
+
+Every argument above is reasoning about a particular idea of what the adversary
+can do, and that idea does not keep. The adversary here is a pull request whose
+contents an agent wrote, and that description has not been getting more
+reassuring.
+
+Hardening designed against the agent of two years ago is not obviously adequate
+against the agent of today, and the honest position is that nobody here can tell
+you where the line is. What can be done is to re-read the reasoning on a
+schedule rather than when something goes wrong.
+
+**Quarterly**, matching dejima's own cadence.
+
+What to check, rather than re-argue:
+
+- the revisit conditions on each entry in "Rejected, with reasons". They are
+  written as facts to look up, not judgements to re-make, so the review is cheap
+  and has an answer;
+- whether the forge has grown an approval gate, since the first rejected entry
+  below is rejected on the grounds that there is no such feature rather than
+  that it would be a weak control;
+- whether the address families, ports and ranges named on the node still cover
+  every way a neighbour of this VM can be addressed. A list bounds only what it
+  names, and nothing fails visibly when it names too little;
+- whether the rollback is still running, which is the one control here that
+  fails silently and completely - `proxmox/README.md` §4 has the check.
 
 ## Rejected, with reasons
 
@@ -183,6 +274,22 @@ full in `proxmox/firewall.fw.template`, and the argument is not repeated here so
 that it lives in one place. Briefly: it breaks ordinary software in ways that
 present as network faults, and it buys nothing against an adversary assumed to
 have root, who tunnels over 443 like everyone else.
+
+**Mirroring the LAN DROPs into IPv6 instead of dropping the family.** Rejected
+because the list cannot be written. There is no v6 range that means "private",
+so the closest anyone can get is dropping `fc00::/7` and leaving the guest able
+to reach every neighbour on the prefix the ISP delegated. A rule set that looks
+symmetrical and covers nothing is worse than the blanket drop, because it reads
+as handled by anyone reviewing it later.
+
+Revisit if a privileged job ever genuinely needs IPv6 egress. The work then is a
+pinhole for that destination, not dropping rule 10, because dropping it reopens
+the LAN as well as the internet.
+
+**Disabling IPv6 in the guest, with `net.ipv6.conf.all.disable_ipv6`.** Rejected
+for the reason every node-side control here exists: it is a setting on a machine
+this model assumes an attacker holds root on, and on the privileged tier that is
+not even an assumption. Root sets it back.
 
 **Proxmox's `dhcp: 1` option.** Rejected because it is not reliably reachable
 from the web console, and this runbook is console-driven on purpose. Two
