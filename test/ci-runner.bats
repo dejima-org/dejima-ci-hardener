@@ -201,6 +201,13 @@ PY
     # An address family with no allowlist is not a smaller hole than the one
     # the rules above close; on a runner with IPv6 egress it is the same hole.
     #
+    # This is the JOB's boundary, not the VM's. Rule 10 on the node makes the
+    # same argument one layer out, and neither substitutes for the other: this
+    # one is skipped on the privileged tier because those jobs are in the host's
+    # network namespace, which is exactly where rule 10 is the only thing left.
+    # Rule 10 has no automated check, for want of anywhere in this repository
+    # that runs inside the VM; proxmox/README.md verifies it by hand.
+    #
     # Unlike the checks above, this one passes for two different reasons - v6
     # rejected, or v6 never configured - and both are acceptable outcomes, so
     # it is not given a positive control. What it rules out is the third case:

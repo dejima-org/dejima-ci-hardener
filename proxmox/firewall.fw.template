@@ -32,6 +32,10 @@ enable: 1
 
 # Inbound denies by default: this VM offers no service anyone should reach,
 # so the list of exceptions is short and knowable.
+#
+# It covers both address families and needed nothing said about IPv6, because a
+# default policy is not a list of ranges and so cannot leave one out. Compare
+# the outbound half, where the same coverage costs an extra rule.
 policy_in: DROP
 
 # Outbound ACCEPTs by default, and the LAN is denied explicitly below.
@@ -50,9 +54,12 @@ policy_in: DROP
 # not them.
 #
 # Deny-by-default earns its keep where the protected set is enumerable, which
-# is what the four DROPs below are. It does not apply to the internet, which
+# is what the IPv4 DROPs below are. It does not apply to the internet, which
 # is not enumerable, and treating it as though it were gets you a rule set
 # that looks strict and only gets in the way.
+#
+# The cost of default-ACCEPT is that every range to be denied has to be named,
+# and IPv6 is the one it is easiest to forget to name. See the last rule.
 policy_out: ACCEPT
 
 log_level_in: nolog
@@ -112,12 +119,54 @@ OUT ACCEPT -dest __RESOLVER_IP__ -p tcp -dport 53 -log nolog
 OUT ACCEPT -p udp -dport 67 -log nolog
 
 # --- everything else on your network ----------------------------------------
-# The four lines the whole VM exists to make true.
+# The six lines the whole VM exists to make true.
 OUT DROP -dest 10.0.0.0/8 -log nolog
 OUT DROP -dest 172.16.0.0/12 -log nolog
 OUT DROP -dest 192.168.0.0/16 -log nolog
 # Link-local, which includes cloud metadata services at 169.254.169.254.
 OUT DROP -dest 169.254.0.0/16 -log nolog
+# Carrier-grade NAT, which is where Tailscale numbers a tailnet. Without this
+# line "your network" quietly means the LAN and not the overlay, and the
+# overlay is the one that reaches the machines you own somewhere else.
+OUT DROP -dest 100.64.0.0/10 -log nolog
+
+# IPv6, all of it, and the reason it is one blanket line rather than four more
+# mirroring the ones above.
+#
+# Those work because the protected set is enumerable: RFC 1918 named three
+# ranges and your LAN is inside them. **IPv6 has no RFC 1918.** A v6 network is
+# numbered out of a globally routable prefix your ISP delegates, so "the private
+# ranges" is not a list that can be written here - fc00::/7 covers unique-local
+# addresses most networks do not use, and misses the prefix the machine next
+# door is actually addressed on. Enumerating is not available, so the family
+# goes.
+#
+# This is not the trade policy_out declines above. That argument is about the
+# internet, and it still holds: the internet is reached over IPv4 by the default
+# policy, unbounded and deliberately. What is dropped here is a second path to
+# the same place.
+#
+# It also closes something that is open on a network with no IPv6 at all. Every
+# Linux host brings up a fe80:: address on every interface whether or not
+# anything routes v6, and a daemon bound to :: answers on it. Without this line
+# the five DROPs above can all be in force and the machine beside this one is
+# still one `ssh fe80::...%eth0` away.
+#
+# bin/dejima-ci-firewall already blocks v6 on the job network, and that is a
+# different position: it covers a confined job reaching off its bridge, not the
+# VM's own traffic, and the privileged tier's jobs are in the host's namespace
+# where those bridge rules are not in front of them at all. This line is the one
+# that covers root on the VM, which on the privileged tier is not the worst case
+# but the ordinary one.
+#
+# Do this here rather than by disabling IPv6 in the guest. The guest's settings
+# are administered by whoever holds root on the guest, and on this VM that is
+# assumed to be an attacker.
+#
+# If the console rejects `::/0`, the same coverage is fe80::/10, fc00::/7,
+# ff00::/8 and 2000::/3. Prefer the one line: four are four chances to enter
+# three.
+OUT DROP -dest ::/0 -log nolog
 
 # Nothing follows. The public internet is reached by the default policy, not
 # by a list of ports - see the note on policy_out above.

@@ -21,8 +21,13 @@
 #     and cannot be mistaken for a working value
 #   - RFC 5737 documentation ranges: 192.0.2.0/24, 198.51.100.0/24,
 #     203.0.113.0/24, which exist for exactly this and route nowhere
-#   - an RFC1918 literal ONLY where the example has to be private to make
+#   - a private-range literal ONLY where the example has to be private to make
 #     sense, as the job network's subnet does
+#
+# IPv6 literals are not checked. The one this repository commits at the node is
+# ::/0, which names no network at all, and there is no v6 equivalent of the
+# RFC 1918 shape this guard looks for - which is itself the reason rule 10 drops
+# the family whole rather than enumerating it.
 
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -37,10 +42,11 @@ setup() {
         255.255.255.255     # limited broadcast, in the DHCP rebind note
         169.254.169.254     # the cloud metadata address, named as a target
 
-        10.0.0.0/8          # the four RFC1918 + link-local ranges the node
-        172.16.0.0/12       # firewall drops. Ranges, not hosts: they name
-        192.168.0.0/16      # every LAN rather than anybody's
+        10.0.0.0/8          # the five ranges the node firewall drops. Ranges,
+        172.16.0.0/12       # not hosts: they name every LAN rather than
+        192.168.0.0/16      # anybody's
         169.254.0.0/16
+        100.64.0.0/10       # carrier-grade NAT, where a tailnet is numbered
 
         10.89.0.0/24        # the suggested job network. Has to be private -
         10.89.0.1           # dnsmasq's stop-dns-rebind is keyed on the
