@@ -60,9 +60,13 @@ resolver pinholes. These two are DROPs; put them above the pinholes and the
 runner stops reaching its forge and stops resolving. Drag each one down as you
 add it.
 
-You are appending. Nothing else in the group changes, and a security group edit
-applies to every VM referencing it immediately — so if you run a privileged and
-a confined runner off the same group, this is one edit for both.
+You are appending. Nothing else in the group changes.
+
+**Nothing to restart.** A security group edit applies to every VM referencing it
+immediately, so if you run a privileged and a confined runner off the same
+group, this is one edit for both. If you built the rules per-VM rather than as a
+group, you have this to do on each VM, and building the group is worth doing
+while you are here.
 
 **If the console rejects `::/0`**, enter four rules in rule 10's position
 instead — `fe80::/10`, `fc00::/7`, `ff00::/8`, `2000::/3`.
@@ -95,21 +99,70 @@ wrong table is the most likely way to conclude this worked when it did not.
 
 ## 2. Record it
 
+**Run the tool from a checkout, not from `$PATH`.** `dejima-ci-upgrade` arrives
+*with* v2, and v2 has no guest-side step — so on the runner you are upgrading it
+is not installed yet, and will not be by anything on this page.
+
 In the guest:
 
 ```sh
-sudo dejima-ci-upgrade set-tier confined     # or privileged, once, if not yet set
-sudo dejima-ci-upgrade mark-node 2
+git clone <this repo> ~/dejima-ci-hardener      # or pull, if you have it
+cd ~/dejima-ci-hardener
+
+sudo ./bin/dejima-ci-upgrade set-tier confined  # or privileged, once per host
+sudo ./bin/dejima-ci-upgrade mark-node 2
 ```
 
-`mark-node` runs `dejima-ci-upgrade check-lan` first — which asks `ff02::1` who
-is on the link and counts the replies that are not this VM's own — and refuses
-to record the assertion if anything answers. So what gets written down has been
-corroborated rather than claimed.
+`mark-node` runs `check-lan` first — which asks `ff02::1` who is on the link and
+counts the replies that are not this VM's own — and refuses to record the
+assertion if anything answers. So what gets written down has been corroborated
+rather than claimed.
 
-`check-lan` needs `ping`, from `iputils-ping`. Without it the check reports
-`UNKNOWN`, which is not a pass, and `mark-node` records the assertion as
-unverified so `status` keeps saying so.
+Running from a checkout is the better way on either tier anyway, and stays true
+after this upgrade: an installed copy knows only the versions that existed when
+it was installed.
+
+### If `check-lan` reports UNKNOWN
+
+It needs `ping`, from `iputils-ping`. Without it there is no probe and the check
+says `UNKNOWN`, which is not a pass — `mark-node` records the assertion as
+unverified and `status` keeps saying so.
+
+Installing it is a **guest-side change on a machine a rollback rebuilds**, so it
+does not survive on its own. Two honest options, and no third:
+
+- `sudo apt-get install -y iputils-ping`, verify, and accept that the next
+  rollback removes it again. The node rule is unaffected either way — this is
+  only about being able to check it — so the cost is that a later `status`
+  reports `UNKNOWN` rather than `in force`.
+- Leave it, and verify from the node instead with `ip6tables -S` as in §1. The
+  assertion is then recorded unverified, which is what it actually is.
+
+Baking `iputils-ping` into the snapshot is reasonable, but it is a guest-side
+change and takes the seven steps in
+[docs/upgrading.md](../docs/upgrading.md#a-guest-side-upgrade-is-not-one-step).
+Do not do it casually as part of this upgrade.
+
+### Do not run `install.sh` just to get the tool onto the box
+
+Tempting on the confined tier, and it would work — `install.sh` installs
+`dejima-ci-upgrade` and the upgrade notes. But **that is a guest-side change**,
+so the next rollback reverts it along with the `guest_version` it wrote, and you
+are back where you started with no sign anything happened.
+
+If you want the tool installed, do it as its own deliberate change through the
+seven steps. It is not needed for v2, and the checkout above is enough.
+
+## 3. Confirm
+
+```sh
+sudo ./bin/dejima-ci-upgrade status
+```
+
+Both halves at v2, and the node check re-run to confirm the console work is
+still in force. This is also what to run in six months: `status` re-checks
+everything already recorded, so a rule somebody removes later shows up here
+rather than in an incident.
 
 ## What this does not change
 

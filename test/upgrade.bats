@@ -240,6 +240,20 @@ stub_check() {
     done
 }
 
+@test "a note with no guest step does not invoke the tool as if it were installed" {
+    # dejima-ci-upgrade arrives WITH a version. A note whose layers do not
+    # include 'guest' installs nothing, so on the machine being upgraded the
+    # tool is not on $PATH and will not be put there by that note - it has to be
+    # run from a checkout. Telling an operator otherwise gives them a command
+    # that cannot work on the host it was written for.
+    for f in "$REPO"/upgrades/0*.md; do
+        layers=$(sed -n '/^---$/,/^---$/p' "$f" | sed -n 's/^layers: //p')
+        case " $layers " in *" guest "*) continue ;; esac
+        ! grep -qE '^[[:space:]]*(sudo )?dejima-ci-upgrade ' "$f" \
+            || { echo "$f: no guest step installs it, so commands must use ./bin/dejima-ci-upgrade"; false; }
+    done
+}
+
 @test "VERSION is a bare integer, since the scheme has no minor part" {
     run cat "$REPO/VERSION"
     [[ "$output" =~ ^[0-9]+$ ]]

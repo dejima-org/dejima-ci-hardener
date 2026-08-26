@@ -18,15 +18,23 @@ of `main` — and no way to be at any other.
 
 ## Establishing where you are
 
+**Run the tool from a checkout.** On a v1 runner it is not installed — it
+arrives with a later version — so there is nothing on `$PATH` to call.
+
+```sh
+git clone <this repo> ~/dejima-ci-hardener
+cd ~/dejima-ci-hardener
+```
+
 First, record the tier. It is not detected, for the reason in
 [upgrades/README.md](README.md#tier-is-recorded-never-detected):
 
 ```sh
-sudo dejima-ci-upgrade set-tier confined     # or privileged
+sudo ./bin/dejima-ci-upgrade set-tier confined     # or privileged
 ```
 
-Then `dejima-ci-upgrade status`. On a host with nothing else recorded it will
-say so and stop. It does not assume v1, because a host that is genuinely at v1
+Then `sudo ./bin/dejima-ci-upgrade status`. On a host with nothing else recorded
+it will say so and stop. It does not assume v1, because a host that is genuinely at v1
 and a host whose state file somebody deleted are the same thing from in here,
 and picking the friendlier reading is how a check comes to be believed when it
 does not know.
