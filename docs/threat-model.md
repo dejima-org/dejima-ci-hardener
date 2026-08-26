@@ -262,6 +262,18 @@ can clone, fetch and call the API, and port 22 is simply unreachable. An SSH
 push has no transport, whatever `git-push-guard.sh` does or does not catch.
 `--allow-github-push` is what opens it, per launch.
 
+**That rests on two properties of dejima, not one**, and naming only the first
+is how this paragraph would quietly stop being true. The allowlist decides IPv4;
+what makes port 22 unreachable *at all* is that dejima also blocks IPv6 in the
+container. An allowlist naming one address family says nothing about the other,
+so without the second property a session reaches GitHub's own v6 ranges on any
+port it likes, port 22 included, and the argument above collapses without a line
+of it changing.
+
+Both are dejima's to keep true, which is the point of writing them down here:
+this is a claim about another repository's behaviour, and the way such a claim
+fails is that the behaviour changes and the paragraph depending on it does not.
+
 Closing the CI chain follows from that principle. It is not the reason for it.
 
 **This repository exists so that it is not the only answer.** Granting push
