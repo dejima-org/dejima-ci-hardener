@@ -91,106 +91,14 @@ daemon and a real host network. Both grants are root-equivalent on the host,
 and neither can be reduced without breaking the job they exist for. That tier
 needs a machine built to be lost, not a machine you own.
 
-### Why confine anything, if the hypervisor holds either way
+**Two arguments sit behind that table**, and they are the ones that decide
+whether the split is worth the trouble. Both are at the end of this page rather
+than here, so the build steps come first:
 
-Worth answering directly, because the objection is sound as far as it goes. The
-node firewall's guarantee is identical on both tiers — *reaches the internet,
-not your network* — and it is enforced somewhere neither tier can touch. If
-your LAN were the whole of the threat, the confined tier would be ceremony.
-
-What that guarantee leaves open is the internet, and the internet is where the
-damage in this threat model actually happens. A prompt-injected session, or a
-dependency that ships something unwanted, has no need of your LAN. It needs
-somewhere to send a checkout, a token or a set of CI secrets, and somewhere to
-fetch its next instruction from. Every one of those is a public address, and
-the node firewall permits all of them by design.
-
-The confined tier closes that, in two places at once:
-
-- **Its jobs are handed no Docker socket**, so the ordinary compromise stays
-  inside a job container instead of becoming root on the host.
-- **Their egress is deny-by-default.** An unlisted name does not resolve, and
-  an unlisted address is unreachable even when named as a literal IP — the
-  resolver and the packet filter are separate controls, and a job has to get
-  past both. Reaching anywhere off the list at all means escaping the container
-  first.
-
-The list is the part that carries the most weight, and it is not a file on the
-host. It is `.dejima/allowed-domains` on each served repository's `main`, so
-widening it is a reviewed, attributable diff on a branch a pull request cannot
-write. **A branch cannot grant itself a destination**, which is the property
-the whole tool exists for.
-
-So the tiers bound different things, and neither is a weaker version of the
-other. The privileged tier bounds the catastrophic case — an attacker on your
-network — and accepts the ordinary one, since a job there reaches the whole
-internet by design. That is why that machine is built to be lost and rolled
-back on a schedule. The confined tier bounds the ordinary case, which is the
-one that actually happens, and which a hypervisor firewall cannot see: it is
-all outbound traffic to legitimate public addresses.
-
-Put the other way round: the node firewall decides *whose* network a job can
-reach. Only the confined tier decides *what it can say and to whom*.
-
-### The privileged tier has no egress allowlist, on purpose
-
-This is the split's most important consequence and the easiest to read as an
-omission, so plainly: it is not one.
-
-The confined tier's allowlist works because its jobs cannot reach it. The
-rules sit on a bridge their traffic has to cross, in a network namespace they
-are not in, enforced by a kernel they hold no privileged access to.
-
-A privileged job has all three. It holds the Docker socket, which is
-root-equivalent on that host, and it runs in the host's own network namespace.
-Any filter installed there is one it can flush in a single command. Installing
-it anyway would cost an evening and leave a host that *looks* like it has an
-egress allowlist, which is worse than one that plainly does not: the next
-person to reason about that machine reasons from the label.
-
-So `dejima-ci-bootstrap --role privileged` deliberately stops short of running
-`install.sh`, and the boundary moves outward - to the hypervisor's firewall,
-applied to the VM's tap device, where the guest cannot reach it.
-
-The guarantee that survives is narrower and honest, and it is the one worth
-making: **an attacker who owns that VM reaches the internet, and not your
-network.**
-
----
-
-# Build one
-
-Two pages, in this order. Neither repeats the other.
-
-1. **Your hypervisor.** On Proxmox:
-   [proxmox/README.md](proxmox/README.md) — the VM, the firewall applied to
-   it, and its snapshots. On anything else, the equivalent is a VM that
-   reaches the internet and, on your LAN, only your forge and a resolver.
-2. **The host inside it.**
-   [docs/building-a-runner.md](docs/building-a-runner.md) — the Debian
-   install, one bootstrap command, and the runners. The same on any
-   hypervisor, and the same for both tiers bar one flag.
-
-The whole of the tier decision is that flag, which the second page runs for
-you at the point it belongs:
-
-```sh
---role confined      --role privileged
-```
-
-On `confined` the bootstrap additionally runs `install.sh`, which builds the job network,
-its allowlisting resolver and the egress rules. On `privileged` it stops short
-of that, for [the reason above](#the-privileged-tier-has-no-egress-allowlist-on-purpose).
-
-One thing that is not in either page, because no program can do it: **do not
-put a privileged runner on a machine you would mind losing.** Its jobs are
-handed the Docker socket, so the working assumption has to be that a
-compromised job gets root on that host, and handing an existing machine to that
-assumption is not a decision many people would make deliberately.
-
----
-
-# Both tiers
+- [Why confine anything, if the hypervisor holds either way](#why-confine-anything-if-the-hypervisor-holds-either-way)
+- [The privileged tier has no egress allowlist, on purpose](#the-privileged-tier-has-no-egress-allowlist-on-purpose)
+  — deliberate rather than missing, and worth reading **before** choosing that
+  tier.
 
 ## Register scope is the boundary; the label is not
 
@@ -361,6 +269,105 @@ Docker for a misspelled key or an anchor that does not merge. That job needs a
 Docker daemon and the host's own egress, so it runs on the privileged tier,
 and failing it means the runner needs attention rather than the branch.
 
+## Why confine anything, if the hypervisor holds either way
+
+Worth answering directly, because the objection is sound as far as it goes. The
+node firewall's guarantee is identical on both tiers — *reaches the internet,
+not your network* — and it is enforced somewhere neither tier can touch. If
+your LAN were the whole of the threat, the confined tier would be ceremony.
+
+What that guarantee leaves open is the internet, and the internet is where the
+damage in this threat model actually happens. A prompt-injected session, or a
+dependency that ships something unwanted, has no need of your LAN. It needs
+somewhere to send a checkout, a token or a set of CI secrets, and somewhere to
+fetch its next instruction from. Every one of those is a public address, and
+the node firewall permits all of them by design.
+
+The confined tier closes that, in two places at once:
+
+- **Its jobs are handed no Docker socket**, so the ordinary compromise stays
+  inside a job container instead of becoming root on the host.
+- **Their egress is deny-by-default.** An unlisted name does not resolve, and
+  an unlisted address is unreachable even when named as a literal IP — the
+  resolver and the packet filter are separate controls, and a job has to get
+  past both. Reaching anywhere off the list at all means escaping the container
+  first.
+
+The list is the part that carries the most weight, and it is not a file on the
+host. It is `.dejima/allowed-domains` on each served repository's `main`, so
+widening it is a reviewed, attributable diff on a branch a pull request cannot
+write. **A branch cannot grant itself a destination**, which is the property
+the whole tool exists for.
+
+So the tiers bound different things, and neither is a weaker version of the
+other. The privileged tier bounds the catastrophic case — an attacker on your
+network — and accepts the ordinary one, since a job there reaches the whole
+internet by design. That is why that machine is built to be lost and rolled
+back on a schedule. The confined tier bounds the ordinary case, which is the
+one that actually happens, and which a hypervisor firewall cannot see: it is
+all outbound traffic to legitimate public addresses.
+
+Put the other way round: the node firewall decides *whose* network a job can
+reach. Only the confined tier decides *what it can say and to whom*.
+## The privileged tier has no egress allowlist, on purpose
+
+This is the split's most important consequence and the easiest to read as an
+omission, so plainly: it is not one.
+
+The confined tier's allowlist works because its jobs cannot reach it. The
+rules sit on a bridge their traffic has to cross, in a network namespace they
+are not in, enforced by a kernel they hold no privileged access to.
+
+A privileged job has all three. It holds the Docker socket, which is
+root-equivalent on that host, and it runs in the host's own network namespace.
+Any filter installed there is one it can flush in a single command. Installing
+it anyway would cost an evening and leave a host that *looks* like it has an
+egress allowlist, which is worse than one that plainly does not: the next
+person to reason about that machine reasons from the label.
+
+So `dejima-ci-bootstrap --role privileged` deliberately stops short of running
+`install.sh`, and the boundary moves outward - to the hypervisor's firewall,
+applied to the VM's tap device, where the guest cannot reach it.
+
+The guarantee that survives is narrower and honest, and it is the one worth
+making: **an attacker who owns that VM reaches the internet, and not your
+network.**
+
+---
+
+# Build one
+
+Two pages, in this order. Neither repeats the other.
+
+1. **Your hypervisor.** On Proxmox:
+   [proxmox/README.md](proxmox/README.md) — the VM, the firewall applied to
+   it, and its snapshots. On anything else, the equivalent is a VM that
+   reaches the internet and, on your LAN, only your forge and a resolver.
+2. **The host inside it.**
+   [docs/building-a-runner.md](docs/building-a-runner.md) — the Debian
+   install, one bootstrap command, and the runners. The same on any
+   hypervisor, and the same for both tiers bar one flag.
+
+The whole of the tier decision is that flag, which the second page runs for
+you at the point it belongs:
+
+```sh
+--role confined      --role privileged
+```
+
+On `confined` the bootstrap additionally runs `install.sh`, which builds the job network,
+its allowlisting resolver and the egress rules. On `privileged` it stops short
+of that, for [the reason above](#the-privileged-tier-has-no-egress-allowlist-on-purpose).
+
+One thing that is not in either page, because no program can do it: **do not
+put a privileged runner on a machine you would mind losing.** Its jobs are
+handed the Docker socket, so the working assumption has to be that a
+compromised job gets root on that host, and handing an existing machine to that
+assumption is not a decision many people would make deliberately.
+
+---
+
+# Both tiers
 ## Further reading
 
 | | |

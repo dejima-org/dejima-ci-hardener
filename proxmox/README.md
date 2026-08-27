@@ -220,37 +220,25 @@ someone installs one is not a day anyone revisits the firewall.
 
 #### Rule 10, and why IPv6 is dropped whole
 
-Rules 5 to 9 work because the protected set is enumerable. RFC 1918 named three
-ranges, your LAN is inside them, and the list is short enough to read.
+**IPv6 has no RFC 1918**, so there is no list of private ranges to mirror — the
+family goes whole instead. Worth having even on a network that routes no IPv6,
+because every Linux host answers on `fe80::` regardless. The argument is in
+[the threat model](../docs/threat-model.md#the-lan-boundary-is-two-boundaries)
+and again above `OUT DROP -dest ::/0` in
+[firewall.fw.template](firewall.fw.template).
 
-**IPv6 has no RFC 1918.** A v6 network is numbered out of a globally routable
-prefix delegated by your ISP, so there is no equivalent list to write down.
-Dropping `fc00::/7` catches unique-local addresses most networks do not use and
-misses the prefix your actual neighbour is on. Since the set cannot be
-enumerated, the family goes.
+**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Its
+rules cover a confined job leaving its bridge. They are not in front of the VM's
+own traffic, and on the privileged tier not in front of the jobs either, since
+those run in the host's network namespace. Rule 10 covers root on the VM — the
+privileged tier's ordinary case, not its worst one.
 
-This is worth having even if you are certain your network has no IPv6. Every
-Linux host brings up an `fe80::` address on every interface whether or not
-anything routes v6, and a daemon bound to `::` answers on it. Without rule 10,
-rules 5 to 9 can all be in force and the machine beside this one is still one
-`ssh fe80::...%eth0` away. That path does not appear in `ip -4 route`, does not
-involve your router, and is invisible to anyone checking the v4 rules are right.
+**Do it here, not with `disable_ipv6` in the guest**, which is a setting root on
+a machine this page tells you to treat as already lost can put back.
 
-**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Those
-rules cover a confined job reaching off its bridge. They are not in front of the VM's
-own traffic, and on the privileged tier they are not in front of the jobs
-either, since those run in the host's network namespace. Rule 10 is the one that
-covers root on the VM — which on the privileged tier is the ordinary case rather
-than the worst one.
+**If the console rejects `::/0`**, enter four rules in rule 10's position
+instead: `fe80::/10`, `fc00::/7`, `ff00::/8`, `2000::/3`.
 
-**Do not do this in the guest instead.** `net.ipv6.conf.all.disable_ipv6=1` looks
-equivalent and is not: it is a setting on a machine this page tells you to treat
-as already lost, and root sets it back. The rule belongs on the node for the
-same reason every other rule here does.
-
-If the console rejects `::/0`, the same coverage is four rules — `fe80::/10`,
-`fc00::/7`, `ff00::/8`, `2000::/3` — placed together in rule 10's position.
-Prefer the single line: four entries are four chances to enter three.
 
 #### Two more, if the VM gets its address by DHCP
 
@@ -302,22 +290,11 @@ of it, so each VM still needs its own:
 | Input Policy | `DROP` |
 | Output Policy | `ACCEPT` |
 
-Inbound denies by default — this VM offers no service anyone should reach, so
-the exceptions are short and knowable. Outbound accepts by default, and the LAN
-is denied explicitly by the group.
-
-That asymmetry is deliberate, and it is worth resisting the obvious-looking
-alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123. That
-breaks things — apt during a first install, and anything else needing a port
-nobody listed — and each breakage presents as a network fault rather than as a
-firewall rule. It also buys almost nothing: this VM is assumed to be owned by
-an attacker with root, and the guarantee being made is *reaches the internet,
-not your network*, not *reaches only three ports*. Anyone who owns the box
-tunnels over 443 like everybody else.
-
-Deny-by-default earns its keep where the protected set is enumerable, which is
-the LAN. The internet is not, and treating it as though it were gets you a rule
-set that looks strict and only gets in the way.
+Inbound denies by default; outbound accepts by default and the LAN is denied
+explicitly by the group. That asymmetry is deliberate: deny-by-default earns its
+keep where the protected set is enumerable, which the LAN is and the internet is
+not. The argument against inverting it is above `policy_out` in
+[firewall.fw.template](firewall.fw.template).
 
 Then **VM → Firewall → Add → Security Group**, and select
 `dejima-ci-hardener`. That single entry is the whole rule set, in the order the
@@ -353,7 +330,7 @@ Rules 2–4 are the entire remaining LAN exposure, and they are why "no LAN
 access" is not literally true. Both destinations are pinned to one host and
 one port.
 
-Nothing follows rule 8. The public internet is reached by the default policy.
+Nothing follows rule 10. The public internet is reached by the default policy.
 
 ### Values that must agree
 
@@ -450,16 +427,9 @@ getent hosts deb.debian.org && echo "  resolved" || echo "  DNS FAILED"
 sudo ping -6 -n -c 2 -W 1 -I "$dev" ff02::1
 ```
 
-**The last one asks the whole LAN who is there, over IPv6.** `ff02::1` is the
-all-nodes link-local multicast address and every IPv6 host answers it — and
-every Linux host is an IPv6 host, because the `fe80::` address exists whether or
-not the network routes v6. Replies from an address that is not this VM's own
-mean rule 10 is not in force and the segment is reachable over a family none of
-the checks above it touch.
-
-Like the gateway probe, it writes down no target: `ff02::1` is the same address
-on every network there has ever been, so naming it describes nothing about
-yours.
+**The last one asks the whole LAN who is there, over IPv6.** Any reply from an
+address that is not this VM's own means rule 10 is not in force, and that the
+segment is reachable over a family none of the checks above it touch.
 
 **This one is a by-hand check and stays one.** Everything else this repository
 verifies, it verifies from inside a job, in `test/ci-runner.bats` — and a job is
@@ -469,14 +439,11 @@ ever gets to the tap. The sister project checks the equivalent automatically
 because it has an in-VM audit to hang it on; this one does not, so run it when
 you build the group and after any change to it.
 
-**The first probe targets your gateway, and not some other host on your LAN.**
-Naming another host would mean writing down something worth attacking on a
-machine this page tells you to treat as already lost. The gateway avoids that
-and is the better probe besides: its address is already in the routing table,
-so it reveals nothing; it is guaranteed to be alive, which an arbitrary host is
-not; and it sits inside the ranges the DROP rules cover, so with the rules
-applied it must be unreachable *as a destination* while traffic *through* it to
-the internet is untouched.
+**Both targets are chosen so that naming them writes nothing down.** The
+gateway is already in the routing table and `ff02::1` is the same on every
+network there has ever been, so neither describes your topology to anyone
+reading a machine this page tells you to treat as already lost. Both are also
+guaranteed to answer when they are reachable, which an arbitrary host is not.
 
 Read them together, because the pattern says which thing is wrong:
 

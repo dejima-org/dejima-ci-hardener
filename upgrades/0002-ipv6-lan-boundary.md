@@ -22,25 +22,19 @@ the rules are identical and the security group is shared.
 
 ## Why
 
-The node firewall's outbound DROPs named IPv4 ranges only, so the boundary
-`proxmox/firewall.fw.template` calls "THIS IS THE BOUNDARY" did not apply to
-IPv6 at all. Every Linux host brings up an `fe80::` address on every interface
-whether or not anything routes v6, and a daemon bound to `::` answers on it — so
-the machine beside your runner was reachable across the segment with all four
-DROPs in force, on a network with no IPv6 in it.
+Until you do this, **your runner reaches its neighbours over IPv6** — on a
+network with no IPv6 in it, because every Linux host answers on `fe80::`
+regardless. All four v4 DROPs are in force and irrelevant.
 
-**`dejima-ci-firewall` was already blocking IPv6 and it is not the same thing.**
-Those rules are bound to the job bridge with `-i "$b"`. They cover a confined
-job reaching off its bridge. They are not in front of the VM's own traffic, and
-on the **privileged tier they are not in front of the jobs either**, because
-those run in the host's network namespace where bridge rules do not apply. On
-that tier root on the VM is the ordinary case rather than the worst one, and
-these two rules are the only thing covering it.
+**`dejima-ci-firewall` blocks IPv6 too, and it is not the same thing.** Its
+rules are bound to the job bridge, so they cover a confined job leaving that
+bridge. They are not in front of the VM's own traffic, and on the **privileged
+tier not in front of the jobs either**, since those run in the host's network
+namespace. There, root on the VM is the ordinary case rather than the worst one,
+and these two rules are the only thing covering it.
 
-The full argument is in
+Why the family is dropped whole rather than enumerated:
 [the threat model](../docs/threat-model.md#the-lan-boundary-is-two-boundaries).
-The short version: IPv6 has no RFC 1918, so the family is dropped whole rather
-than enumerated.
 
 ## 1. Node — two rules in the Proxmox console
 
