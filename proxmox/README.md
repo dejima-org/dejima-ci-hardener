@@ -1,78 +1,51 @@
 # Provisioning a runner VM on Proxmox
 
-The node-side half: the VM itself, the firewall applied to it, and its
-snapshots. Everything here is done in the Proxmox web console or on the node.
+The node-side half: the VM, the firewall applied to it, and its snapshots. The
+in-VM half is [docs/building-a-runner.md](../docs/building-a-runner.md), the
+same on any hypervisor.
 
-What happens *inside* the VM is
-[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same on
-any hypervisor. The two pages interleave rather than running one after the
-other; [the order](#what-order-to-do-this-in) below is the sequence that
-works.
+## The whole job
 
-That is deliberate. A script that runs `qm create` and writes into
-`/etc/pve/firewall/` is exactly the kind of artifact people paste into a root
-shell without reading, and the blast radius is the whole node — including
-every VM on it that has nothing to do with CI. The steps below are short
-enough to follow and specific enough to check, and you can see what you are
-doing while you do it.
+Four steps, and the two pages interleave — follow this order rather than either
+page top to bottom.
 
-The in-VM half **is** a script: [`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap).
-Running that blind costs you a VM built to be lost.
+| | Do this | Where | Roughly |
+| --- | --- | --- | --- |
+| 1 | Turn the datacenter firewall on | §1 below | one setting |
+| 2 | Create the VM | §2 below | one form |
+| 3 | Install Debian | [guest §1](../docs/building-a-runner.md#1-install-debian) | the usual |
+| 4 | **Build the rules, apply them, verify** | §3 below | **the substance of this page** |
+| 5 | Finish the guest setup | [guest §2 onward](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp) | it sends you back to §4 twice, once per snapshot |
 
-One step here is not console work, because it cannot be: Proxmox schedules
-backups but not rollbacks, so the cadence in §4 is a three-command cron entry.
-It is printed in full and each part of it explained, which is the standard the
-rest of this page is held to as well.
+**Everything except step 4 is short.** Step 4 is ten firewall rules entered into
+a form, three policy settings, and two verification passes. If you have done it
+before, [the rule table](#build-the-group-once) is the whole of it.
 
----
+**Two VMs if you are following
+[the tiering](../README.md#two-tiers-and-you-must-pick-one)** — one privileged,
+one for the confined runners. Every step here is identical for both; the tiers
+differ only in a flag, and that flag is in the guest runbook.
+
+**The rules go on after the OS is installed, not before.** The Debian installer
+takes its address by DHCP whatever you pin it to afterwards, and a lease needs a
+reply back in. Apply the group first, without the DHCP pair from §3, and the
+installer has no network at all — which presents as a broken mirror or a dead
+link rather than as a firewall you switched on ten minutes earlier. Ticking the
+Firewall checkbox in §2 is safe on its own.
 
 ## What you are building
 
-A machine to hand to an attacker.
+**A machine to hand to an attacker.**
 
 The privileged runner gives job containers the Docker socket, which is
-root-equivalent on their host. So the working assumption is not *if* but
-*when*: a compromised job has root on this VM. Everything below follows from
-taking that seriously rather than hoping.
-
-Two VMs if you are following [the
-tiering](../README.md#two-tiers-and-you-must-pick-one): one for the privileged
-runner, one for the confined ones. Every step on this page is the same for
-both - the tiers differ only in a flag, and that flag is in
-[docs/building-a-runner.md](../docs/building-a-runner.md).
+root-equivalent on their host. So the working assumption is not *if* but *when*:
+a compromised job has root on this VM.
 
 **The firewall goes on the node, not in the guest.** Root in the VM can flush
 any rule set it can see. It cannot reach one applied to its own tap device.
 Everything `dejima-ci-bootstrap` installs inside the VM is defence in depth —
-real against a job that has not escaped its container, worth nothing against
-one that has.
-
----
-
-## What order to do this in
-
-Doing this page straight through does not work, and the reason is worth knowing
-before you hit it: §3 finishes by testing the firewall *from inside the VM*, and
-there is nothing to test from until an operating system is running on it.
-
-1. **§1 and §2 here.** Datacenter firewall on, VM created.
-2. **[Install the OS](../docs/building-a-runner.md#1-install-debian)**, then
-   come back. That is the guest runbook's §1, and it is all you need from it
-   before returning.
-3. **§3 here.** Build the rules, apply them, and run both halves of the
-   verification - the node-side one and the from-inside one.
-4. **[The rest of the guest runbook](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp)**,
-   from its §2 onward. It sends you back to §4 here twice, once for each
-   snapshot.
-
-**The rules go on after the OS is installed, not before.** The Debian installer
-takes its address by DHCP whatever you pin it to afterwards, and a lease needs
-a reply back in. Apply the group first without the DHCP pair from §3 and the
-installer has no network at all, which presents as a broken mirror or a dead
-link rather than as a firewall you switched on ten minutes earlier.
-
-Ticking the Firewall checkbox in §2 is safe on its own. The group and the
-policies in §3 are what start dropping things.
+real against a job that has not escaped its container, worth nothing against one
+that has.
 
 ---
 
@@ -358,9 +331,14 @@ silence. `install.sh` derives both from one answer for that reason.
 
 ### Check it, rather than assuming it
 
-On the node, with the VM **running** — Proxmox builds these chains around the
-VM's tap device, so a stopped VM has none and their absence would tell you
-nothing:
+**Two passes.** The first reads configuration, the second tests behaviour, and
+only the second is proof: a rule that is loaded and a rule that does what you
+meant are different claims.
+
+#### Pass one, on the node, with the VM running
+
+Proxmox builds these chains around the tap device, so a stopped VM has none and
+their absence would tell you nothing.
 
 ```sh
 # what is actually loaded right now
@@ -373,19 +351,15 @@ sudo ip6tables -S | grep "tap<vmid>i0"
 sudo pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
 
-**Run both, not just the first.** A rule with an IPv6 destination is compiled
-into `ip6tables` and is absent from `iptables -S` — so checking only the v4
-table shows rule 10 missing whether it is there or not, and shows it identically
-either way.
+**Both tables, not just the first.** An IPv6 rule compiles into `ip6tables` and
+is absent from `iptables -S`, which shows rule 10 missing whether it is there or
+not.
 
-**What you are looking for.** Proxmox names the per-VM chains after the tap
-interface — `tap<vmid>i0-IN` and `tap<vmid>i0-OUT` for the first NIC — and
-your rules appear inside them, in the order you added them. In the v4 `-OUT`
-chain that means the three pinhole ACCEPTs first, then the five LAN DROPs, then
-whatever Proxmox appends for the policy. The v6 `-OUT` chain holds rule 10 and
-none of the pinholes, because every one of them names an IPv4 address.
-
-**What each failure looks like.**
+**What you are looking for.** Chains named `tap<vmid>i0-IN` and `-OUT`, holding
+your rules in the order you added them. The v4 `-OUT` chain has the three
+pinhole ACCEPTs, then the five LAN DROPs, then whatever Proxmox appends for the
+policy. The v6 `-OUT` chain has rule 10 and no pinholes, since every pinhole
+names an IPv4 address.
 
 | What you see | What it means |
 | --- | --- |
@@ -395,21 +369,16 @@ none of the pinholes, because every one of them names an IPv4 address.
 | Rules present and correct, DNS still failing | The address in rules 3–4 is not the VM's nameserver. The gateway is the usual wrong answer — see "Values that must agree" |
 | v4 chain right, `ip6tables -S` empty | Rule 10 was not entered, or the console rejected `::/0` and the error was missed. Nothing about the v4 half will look wrong |
 
-`pve-firewall status` is the quicker sanity check of whether the service is
-running and enabled at all, but it says nothing about *these* rules — it is
-the datacenter switch it reports on, not your ten lines.
+`pve-firewall status` reports the datacenter switch, not these rules.
 
-**Both commands describe configuration.** They are worth reading, and they are
-not proof: a rule that is loaded and a rule that does what you meant are
-different claims. The checks from inside the VM below are the ones that test
-behaviour, which is why they follow rather than replace this.
+#### Pass two, from inside the VM
 
-and from inside the VM, once it is up. Three of these must fail and two must
-succeed, which is what makes the set diagnostic rather than reassuring:
+Three must fail and two must succeed. That is what makes the set diagnostic
+rather than reassuring.
 
-Only the last one needs anything installed. `bash` can open a TCP connection on
-its own and `getent` is part of libc, which matters on a machine you have not
-finished setting up yet; `ping` is `iputils-ping`, which Debian has by default.
+Nothing needs installing: `bash` opens TCP connections itself, `getent` is part
+of libc, and `ping` ships with Debian — which matters on a machine you have not
+finished setting up yet.
 
 ```sh
 try() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null \
@@ -606,3 +575,20 @@ reverts too, and `dejima-ci-allowlist.timer` pulls it current again on its own.
 
 Whatever else reverts is cheap: Docker images have to be pulled again, so the
 first job after a rollback is slower than the rest.
+
+
+## Why there is no script for this page
+
+A script that runs `qm create` and writes into `/etc/pve/firewall/` is exactly
+the kind of artifact people paste into a root shell without reading, and the
+blast radius is the whole node — including every VM on it that has nothing to do
+with CI. The steps above are short enough to follow and specific enough to
+check, and you can see what you are doing while you do it.
+
+The in-VM half **is** a script:
+[`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap). Running that blind
+costs you a VM built to be lost, which is the difference.
+
+One step here is not console work, because it cannot be: Proxmox schedules
+backups but not rollbacks, so the cadence in §4 is a three-command cron entry,
+printed in full and explained part by part.
