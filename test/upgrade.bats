@@ -256,6 +256,26 @@ stub_check() {
 
 # --- the notes themselves ---------------------------------------------------
 
+@test "bootstrap installs the upgrade tool on the privileged tier" {
+    # install.sh puts it on a confined host and does not run on a privileged
+    # one. Without bootstrap doing it, the single tier whose ONLY boundary is
+    # the node firewall is the single tier with no way to ask which node-side
+    # versions it is missing - which is backwards.
+    branch=$(awk '/elif \[ "\$ROLE" = privileged \]/,/^else$/' "$REPO/bin/dejima-ci-bootstrap")
+    [ -n "$branch" ]
+    printf '%s' "$branch" | grep -q 'bin/dejima-ci-upgrade' \
+        || { echo "the privileged branch of bootstrap does not install dejima-ci-upgrade"; false; }
+}
+
+@test "bootstrap records the tier it has definitionally just built" {
+    # The tool refuses to guess the tier, correctly. But this branch IS the
+    # privileged path, so there is nothing to guess and no reason to make an
+    # operator type it.
+    branch=$(awk '/elif \[ "\$ROLE" = privileged \]/,/^else$/' "$REPO/bin/dejima-ci-bootstrap")
+    printf '%s' "$branch" | grep -q 'tier=privileged' \
+        || { echo "bootstrap does not record tier=privileged"; false; }
+}
+
 @test "every version from 1 to VERSION has an upgrade note" {
     newest=$(tr -d '[:space:]' < "$REPO/VERSION")
     for v in $(seq 1 "$newest"); do

@@ -147,6 +147,28 @@ v2  The LAN boundary gains IPv6 and the CGNAT range
 — which is the true state of a rebuilt runner, and is the reason skipping the
 record is a real option rather than a corner cut.
 
+### On a privileged host, nothing is installed and nothing here installs it
+
+Worth calling out because it is the tier where this matters most and the tier
+where the tool is least available.
+
+`install.sh` does not run on a privileged host — that is the grant the tier
+exists for — so `dejima-ci-upgrade` never arrives there by that route. From this
+version, `dejima-ci-bootstrap --role privileged` installs it directly, alongside
+`dejima-ci-runners` and for the same reason. But **bootstrap is not part of this
+upgrade**, so a privileged host already built at v1 has no copy and will not get
+one from anything on this page.
+
+Run it from a checkout there, as below. That is the whole answer for v2, and it
+is not a workaround: the node rules are in force regardless, and a checkout is
+the recommended way to run this tool on any tier.
+
+If you would rather have it installed, re-running
+`sudo ./bin/dejima-ci-bootstrap --role privileged` will do it — but that is a
+guest-side change on a machine a rollback rebuilds, so it belongs in a snapshot
+cycle rather than done casually. It also records `tier=privileged` for you,
+which saves the `set-tier` step below.
+
 ### Running the tool at all
 
 On a box where nothing is installed, from a checkout:

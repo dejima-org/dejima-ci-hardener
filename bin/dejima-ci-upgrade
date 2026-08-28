@@ -297,10 +297,16 @@ cmd_status() {
     node=$(state_get node_version) || node=""
 
     if [ "$tier" = privileged ]; then
-        # Not a gap. This tier installs nothing in the guest by design, which is
-        # the grant it exists for, so an unset guest_version is the correct
+        # Not a gap. guest_version tracks what install.sh installed - the
+        # allowlist, the resolver, the job firewall - and this tier runs none of
+        # it, which is the grant the tier exists for. So unset is the correct
         # reading rather than a missing one.
-        say "  guest   n/a   this tier runs no install.sh"
+        #
+        # bootstrap does place two programs here, dejima-ci-runners and this
+        # one, and they are deliberately not counted: they are tools rather than
+        # controls, and a stale installed copy is something this program already
+        # reports about itself.
+        say "  guest   n/a   no install.sh on this tier; no guest-side controls"
     else
         say "  guest   ${guest:+v}${guest:-unrecorded}"
     fi
