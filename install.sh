@@ -858,6 +858,26 @@ say "are in the host's namespace, no bridge is in front of them, and the rules"
 say "installed here do not filter them. That is the privileged tier, and it"
 say "belongs on its own machine - see the README."
 say
+# Reachability, not just existence.
+#
+# Everything installs to /usr/local/sbin and every instruction in this
+# repository reads `sudo dejima-ci-...`. That works only where sudoers sets a
+# secure_path including sbin; without one, sudo inherits the caller's PATH, and
+# Debian leaves every sbin directory off a non-root PATH. The result is a
+# correct install whose documented commands all report "command not found",
+# which reads as a broken install rather than as a PATH.
+#
+# This runs under sudo, so its own PATH is the one those later commands will
+# get. Asking `command -v` here is therefore the real question rather than a
+# proxy for it.
+if [ "$(command -v dejima-ci-allowlist 2>/dev/null)" != "$BIN_DIR/dejima-ci-allowlist" ]; then
+    say
+    say "  NOTE: $BIN_DIR is not on the PATH sudo gives you here, so"
+    say "  'sudo dejima-ci-allowlist ...' will not be found. Either use the full"
+    say "  path, as $BIN_DIR/dejima-ci-allowlist, or add a secure_path to"
+    say "  sudoers that includes it. Nothing about the install is wrong."
+fi
+
 say "Files this installer owns, for later reference:"
 say "  config       $CONFIG"
 say "  allowlist    $out            (generated - do not hand-edit)"

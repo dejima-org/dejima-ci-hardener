@@ -118,14 +118,20 @@ change takes — [the seven steps](../docs/upgrading.md#a-guest-side-upgrade-is-
 worth little if the program that reads it does not, and the cycle is the
 expensive part either way.
 
+**The full path, immediately after installing.** These programs go to
+`/usr/local/sbin`, and `sudo` reaches that only if your `sudoers` sets a
+`secure_path` including it — without one, `sudo` inherits your own PATH, and
+Debian leaves every `sbin` off a non-root PATH. `sudo printenv PATH` says which
+you have. Naming the path here costs nothing and works either way.
+
 **Confined tier**, where `install.sh` does it:
 
 ```sh
 # ... after rolling back to the clean snapshot, per the seven steps
 cd ~/dejima-ci-hardener && git pull
 sudo ./install.sh
-sudo dejima-ci-upgrade set-tier confined
-sudo dejima-ci-upgrade mark-node 2
+sudo /usr/local/sbin/dejima-ci-upgrade set-tier confined
+sudo /usr/local/sbin/dejima-ci-upgrade mark-node 2
 # ... then re-snapshot and repoint the rollback job
 ```
 
@@ -140,8 +146,8 @@ cd ~/dejima-ci-hardener && git pull
 sudo install -m 0755 bin/dejima-ci-upgrade /usr/local/sbin/dejima-ci-upgrade
 sudo install -d -m 0755 /usr/local/share/dejima-ci/upgrades
 sudo install -m 0644 upgrades/*.md /usr/local/share/dejima-ci/upgrades/
-sudo dejima-ci-upgrade set-tier privileged
-sudo dejima-ci-upgrade mark-node 2
+sudo /usr/local/sbin/dejima-ci-upgrade set-tier privileged
+sudo /usr/local/sbin/dejima-ci-upgrade mark-node 2
 # ... then re-snapshot and repoint the rollback job
 ```
 
