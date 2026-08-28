@@ -96,10 +96,19 @@ node_asserted=2026-08-25
 node_verified=yes
 ```
 
-**`guest_version`** is written by `install.sh`. The **privileged tier has no
-`install.sh`** and no guest-side install at all — that is the grant the tier
-exists for — so there it stays unset, and the tool reports `n/a` rather than
-treating it as a gap.
+**`guest_version`** is written by `install.sh`. It tracks the guest-side
+*controls* — the allowlist, the resolver, the job firewall — and the
+**privileged tier runs none of them**, which is the grant that tier exists for.
+So there it stays unset, and the tool reports `n/a` rather than treating it as a
+gap.
+
+`dejima-ci-bootstrap --role privileged` does install two programs on that tier,
+`dejima-ci-runners` and `dejima-ci-upgrade`, and records `tier=privileged` while
+it is there — otherwise the one tier whose only boundary is the node firewall
+would be the one tier unable to ask which node-side versions it is missing.
+Those are tools rather than controls, so they are deliberately not counted in
+`guest_version`; a stale installed copy is something `dejima-ci-upgrade` already
+reports about itself.
 
 **`node_version`** is written by `dejima-ci-upgrade mark-node`, by you, saying
 you did the console work.

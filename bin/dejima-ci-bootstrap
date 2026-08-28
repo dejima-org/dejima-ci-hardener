@@ -498,8 +498,43 @@ elif [ "$ROLE" = privileged ]; then
     for tpl in "$SRC"/examples/*; do
         [ -f "$tpl" ] && install -m 0644 "$tpl" "/usr/local/share/dejima-ci/templates/${tpl##*/}"
     done
+
+    # dejima-ci-upgrade, for the same reason and a stronger one.
+    #
+    # install.sh puts it on a confined host. Without this line a privileged host
+    # never gets it from anywhere, because nothing else here installs anything -
+    # so the tier whose ONLY boundary is the node firewall would be the one tier
+    # with no way to ask which node-side versions it is missing, short of
+    # cloning the repository every time.
+    install -m 0755 "$SRC/bin/dejima-ci-upgrade" /usr/local/sbin/dejima-ci-upgrade
+    install -d -m 0755 /usr/local/share/dejima-ci/upgrades
+    for note in "$SRC"/upgrades/*.md; do
+        [ -f "$note" ] && install -m 0644 "$note" "/usr/local/share/dejima-ci/upgrades/${note##*/}"
+    done
+
+    # And the tier, which is definitionally known here and is otherwise the
+    # operator's to type. dejima-ci-upgrade refuses to guess it, on the grounds
+    # that an absent config identifies a privileged host and a confined one
+    # whose install.sh has not run - but this is the branch that IS the
+    # privileged path, so there is nothing to guess.
+    #
+    # guest_version is deliberately NOT written. It tracks what install.sh
+    # installed, and this tier runs none: the two programs placed above are
+    # tools rather than controls, and a stale installed copy is a thing
+    # dejima-ci-upgrade already reports about itself.
+    install -d -m 0755 /etc/dejima-ci
+    {
+        [ -r /etc/dejima-ci/state ] && grep -v '^tier=' /etc/dejima-ci/state || true
+        printf 'tier=privileged\n'
+    } > /etc/dejima-ci/state.new
+    sort -o /etc/dejima-ci/state.new /etc/dejima-ci/state.new
+    chmod 0640 /etc/dejima-ci/state.new
+    mv /etc/dejima-ci/state.new /etc/dejima-ci/state
+
     say
     say "  installed  /usr/local/sbin/dejima-ci-runners"
+    say "  installed  /usr/local/sbin/dejima-ci-upgrade"
+    say "  recorded   /etc/dejima-ci/state (tier=privileged)"
     say
     /usr/local/sbin/dejima-ci-runners --role privileged || \
         say "  runner setup did not finish - re-run: sudo dejima-ci-runners --role privileged"
