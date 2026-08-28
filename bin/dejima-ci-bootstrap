@@ -535,6 +535,17 @@ elif [ "$ROLE" = privileged ]; then
     say "  installed  /usr/local/sbin/dejima-ci-runners"
     say "  installed  /usr/local/sbin/dejima-ci-upgrade"
     say "  recorded   /etc/dejima-ci/state (tier=privileged)"
+
+    # This runs under sudo, so its PATH is the one the operator's later sudo
+    # commands get. Without a secure_path in sudoers, sudo inherits a non-root
+    # PATH, and Debian leaves every sbin off that - so a correct install ends
+    # with every documented command reporting "command not found".
+    if [ "$(command -v dejima-ci-upgrade 2>/dev/null)" != /usr/local/sbin/dejima-ci-upgrade ]; then
+        say
+        say "  NOTE: /usr/local/sbin is not on the PATH sudo gives you here, so"
+        say "  'sudo dejima-ci-upgrade ...' will not be found. Use the full path,"
+        say "  or add a secure_path to sudoers that includes it."
+    fi
     say
     /usr/local/sbin/dejima-ci-runners --role privileged || \
         say "  runner setup did not finish - re-run: sudo dejima-ci-runners --role privileged"
