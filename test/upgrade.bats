@@ -276,6 +276,21 @@ stub_check() {
         || { echo "bootstrap does not record tier=privileged"; false; }
 }
 
+@test "the hand-install recipe writes where bootstrap writes" {
+    # v2 gives a privileged operator three install commands, because install.sh
+    # does not run on that tier and re-running bootstrap on a built machine
+    # redoes runner setup. Those commands duplicate bootstrap's, so they can
+    # drift from it - and a tool installed to the wrong path is a tool that is
+    # not there, reported as "not installed here" three sections later.
+    branch=$(awk '/elif \[ "\$ROLE" = privileged \]/,/^else$/' "$REPO/bin/dejima-ci-bootstrap")
+    for dest in /usr/local/sbin/dejima-ci-upgrade /usr/local/share/dejima-ci/upgrades; do
+        printf '%s' "$branch" | grep -qF "$dest" \
+            || { echo "bootstrap no longer installs to $dest"; false; }
+        grep -qF "$dest" "$REPO/upgrades/0002-ipv6-lan-boundary.md" \
+            || { echo "v2's hand-install recipe no longer names $dest"; false; }
+    done
+}
+
 @test "every version from 1 to VERSION has an upgrade note" {
     newest=$(tr -d '[:space:]' < "$REPO/VERSION")
     for v in $(seq 1 "$newest"); do

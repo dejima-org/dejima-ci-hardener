@@ -43,6 +43,9 @@ For *why* any of this is necessary - what a CI run adds over a sandbox, and
 why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md). You do
 not need it to follow this.
 
+**Already have a runner?** [Updating an existing runner](#updating-an-existing-runner)
+is the path forward: check its version, then walk the notes in order.
+
 **Early development. Not ready to be depended on.** Nothing here has been
 through outside review, an external audit, or adversarial testing by anyone but
 the person who wrote it. Every security property this describes is a claim
@@ -54,6 +57,35 @@ not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
 where to report a vulnerability rather than in a public issue.
 
 [![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
+
+## Updating an existing runner
+
+**Check what it is at**, from a checkout rather than the installed copy:
+
+```sh
+git -C ~/dejima-ci-hardener pull
+cd ~/dejima-ci-hardener
+sudo ./bin/dejima-ci-upgrade set-tier confined   # or privileged, once per host
+sudo ./bin/dejima-ci-upgrade status
+```
+
+That names every version this runner is missing. **Do them in order** — each
+note assumes the one before it.
+
+| | |
+| --- | --- |
+| [upgrades/](upgrades/) | One note per version: the console work, the guest work, and what it costs |
+| [docs/upgrading.md](docs/upgrading.md) | The process, including the seven steps a guest-side change takes when a rollback is going to rebuild the machine |
+
+**From a checkout, not the installed copy**, for two reasons: an installed copy
+knows only the versions that existed when it was installed, and on a privileged
+host there may be no installed copy at all — `install.sh` does not run there.
+
+**Recording a version is itself a guest-side change**, so on a runner it is
+thrown away at the next rollback unless it is baked into the snapshot. The
+console work is not: hypervisor rules are in force either way. `docs/upgrading.md`
+covers the choice; `status` re-runs each upgrade's check before calling its work
+outstanding, so a rebuilt runner is not told to redo something already done.
 
 ## Do not install this next to dejima
 

@@ -6,6 +6,11 @@ same on any hypervisor.
 
 ## The whole job
 
+**Already have a runner?** This page builds one. To bring an existing VM
+forward, start at [Updating](../README.md#updating-an-existing-runner) — the
+upgrade notes name the rules to change rather than having you re-read the table
+below.
+
 Four steps, and the two pages interleave — follow this order rather than either
 page top to bottom.
 

@@ -114,20 +114,37 @@ So there are two honest ways to do this, and no third.
 If you want the record to survive, it takes the same sequence any guest-side
 change takes — [the seven steps](../docs/upgrading.md#a-guest-side-upgrade-is-not-one-step).
 
-And if you are doing the cycle anyway, **run `install.sh` while you are in
-it** (confined tier only). It puts `dejima-ci-upgrade` and these notes on the
-box, so later versions can be read and recorded without a checkout. Doing the
-dance for `mark-node` alone and skipping the install would be the expensive half
-of the work for the smaller half of the benefit.
+**Install the tool in the same cycle.** A record that survives a rollback is
+worth little if the program that reads it does not, and the cycle is the
+expensive part either way.
+
+**Confined tier**, where `install.sh` does it:
 
 ```sh
 # ... after rolling back to the clean snapshot, per the seven steps
 cd ~/dejima-ci-hardener && git pull
-sudo ./install.sh                        # confined tier only
+sudo ./install.sh
 sudo dejima-ci-upgrade set-tier confined
 sudo dejima-ci-upgrade mark-node 2
 # ... then re-snapshot and repoint the rollback job
 ```
+
+**Privileged tier**, where nothing does. `install.sh` does not run here — that
+is the grant the tier exists for — so the tool arrives only by
+`dejima-ci-bootstrap`, and re-running that on a built machine also redoes runner
+setup. The three commands it uses for this part are enough on their own:
+
+```sh
+# ... after rolling back to the clean snapshot, per the seven steps
+cd ~/dejima-ci-hardener && git pull
+sudo install -m 0755 bin/dejima-ci-upgrade /usr/local/sbin/dejima-ci-upgrade
+sudo install -d -m 0755 /usr/local/share/dejima-ci/upgrades
+sudo install -m 0644 upgrades/*.md /usr/local/share/dejima-ci/upgrades/
+sudo dejima-ci-upgrade set-tier privileged
+sudo dejima-ci-upgrade mark-node 2
+# ... then re-snapshot and repoint the rollback job
+```
+
 
 ### Or: skip it, and let the check answer for you
 
