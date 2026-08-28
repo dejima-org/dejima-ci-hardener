@@ -102,7 +102,19 @@ exists for — so there it stays unset, and the tool reports `n/a` rather than
 treating it as a gap.
 
 **`node_version`** is written by `dejima-ci-upgrade mark-node`, by you, saying
-you did the console work. Nothing in the guest can read the hypervisor's rules,
+you did the console work.
+
+**Both are guest state, so a rollback takes both.** That is worth stating
+plainly because it makes recording anything on a runner a guest-side change
+with the same seven steps behind it. Two consequences follow, and neither is a
+bug:
+
+- Recording a node-only upgrade is **optional**. The console work is on the
+  hypervisor and is in force whether or not a file in the guest says so.
+- After a rollback, `status` will list a recorded upgrade as outstanding again.
+  It does not simply believe that: where the upgrade declares a `verify-node`
+  command it runs the check first, and where the check passes it says *NOT
+  RECORDED, but its check passes* rather than *console work outstanding*. Nothing in the guest can read the hypervisor's rules,
 which is exactly what makes those rules the boundary, so it is an assertion and
 the tool treats it as one.
 
@@ -132,6 +144,16 @@ work is in force. For v2 that is `dejima-ci-upgrade check-lan`, which asks
 - `mark-node` **runs it first and refuses to record a claim the machine
   contradicts.** `--force` overrides and records the result as unverified, so
   `status` keeps saying so.
+- **A check that cannot tell is not a check that failed.** The contract is exit
+  `0` for in force, `2` for could-not-determine, anything else for not in
+  force. `check-lan` exits `2` with no `ping` to probe with, and `mark-node`
+  records the assertion as unverified rather than refusing it — telling an
+  operator their console work is missing on the strength of a check that never
+  ran would be wrong in the alarming direction.
+- **The command is looked up on `$PATH` first, then beside this program.** The
+  fallback is what makes the documented workflow work: the notes say to run
+  from a checkout on a box where nothing is installed, and without it the tool
+  could not find itself.
 - `status` re-runs the checks for everything already recorded. An assertion that
   was true in June and is false now is a rule somebody removed.
 

@@ -9,8 +9,12 @@ verify-node: dejima-ci-upgrade check-lan
 
 # v2 — the LAN boundary gains IPv6 and the CGNAT range
 
-**Two rules in the Proxmox console, and nothing else.** No guest change, no
-rollback dance, no new snapshot. Ten minutes.
+**Two rules in the Proxmox console.** The rules themselves need no guest change,
+no rollback dance and no new snapshot — they are on the hypervisor and take
+effect immediately. Ten minutes.
+
+Recording that you did them is a separate, optional question, and §2 is honest
+about what it costs on a machine that gets rolled back.
 
 This is the cheap kind of upgrade and it is worth saying why, because the next
 one may not be: everything here lives on the hypervisor, outside the VM, where
@@ -91,61 +95,85 @@ An IPv6 rule is compiled into `ip6tables` and is **absent from `iptables -S`**,
 so the v4 table shows rule 10 missing whether it is there or not. Checking the
 wrong table is the most likely way to conclude this worked when it did not.
 
-## 2. Record it
+## 2. Recording it is optional, and is a guest-side change
 
-**Run the tool from a checkout, not from `$PATH`.** `dejima-ci-upgrade` arrives
-*with* v2, and v2 has no guest-side step — so on the runner you are upgrading it
-is not installed yet, and will not be by anything on this page.
+**The rules above are already in force.** They are on the hypervisor, they took
+effect when you entered them, and no rollback touches them. Everything in this
+section is bookkeeping.
 
-In the guest:
+That distinction matters here more than it looks, because **recording this is
+itself a guest-side change.** `set-tier` and `mark-node` write to
+`/etc/dejima-ci/state`, which lives in the guest, which lives in the snapshot —
+so on a runner with scheduled rollback the record is thrown away at the next
+rebuild exactly as any other guest change would be.
+
+So there are two honest ways to do this, and no third.
+
+### Either: record it properly, as part of a snapshot cycle
+
+If you want the record to survive, it takes the same sequence any guest-side
+change takes — [the seven steps](../docs/upgrading.md#a-guest-side-upgrade-is-not-one-step).
+
+And if you are doing the cycle anyway, **run `install.sh` while you are in
+it** (confined tier only). It puts `dejima-ci-upgrade` and these notes on the
+box, so later versions can be read and recorded without a checkout. Doing the
+dance for `mark-node` alone and skipping the install would be the expensive half
+of the work for the smaller half of the benefit.
+
+```sh
+# ... after rolling back to the clean snapshot, per the seven steps
+cd ~/dejima-ci-hardener && git pull
+sudo ./install.sh                        # confined tier only
+sudo dejima-ci-upgrade set-tier confined
+sudo dejima-ci-upgrade mark-node 2
+# ... then re-snapshot and repoint the rollback job
+```
+
+### Or: skip it, and let the check answer for you
+
+Perfectly reasonable, and probably right for v2 specifically. The console work
+is done, the rules are in force, and nothing about the runner's security depends
+on a file saying so.
+
+The cost is that `status` will report v2 as outstanding after each rollback. It
+does not simply believe that, though: for an upgrade with a `verify-node`
+command it runs the check first, and where the check passes it says so —
+
+```
+v2  The LAN boundary gains IPv6 and the CGNAT range
+    node:  NOT RECORDED, but its check passes - the work looks done.
+```
+
+— which is the true state of a rebuilt runner, and is the reason skipping the
+record is a real option rather than a corner cut.
+
+### Running the tool at all
+
+On a box where nothing is installed, from a checkout:
 
 ```sh
 git clone <this repo> ~/dejima-ci-hardener      # or pull, if you have it
 cd ~/dejima-ci-hardener
-
 sudo ./bin/dejima-ci-upgrade set-tier confined  # or privileged, once per host
 sudo ./bin/dejima-ci-upgrade mark-node 2
 ```
 
 `mark-node` runs `check-lan` first — which asks `ff02::1` who is on the link and
 counts the replies that are not this VM's own — and refuses to record the
-assertion if anything answers. So what gets written down has been corroborated
+assertion if anything answers. What gets written down has been corroborated
 rather than claimed.
 
-Running from a checkout is the better way on either tier anyway, and stays true
-after this upgrade: an installed copy knows only the versions that existed when
-it was installed.
+### If `check-lan` says it could not tell
 
-### If `check-lan` reports UNKNOWN
+It needs `ping`, from `iputils-ping`. Without it there is no probe, and the
+check reports that it could not determine the answer — **which is not the same
+as reporting that the work is missing.** `mark-node` records the assertion as
+unverified and says why; it does not refuse.
 
-It needs `ping`, from `iputils-ping`. Without it there is no probe and the check
-says `UNKNOWN`, which is not a pass — `mark-node` records the assertion as
-unverified and `status` keeps saying so.
-
-Installing it is a **guest-side change on a machine a rollback rebuilds**, so it
-does not survive on its own. Two honest options, and no third:
-
-- `sudo apt-get install -y iputils-ping`, verify, and accept that the next
-  rollback removes it again. The node rule is unaffected either way — this is
-  only about being able to check it — so the cost is that a later `status`
-  reports `UNKNOWN` rather than `in force`.
-- Leave it, and verify from the node instead with `ip6tables -S` as in §1. The
-  assertion is then recorded unverified, which is what it actually is.
-
-Baking `iputils-ping` into the snapshot is reasonable, but it is a guest-side
-change and takes the seven steps in
-[docs/upgrading.md](../docs/upgrading.md#a-guest-side-upgrade-is-not-one-step).
-Do not do it casually as part of this upgrade.
-
-### Do not run `install.sh` just to get the tool onto the box
-
-Tempting on the confined tier, and it would work — `install.sh` installs
-`dejima-ci-upgrade` and the upgrade notes. But **that is a guest-side change**,
-so the next rollback reverts it along with the `guest_version` it wrote, and you
-are back where you started with no sign anything happened.
-
-If you want the tool installed, do it as its own deliberate change through the
-seven steps. It is not needed for v2, and the checkout above is enough.
+Installing `ping` is another guest-side change with the same rollback
+arithmetic. If you are running the cycle above, add it there. If you are not,
+verify from the node instead with `ip6tables -S` as in §1 — the answer is just
+as good, it simply is not written down.
 
 ## 3. Confirm
 

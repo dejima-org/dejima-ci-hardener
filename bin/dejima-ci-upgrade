@@ -174,13 +174,59 @@ cmd_check_lan() {
 
 # --- verification -----------------------------------------------------------
 
-verify_node() {  # verify_node VERSION -> ok | failed | none | missing
-    local note cmd
+# Where a verify-node command's program actually is.
+#
+# $PATH first, THEN BESIDE THIS PROGRAM. The fallback is the point, and it
+# exists because a PATH-only lookup was wrong in a way that was quiet and
+# self-inflicted.
+#
+# The upgrade notes tell an operator to run this tool from a checkout, because
+# on the runner being upgraded it is not installed - it arrives WITH the
+# version. A PATH-only lookup then failed to find `dejima-ci-upgrade check-lan`,
+# because the thing it could not find was the program doing the looking. So
+# mark-node recorded the assertion as unverified while sitting on a check it
+# could have run, and status went on saying UNVERIFIED forever.
+#
+# PATH still wins where both exist, because the installed copy is the one this
+# machine actually runs. The sibling is what makes the documented workflow work
+# on a box where nothing is installed yet.
+verify_cmd_path() {  # verify_cmd_path NAME
+    local self_dir
+    command -v "$1" 2>/dev/null && return 0
+    self_dir=$(cd "$(dirname "$(readlink -f "$0")")" && pwd) || return 1
+    [ -x "$self_dir/$1" ] || return 1
+    printf '%s\n' "$self_dir/$1"
+}
+
+# THE EXIT-CODE CONTRACT for a verify-node command, which is three states and
+# not two:
+#
+#   0        the console work is in force
+#   2        could not be determined - the check did not run, or ran and could
+#            not tell
+#   other    it is NOT in force, and the machine says so
+#
+# Collapsing 2 into "not in force" is the mistake this used to make. check-lan
+# exits 2 when there is no ping to probe with, and mark-node then refused to
+# record the assertion, telling the operator their console work was missing on
+# the strength of a check that never ran. Wrong in the alarming direction,
+# about the one thing the operator cannot see for themselves.
+verify_node() {  # verify_node VERSION -> ok | failed | unknown | none | missing
+    local note cmd prog rest path rc=0
     note=$(note_for "$1") || { printf 'none\n'; return 0; }
     cmd=$(note_field "$note" verify-node)
     [ -n "$cmd" ] || { printf 'none\n'; return 0; }
-    command -v "${cmd%% *}" >/dev/null 2>&1 || { printf 'missing\n'; return 0; }
-    if $cmd >/dev/null 2>&1; then printf 'ok\n'; else printf 'failed\n'; fi
+    prog=${cmd%% *}
+    rest=${cmd#"$prog"}
+    path=$(verify_cmd_path "$prog") || { printf 'missing\n'; return 0; }
+    # Unquoted on purpose: $rest carries the command's arguments.
+    # shellcheck disable=SC2086
+    "$path" $rest >/dev/null 2>&1 || rc=$?
+    case $rc in
+        0) printf 'ok\n' ;;
+        2) printf 'unknown\n' ;;
+        *) printf 'failed\n' ;;
+    esac
 }
 
 # --- tier -------------------------------------------------------------------
@@ -310,7 +356,20 @@ cmd_status() {
 
         outstanding=1; rc=1
         say "  v$v  $title"
-        [ "$need_node" = 1 ]  && say "      node:  console work outstanding"
+        if [ "$need_node" = 1 ]; then
+            # The record lives in the guest, so a rollback takes it while the
+            # console work it described stays on the node. Without this, every
+            # rebuilt runner reports console work outstanding that is in fact
+            # done, and an operator who believes it goes and does it again.
+            if [ "$VERIFY" = 1 ] && [ "$(verify_node "$v")" = ok ]; then
+                say "      node:  NOT RECORDED, but its check passes - the work"
+                say "             looks done. A rollback takes the record and"
+                say "             leaves the rules, which is what this is."
+                say "             Re-record with: $PROG mark-node $v"
+            else
+                say "      node:  console work outstanding"
+            fi
+        fi
         [ "$need_guest" = 1 ] && { say "      guest: rollback-sensitive, see the sequence below"; guest_work=1; }
         say "      $PROG show $v"
         say ""
@@ -347,11 +406,19 @@ cmd_status() {
         for v in $(known_versions); do
             [ "$v" -le "$node" ] || continue
             case "$(verify_node "$v")" in
-                ok)      any=1; say "  v$v  in force" ;;
+                ok)      any=1; say "  v$v  in force"
+                         # A record made when the check could not run says
+                         # UNVERIFIED forever, even once it can. Say so rather
+                         # than leaving the two halves of this page disagreeing.
+                         [ "$v" = "$node" ] && [ "$(state_get node_verified 2>/dev/null || echo no)" = no ] \
+                             && say "      recorded as unverified, but it verifies now - re-run: $PROG mark-node $v" ;;
                 failed)  any=1; rc=1
                          say "  v$v  FAILED. The check for this upgrade does not pass, so its"
                          say "      console work is not in force whatever the state file says."
                          say "      $PROG show $v" ;;
+                unknown) any=1
+                         say "  v$v  could not tell. $(note_field "$(note_for "$v")" verify-node) ran and"
+                         say "      could not determine the answer, which is not a failure." ;;
                 missing) any=1
                          say "  v$v  could not check - $(note_field "$(note_for "$v")" verify-node) is not installed here." ;;
             esac
@@ -410,6 +477,12 @@ cmd_mark_node() {
             say "$PROG: cannot check - $(note_field "$note" verify-node) is not installed here."
             say "  Recording as unverified rather than refusing, because a missing"
             say "  program is not evidence about your firewall." ;;
+        unknown)
+            say "$PROG: $(note_field "$note" verify-node) could not tell."
+            say "  It ran and reported that it could not determine the answer -"
+            say "  which is not the same as reporting that the work is missing."
+            say "  Recording as unverified. Run it yourself to see what it needs:"
+            say "    $(note_field "$note" verify-node)" ;;
         none) say "$PROG: v$v declares no check, so this is your word for it." ;;
     esac
 
