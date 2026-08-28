@@ -1,78 +1,51 @@
 # Provisioning a runner VM on Proxmox
 
-The node-side half: the VM itself, the firewall applied to it, and its
-snapshots. Everything here is done in the Proxmox web console or on the node.
+The node-side half: the VM, the firewall applied to it, and its snapshots. The
+in-VM half is [docs/building-a-runner.md](../docs/building-a-runner.md), the
+same on any hypervisor.
 
-What happens *inside* the VM is
-[docs/building-a-runner.md](../docs/building-a-runner.md), which is the same on
-any hypervisor. The two pages interleave rather than running one after the
-other; [the order](#what-order-to-do-this-in) below is the sequence that
-works.
+## The whole job
 
-That is deliberate. A script that runs `qm create` and writes into
-`/etc/pve/firewall/` is exactly the kind of artifact people paste into a root
-shell without reading, and the blast radius is the whole node — including
-every VM on it that has nothing to do with CI. The steps below are short
-enough to follow and specific enough to check, and you can see what you are
-doing while you do it.
+Four steps, and the two pages interleave — follow this order rather than either
+page top to bottom.
 
-The in-VM half **is** a script: [`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap).
-Running that blind costs you a VM built to be lost.
+| | Do this | Where | Roughly |
+| --- | --- | --- | --- |
+| 1 | Turn the datacenter firewall on | §1 below | one setting |
+| 2 | Create the VM | §2 below | one form |
+| 3 | Install Debian | [guest §1](../docs/building-a-runner.md#1-install-debian) | the usual |
+| 4 | **Build the rules, apply them, verify** | §3 below | **the substance of this page** |
+| 5 | Finish the guest setup | [guest §2 onward](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp) | it sends you back to §4 twice, once per snapshot |
 
-One step here is not console work, because it cannot be: Proxmox schedules
-backups but not rollbacks, so the cadence in §4 is a three-command cron entry.
-It is printed in full and each part of it explained, which is the standard the
-rest of this page is held to as well.
+**Everything except step 4 is short.** Step 4 is ten firewall rules entered into
+a form, three policy settings, and two verification passes. If you have done it
+before, [the rule table](#build-the-group-once) is the whole of it.
 
----
+**Two VMs if you are following
+[the tiering](../README.md#two-tiers-and-you-must-pick-one)** — one privileged,
+one for the confined runners. Every step here is identical for both; the tiers
+differ only in a flag, and that flag is in the guest runbook.
+
+**The rules go on after the OS is installed, not before.** The Debian installer
+takes its address by DHCP whatever you pin it to afterwards, and a lease needs a
+reply back in. Apply the group first, without the DHCP pair from §3, and the
+installer has no network at all — which presents as a broken mirror or a dead
+link rather than as a firewall you switched on ten minutes earlier. Ticking the
+Firewall checkbox in §2 is safe on its own.
 
 ## What you are building
 
-A machine to hand to an attacker.
+**A machine to hand to an attacker.**
 
 The privileged runner gives job containers the Docker socket, which is
-root-equivalent on their host. So the working assumption is not *if* but
-*when*: a compromised job has root on this VM. Everything below follows from
-taking that seriously rather than hoping.
-
-Two VMs if you are following [the
-tiering](../README.md#two-tiers-and-you-must-pick-one): one for the privileged
-runner, one for the confined ones. Every step on this page is the same for
-both - the tiers differ only in a flag, and that flag is in
-[docs/building-a-runner.md](../docs/building-a-runner.md).
+root-equivalent on their host. So the working assumption is not *if* but *when*:
+a compromised job has root on this VM.
 
 **The firewall goes on the node, not in the guest.** Root in the VM can flush
 any rule set it can see. It cannot reach one applied to its own tap device.
 Everything `dejima-ci-bootstrap` installs inside the VM is defence in depth —
-real against a job that has not escaped its container, worth nothing against
-one that has.
-
----
-
-## What order to do this in
-
-Doing this page straight through does not work, and the reason is worth knowing
-before you hit it: §3 finishes by testing the firewall *from inside the VM*, and
-there is nothing to test from until an operating system is running on it.
-
-1. **§1 and §2 here.** Datacenter firewall on, VM created.
-2. **[Install the OS](../docs/building-a-runner.md#1-install-debian)**, then
-   come back. That is the guest runbook's §1, and it is all you need from it
-   before returning.
-3. **§3 here.** Build the rules, apply them, and run both halves of the
-   verification - the node-side one and the from-inside one.
-4. **[The rest of the guest runbook](../docs/building-a-runner.md#2-addressing-leave-it-on-dhcp)**,
-   from its §2 onward. It sends you back to §4 here twice, once for each
-   snapshot.
-
-**The rules go on after the OS is installed, not before.** The Debian installer
-takes its address by DHCP whatever you pin it to afterwards, and a lease needs
-a reply back in. Apply the group first without the DHCP pair from §3 and the
-installer has no network at all, which presents as a broken mirror or a dead
-link rather than as a firewall you switched on ten minutes earlier.
-
-Ticking the Firewall checkbox in §2 is safe on its own. The group and the
-policies in §3 are what start dropping things.
+real against a job that has not escaped its container, worth nothing against one
+that has.
 
 ---
 
@@ -220,37 +193,25 @@ someone installs one is not a day anyone revisits the firewall.
 
 #### Rule 10, and why IPv6 is dropped whole
 
-Rules 5 to 9 work because the protected set is enumerable. RFC 1918 named three
-ranges, your LAN is inside them, and the list is short enough to read.
+**IPv6 has no RFC 1918**, so there is no list of private ranges to mirror — the
+family goes whole instead. Worth having even on a network that routes no IPv6,
+because every Linux host answers on `fe80::` regardless. The argument is in
+[the threat model](../docs/threat-model.md#the-lan-boundary-is-two-boundaries)
+and again above `OUT DROP -dest ::/0` in
+[firewall.fw.template](firewall.fw.template).
 
-**IPv6 has no RFC 1918.** A v6 network is numbered out of a globally routable
-prefix delegated by your ISP, so there is no equivalent list to write down.
-Dropping `fc00::/7` catches unique-local addresses most networks do not use and
-misses the prefix your actual neighbour is on. Since the set cannot be
-enumerated, the family goes.
+**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Its
+rules cover a confined job leaving its bridge. They are not in front of the VM's
+own traffic, and on the privileged tier not in front of the jobs either, since
+those run in the host's network namespace. Rule 10 covers root on the VM — the
+privileged tier's ordinary case, not its worst one.
 
-This is worth having even if you are certain your network has no IPv6. Every
-Linux host brings up an `fe80::` address on every interface whether or not
-anything routes v6, and a daemon bound to `::` answers on it. Without rule 10,
-rules 5 to 9 can all be in force and the machine beside this one is still one
-`ssh fe80::...%eth0` away. That path does not appear in `ip -4 route`, does not
-involve your router, and is invisible to anyone checking the v4 rules are right.
+**Do it here, not with `disable_ipv6` in the guest**, which is a setting root on
+a machine this page tells you to treat as already lost can put back.
 
-**`dejima-ci-firewall` blocks IPv6 too, one layer in, and it is not this.** Those
-rules cover a confined job reaching off its bridge. They are not in front of the VM's
-own traffic, and on the privileged tier they are not in front of the jobs
-either, since those run in the host's network namespace. Rule 10 is the one that
-covers root on the VM — which on the privileged tier is the ordinary case rather
-than the worst one.
+**If the console rejects `::/0`**, enter four rules in rule 10's position
+instead: `fe80::/10`, `fc00::/7`, `ff00::/8`, `2000::/3`.
 
-**Do not do this in the guest instead.** `net.ipv6.conf.all.disable_ipv6=1` looks
-equivalent and is not: it is a setting on a machine this page tells you to treat
-as already lost, and root sets it back. The rule belongs on the node for the
-same reason every other rule here does.
-
-If the console rejects `::/0`, the same coverage is four rules — `fe80::/10`,
-`fc00::/7`, `ff00::/8`, `2000::/3` — placed together in rule 10's position.
-Prefer the single line: four entries are four chances to enter three.
 
 #### Two more, if the VM gets its address by DHCP
 
@@ -302,22 +263,11 @@ of it, so each VM still needs its own:
 | Input Policy | `DROP` |
 | Output Policy | `ACCEPT` |
 
-Inbound denies by default — this VM offers no service anyone should reach, so
-the exceptions are short and knowable. Outbound accepts by default, and the LAN
-is denied explicitly by the group.
-
-That asymmetry is deliberate, and it is worth resisting the obvious-looking
-alternative: deny outbound too, then allow tcp/80, tcp/443 and udp/123. That
-breaks things — apt during a first install, and anything else needing a port
-nobody listed — and each breakage presents as a network fault rather than as a
-firewall rule. It also buys almost nothing: this VM is assumed to be owned by
-an attacker with root, and the guarantee being made is *reaches the internet,
-not your network*, not *reaches only three ports*. Anyone who owns the box
-tunnels over 443 like everybody else.
-
-Deny-by-default earns its keep where the protected set is enumerable, which is
-the LAN. The internet is not, and treating it as though it were gets you a rule
-set that looks strict and only gets in the way.
+Inbound denies by default; outbound accepts by default and the LAN is denied
+explicitly by the group. That asymmetry is deliberate: deny-by-default earns its
+keep where the protected set is enumerable, which the LAN is and the internet is
+not. The argument against inverting it is above `policy_out` in
+[firewall.fw.template](firewall.fw.template).
 
 Then **VM → Firewall → Add → Security Group**, and select
 `dejima-ci-hardener`. That single entry is the whole rule set, in the order the
@@ -353,7 +303,7 @@ Rules 2–4 are the entire remaining LAN exposure, and they are why "no LAN
 access" is not literally true. Both destinations are pinned to one host and
 one port.
 
-Nothing follows rule 8. The public internet is reached by the default policy.
+Nothing follows rule 10. The public internet is reached by the default policy.
 
 ### Values that must agree
 
@@ -381,9 +331,14 @@ silence. `install.sh` derives both from one answer for that reason.
 
 ### Check it, rather than assuming it
 
-On the node, with the VM **running** — Proxmox builds these chains around the
-VM's tap device, so a stopped VM has none and their absence would tell you
-nothing:
+**Two passes.** The first reads configuration, the second tests behaviour, and
+only the second is proof: a rule that is loaded and a rule that does what you
+meant are different claims.
+
+#### Pass one, on the node, with the VM running
+
+Proxmox builds these chains around the tap device, so a stopped VM has none and
+their absence would tell you nothing.
 
 ```sh
 # what is actually loaded right now
@@ -396,19 +351,15 @@ sudo ip6tables -S | grep "tap<vmid>i0"
 sudo pve-firewall compile | grep -B2 -A20 "tap<vmid>i0"
 ```
 
-**Run both, not just the first.** A rule with an IPv6 destination is compiled
-into `ip6tables` and is absent from `iptables -S` — so checking only the v4
-table shows rule 10 missing whether it is there or not, and shows it identically
-either way.
+**Both tables, not just the first.** An IPv6 rule compiles into `ip6tables` and
+is absent from `iptables -S`, which shows rule 10 missing whether it is there or
+not.
 
-**What you are looking for.** Proxmox names the per-VM chains after the tap
-interface — `tap<vmid>i0-IN` and `tap<vmid>i0-OUT` for the first NIC — and
-your rules appear inside them, in the order you added them. In the v4 `-OUT`
-chain that means the three pinhole ACCEPTs first, then the five LAN DROPs, then
-whatever Proxmox appends for the policy. The v6 `-OUT` chain holds rule 10 and
-none of the pinholes, because every one of them names an IPv4 address.
-
-**What each failure looks like.**
+**What you are looking for.** Chains named `tap<vmid>i0-IN` and `-OUT`, holding
+your rules in the order you added them. The v4 `-OUT` chain has the three
+pinhole ACCEPTs, then the five LAN DROPs, then whatever Proxmox appends for the
+policy. The v6 `-OUT` chain has rule 10 and no pinholes, since every pinhole
+names an IPv4 address.
 
 | What you see | What it means |
 | --- | --- |
@@ -418,21 +369,16 @@ none of the pinholes, because every one of them names an IPv4 address.
 | Rules present and correct, DNS still failing | The address in rules 3–4 is not the VM's nameserver. The gateway is the usual wrong answer — see "Values that must agree" |
 | v4 chain right, `ip6tables -S` empty | Rule 10 was not entered, or the console rejected `::/0` and the error was missed. Nothing about the v4 half will look wrong |
 
-`pve-firewall status` is the quicker sanity check of whether the service is
-running and enabled at all, but it says nothing about *these* rules — it is
-the datacenter switch it reports on, not your ten lines.
+`pve-firewall status` reports the datacenter switch, not these rules.
 
-**Both commands describe configuration.** They are worth reading, and they are
-not proof: a rule that is loaded and a rule that does what you meant are
-different claims. The checks from inside the VM below are the ones that test
-behaviour, which is why they follow rather than replace this.
+#### Pass two, from inside the VM
 
-and from inside the VM, once it is up. Three of these must fail and two must
-succeed, which is what makes the set diagnostic rather than reassuring:
+Three must fail and two must succeed. That is what makes the set diagnostic
+rather than reassuring.
 
-Only the last one needs anything installed. `bash` can open a TCP connection on
-its own and `getent` is part of libc, which matters on a machine you have not
-finished setting up yet; `ping` is `iputils-ping`, which Debian has by default.
+Nothing needs installing: `bash` opens TCP connections itself, `getent` is part
+of libc, and `ping` ships with Debian — which matters on a machine you have not
+finished setting up yet.
 
 ```sh
 try() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null \
@@ -450,16 +396,9 @@ getent hosts deb.debian.org && echo "  resolved" || echo "  DNS FAILED"
 sudo ping -6 -n -c 2 -W 1 -I "$dev" ff02::1
 ```
 
-**The last one asks the whole LAN who is there, over IPv6.** `ff02::1` is the
-all-nodes link-local multicast address and every IPv6 host answers it — and
-every Linux host is an IPv6 host, because the `fe80::` address exists whether or
-not the network routes v6. Replies from an address that is not this VM's own
-mean rule 10 is not in force and the segment is reachable over a family none of
-the checks above it touch.
-
-Like the gateway probe, it writes down no target: `ff02::1` is the same address
-on every network there has ever been, so naming it describes nothing about
-yours.
+**The last one asks the whole LAN who is there, over IPv6.** Any reply from an
+address that is not this VM's own means rule 10 is not in force, and that the
+segment is reachable over a family none of the checks above it touch.
 
 **This one is a by-hand check and stays one.** Everything else this repository
 verifies, it verifies from inside a job, in `test/ci-runner.bats` — and a job is
@@ -469,14 +408,11 @@ ever gets to the tap. The sister project checks the equivalent automatically
 because it has an in-VM audit to hang it on; this one does not, so run it when
 you build the group and after any change to it.
 
-**The first probe targets your gateway, and not some other host on your LAN.**
-Naming another host would mean writing down something worth attacking on a
-machine this page tells you to treat as already lost. The gateway avoids that
-and is the better probe besides: its address is already in the routing table,
-so it reveals nothing; it is guaranteed to be alive, which an arbitrary host is
-not; and it sits inside the ranges the DROP rules cover, so with the rules
-applied it must be unreachable *as a destination* while traffic *through* it to
-the internet is untouched.
+**Both targets are chosen so that naming them writes nothing down.** The
+gateway is already in the routing table and `ff02::1` is the same on every
+network there has ever been, so neither describes your topology to anyone
+reading a machine this page tells you to treat as already lost. Both are also
+guaranteed to answer when they are reachable, which an arbitrary host is not.
 
 Read them together, because the pattern says which thing is wrong:
 
@@ -639,3 +575,20 @@ reverts too, and `dejima-ci-allowlist.timer` pulls it current again on its own.
 
 Whatever else reverts is cheap: Docker images have to be pulled again, so the
 first job after a rollback is slower than the rest.
+
+
+## Why there is no script for this page
+
+A script that runs `qm create` and writes into `/etc/pve/firewall/` is exactly
+the kind of artifact people paste into a root shell without reading, and the
+blast radius is the whole node — including every VM on it that has nothing to do
+with CI. The steps above are short enough to follow and specific enough to
+check, and you can see what you are doing while you do it.
+
+The in-VM half **is** a script:
+[`bin/dejima-ci-bootstrap`](../bin/dejima-ci-bootstrap). Running that blind
+costs you a VM built to be lost, which is the difference.
+
+One step here is not console work, because it cannot be: Proxmox schedules
+backups but not rollbacks, so the cadence in §4 is a three-command cron entry,
+printed in full and explained part by part.

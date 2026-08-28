@@ -19,6 +19,7 @@ CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
 DNSMASQ_DIR=${DNSMASQ_DIR:-/etc/dnsmasq.d}
 TEMPLATE_DIR=${TEMPLATE_DIR:-/usr/local/share/dejima-ci/templates}
+SHARE_DIR=${SHARE_DIR:-/usr/local/share/dejima-ci}
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG="$CONF_DIR/config"
@@ -674,7 +675,8 @@ out = $out
 ref = $ref
 reload = $reload"
 
-for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip; do
+for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip \
+            dejima-ci-upgrade; do
     if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
         say "  unchanged  $BIN_DIR/$prog"
     else
@@ -700,6 +702,45 @@ else
     say "  skipped    $TEMPLATE_DIR (not writable) - dejima-ci-runners will read"
     say "             them from this checkout instead"
 fi
+
+# The upgrade notes, so an operator on a runner with no checkout can still read
+# what an upgrade asks of them. The installed copy knows only the versions that
+# existed when it ran, and dejima-ci-upgrade says so rather than reporting "up
+# to date" about versions it has never heard of.
+if writable "$SHARE_DIR/upgrades"; then
+    for note in "$SRC"/upgrades/*.md; do
+        [ -f "$note" ] || continue
+        if cmp -s "$note" "$SHARE_DIR/upgrades/${note##*/}" 2>/dev/null; then
+            say "  unchanged  $SHARE_DIR/upgrades/${note##*/}"
+        else
+            install -m 0644 "$note" "$SHARE_DIR/upgrades/${note##*/}"
+            say "  installed  $SHARE_DIR/upgrades/${note##*/}"
+        fi
+    done
+fi
+
+# What this host is now at, guest-side, and which tier it is.
+#
+# Both are recorded rather than asked or detected. The version comes from the
+# checkout's VERSION, so it records something this program just did. The tier is
+# 'confined' by construction: install.sh does not run on a privileged host, and
+# the whole point of that tier is that nothing here is installed there.
+#
+# THIS FILE IS INSIDE THE SNAPSHOT. On a runner that is correct rather than
+# unfortunate - forget to re-snapshot after a guest-side upgrade and the marker
+# rolls back alongside the change it was recording, so dejima-ci-upgrade goes
+# back to reporting the upgrade as outstanding. It fails towards saying there is
+# work to do.
+version=$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null || true)
+[ -n "$version" ] || die "no version in $SRC/VERSION - refusing to record an empty one"
+{
+    [ -r "$CONF_DIR/state" ] && grep -vE '^(guest_version|tier)=' "$CONF_DIR/state" || true
+    printf 'guest_version=%s\ntier=confined\n' "$version"
+} > "$CONF_DIR/state.new"
+sort -o "$CONF_DIR/state.new" "$CONF_DIR/state.new"
+chmod 0640 "$CONF_DIR/state.new"
+mv "$CONF_DIR/state.new" "$CONF_DIR/state"
+say "  recorded   $CONF_DIR/state (guest_version=$version, tier=confined)"
 
 # The resolver's static half. Its generated half - the server= lines - is
 # written by dejima-ci-allowlist from origin/main, into a separate file in the

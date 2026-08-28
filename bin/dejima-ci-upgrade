@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Brad Anderson
+#
+# What this runner is missing, and what to do about it.
+#
+# dejima needs nothing like this: its containers are short-lived, only the tip
+# of main is supported, and `git pull` closes any gap that opens. A runner VM
+# is long-lived, pinned to the moment it was built, with half its controls
+# entered by hand in a hypervisor console that no pull can reach.
+#
+# AND IT HAS A SECOND WAY TO GO BACKWARDS THAT THE SISTER PROJECT DOES NOT:
+# the scheduled rollback. A guest-side change applied to a running runner and
+# not baked into the snapshot is undone at the next rebuild, on a timer, with
+# nothing to see. That is the failure this tool exists to keep in front of an
+# operator, and it is why a guest-layer upgrade here prints a sequence rather
+# than a command.
+#
+# TWO VERSIONS ARE TRACKED, NOT ONE:
+#
+#   guest_version  written by install.sh, on the confined tier, when it runs.
+#                  The privileged tier has no install.sh and no guest-side
+#                  install at all, so there it stays unset and means it.
+#   node_version   written by `mark-node`, by an operator saying they did the
+#                  console work. Nothing in the guest can read the
+#                  hypervisor's rules - that is what makes them the boundary -
+#                  so it is an assertion and is treated as one.
+#
+# The state file lives in the guest, so it is inside the snapshot and rolls
+# back with it. That is correct rather than unfortunate: forget to re-snapshot
+# and the version marker reverts alongside the change it was recording, so
+# this tool goes back to reporting the upgrade as outstanding. The system
+# fails towards saying there is work to do.
+
+set -euo pipefail
+
+PROG=${0##*/}
+CONF_DIR=${CONF_DIR:-/etc/dejima-ci}
+STATE="$CONF_DIR/state"
+SHARE_DIR=${SHARE_DIR:-/usr/local/share/dejima-ci}
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-3}
+
+say() { printf '%s\n' "$*" >&2; }
+
+# Where the upgrade notes are, and which kind of copy they are.
+#
+# A checkout is authoritative about what versions exist; an installed copy is
+# not, because it shipped with the notes that existed when it was installed.
+# An installed v1 tool would otherwise report "up to date" with total
+# confidence, having never heard of v2.
+UPGRADE_DIR=""
+UPGRADE_SRC=""
+find_upgrades() {
+    local self_dir
+    self_dir=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+    if [ -d "$self_dir/../upgrades" ]; then
+        UPGRADE_DIR=$(cd "$self_dir/../upgrades" && pwd); UPGRADE_SRC=checkout; return 0
+    fi
+    if [ -d "$SHARE_DIR/upgrades" ]; then
+        UPGRADE_DIR="$SHARE_DIR/upgrades"; UPGRADE_SRC=installed; return 0
+    fi
+    return 1
+}
+
+note_for() {  # note_for VERSION
+    local f
+    # shellcheck disable=SC2086
+    f=$(ls $(printf '%s/%04d-*.md' "$UPGRADE_DIR" "$1") 2>/dev/null | head -1) || true
+    [ -n "$f" ] || return 1
+    printf '%s\n' "$f"
+}
+
+# Read only between the first two --- lines, so a line in the prose that
+# happens to look like a key cannot change what the tool does.
+note_field() {  # note_field FILE KEY
+    sed -n '/^---$/,/^---$/p' "$1" | sed -n "s/^$2: //p" | head -1
+}
+
+known_versions() {
+    # shellcheck disable=SC2012
+    ls "$UPGRADE_DIR" 2>/dev/null | sed -n 's/^0*\([0-9][0-9]*\)-.*\.md$/\1/p' | sort -n
+}
+newest_version() { known_versions | tail -1; }
+
+# --- state ------------------------------------------------------------------
+
+state_get() {  # state_get KEY
+    local v=""
+    [ -r "$STATE" ] && v=$(sed -n "s/^$1=//p" "$STATE" | tail -1)
+    [ -n "$v" ] || return 1
+    printf '%s\n' "$v"
+}
+
+state_set() {  # state_set KEY VALUE
+    local tmp="$STATE.new"
+    [ -d "$CONF_DIR" ] || install -m 0755 -d "$CONF_DIR"
+    umask 027
+    { [ -r "$STATE" ] && grep -v "^$1=" "$STATE" || true; } > "$tmp"
+    printf '%s=%s\n' "$1" "$2" >> "$tmp"
+    sort -o "$tmp" "$tmp"
+    chmod 0640 "$tmp"
+    mv "$tmp" "$STATE"
+}
+
+# --- the LAN check ----------------------------------------------------------
+#
+# A narrow behavioural test of one node rule, not an audit. This repository has
+# nothing that runs inside the VM - test/ci-runner.bats runs inside a job,
+# which is the wrong vantage point, because a confined job's traffic is stopped
+# by dejima-ci-firewall long before it reaches the tap.
+#
+# It exists so that `mark-node` has something to contradict a wrong assertion
+# with. Without it, every node-side claim here would be taken on trust, which
+# is a weaker thing than the sister project offers for the same rule.
+
+lan_iface() {
+    local dev
+    dev=$(ip -4 route show default 2>/dev/null \
+          | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+    [ -n "$dev" ] || return 1
+    printf '%s\n' "$dev"
+}
+
+# Reply addresses in ping's output that are not ours, counted. Split out from
+# the probe so the decision can be tested without a fake ping on PATH.
+replies_from_others() {  # replies_from_others PING_OUTPUT OWN_ADDRS
+    printf '%s\n' "$1" \
+        | sed -n 's/.*bytes from \([0-9a-fA-F:]\{2,\}\).*/\1/p' \
+        | sort -u \
+        | grep -vxF "${2:-::}" \
+        | grep -c . || true
+}
+
+# Non-zero when the question could not be asked at all, which the caller turns
+# into an "unknown" rather than a pass. Nobody answered because nobody was
+# asked, and the two are not the same reading.
+neighbour_replies() {
+    local iface out own
+    iface=$(lan_iface) || return 1
+    command -v ping >/dev/null 2>&1 || return 1
+    out=$(timeout "$PROBE_TIMEOUT" ping -6 -n -c 2 -W 1 -I "$iface" ff02::1 2>/dev/null || true)
+    own=$(ip -6 -o addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+    replies_from_others "$out" "$own"
+}
+
+# A global or unique-local address is evidence on its own: it arrived by SLAAC
+# or DHCPv6, so an advertisement reached this guest and a reply left it.
+# Link-local is excluded because the kernel brings one up regardless.
+routable_v6_addr() { ip -6 -o addr show scope global 2>/dev/null | awk '{print $4; exit}'; }
+
+cmd_check_lan() {
+    local addr replies
+    addr=$(routable_v6_addr)
+    if [ -n "$addr" ]; then
+        say "FAIL: a routable IPv6 address is configured here ($addr)."
+        say "  Router advertisements are reaching this guest and its replies are"
+        say "  leaving, so IPv6 is not being dropped at the node."
+        return 1
+    fi
+    if ! replies=$(neighbour_replies); then
+        say "UNKNOWN: could not ask. No ping installed, or no interface to ask on."
+        say "  Not a pass. Install iputils-ping and run again."
+        return 2
+    fi
+    if [ "${replies:-0}" -gt 0 ]; then
+        say "FAIL: $replies host(s) on this segment answered over IPv6."
+        say "  The node's DROPs name IPv4 ranges and match none of that traffic."
+        say "  See proxmox/README.md section 3, rule 10."
+        return 1
+    fi
+    say "PASS: nothing on the LAN answers this VM over IPv6."
+    return 0
+}
+
+# --- verification -----------------------------------------------------------
+
+verify_node() {  # verify_node VERSION -> ok | failed | none | missing
+    local note cmd
+    note=$(note_for "$1") || { printf 'none\n'; return 0; }
+    cmd=$(note_field "$note" verify-node)
+    [ -n "$cmd" ] || { printf 'none\n'; return 0; }
+    command -v "${cmd%% *}" >/dev/null 2>&1 || { printf 'missing\n'; return 0; }
+    if $cmd >/dev/null 2>&1; then printf 'ok\n'; else printf 'failed\n'; fi
+}
+
+# --- tier -------------------------------------------------------------------
+#
+# Asked once and recorded, never detected. The absence of /etc/dejima-ci/config
+# would identify a privileged host correctly today and would also identify a
+# confined host whose install.sh has not run yet, and guessing wrong here
+# selects a different set of upgrades - which is the failure test/ci-runner.bats
+# takes DEJIMA_CI_TIER rather than sniffing for, on the same grounds.
+require_tier() {
+    local t
+    if t=$(state_get tier); then printf '%s\n' "$t"; return 0; fi
+    say "$PROG: no tier recorded in $STATE."
+    say ""
+    say "  Upgrades differ by tier, and this is not detected. An absent"
+    say "  $CONF_DIR/config identifies a privileged host correctly and also"
+    say "  identifies a confined one whose install.sh has not run, and guessing"
+    say "  wrong selects a different set of upgrades."
+    say ""
+    say "  Record it once, with the same word dejima-ci-runners --role takes:"
+    say "    $PROG set-tier confined"
+    say "    $PROG set-tier privileged"
+    return 2
+}
+
+cmd_set_tier() {
+    local t=${1:?usage: $PROG set-tier confined|privileged}
+    case $t in
+        confined|privileged) ;;
+        *) say "$PROG: tier must be 'confined' or 'privileged', not '$t'"; return 64 ;;
+    esac
+    state_set tier "$t"
+    say "Recorded: tier=$t in $STATE"
+}
+
+# --- status -----------------------------------------------------------------
+
+VERIFY=1
+
+cmd_status() {
+    local guest node newest tier v note rc=0 outstanding=0 guest_work=0
+
+    find_upgrades || {
+        say "$PROG: no upgrade notes found."
+        say "  Looked beside this program and in $SHARE_DIR/upgrades."
+        say "  Run this from a checkout of the repository."
+        return 2
+    }
+    newest=$(newest_version)
+    tier=$(require_tier) || return $?
+
+    say "== Version =="
+    say ""
+    say "  tier    $tier"
+
+    if [ ! -r "$STATE" ] || { ! state_get guest_version >/dev/null 2>&1 && ! state_get node_version >/dev/null 2>&1; }; then
+        say ""
+        say "  Nothing else recorded, so this host predates version tracking."
+        say "  It is NOT assumed to be v1: an untracked host and a host whose"
+        say "  state file went missing are the same thing from in here."
+        say ""
+        say "  Read upgrades/0001-baseline.md."
+        say "  Newest version known to this copy: v$newest"
+        return 1
+    fi
+
+    guest=$(state_get guest_version) || guest=""
+    node=$(state_get node_version) || node=""
+
+    if [ "$tier" = privileged ]; then
+        # Not a gap. This tier installs nothing in the guest by design, which is
+        # the grant it exists for, so an unset guest_version is the correct
+        # reading rather than a missing one.
+        say "  guest   n/a   this tier runs no install.sh"
+    else
+        say "  guest   ${guest:+v}${guest:-unrecorded}"
+    fi
+    if [ -n "$node" ]; then
+        say "  node    v$node   asserted $(state_get node_asserted || echo 'date unknown')$(
+            [ "$(state_get node_verified 2>/dev/null || echo no)" = no ] && printf ', UNVERIFIED' || true)"
+    else
+        say "  node    unrecorded"
+    fi
+    say ""
+    say "  notes   $UPGRADE_DIR ($UPGRADE_SRC, newest v$newest)"
+    if [ "$UPGRADE_SRC" = installed ]; then
+        say ""
+        say "  This is the installed copy, so it knows only the upgrades that"
+        say "  existed when it was installed. Pull the repository and run it from"
+        say "  there for an answer that means anything."
+    fi
+
+    # On this tier the guest half is inside the snapshot, so a guest behind its
+    # node is the ordinary result of a rollback that outran an upgrade.
+    if [ "$tier" = confined ] && [ -n "$guest" ] && [ -n "$node" ] && [ "$guest" -lt "$node" ]; then
+        say ""
+        say "== The guest is behind the node =="
+        say ""
+        say "  guest v$guest, node v$node. The hypervisor's rules are newer than"
+        say "  what is installed here. On a runner that usually means a guest"
+        say "  upgrade was applied but never baked into the snapshot, and the"
+        say "  scheduled rollback has since undone it."
+        say "  Re-apply it, and this time re-snapshot. See docs/upgrading.md."
+        rc=1
+    fi
+
+    say ""
+    say "== Outstanding =="
+    say ""
+    for v in $(known_versions); do
+        note=$(note_for "$v") || continue
+        local tiers layers title need_guest=0 need_node=0
+        tiers=$(note_field "$note" tiers)
+        case "${tiers:-all}" in
+            all) ;;
+            *"$tier"*) ;;
+            *) continue ;;
+        esac
+        layers=$(note_field "$note" layers)
+        title=$(note_field "$note" title)
+        case " $layers " in *" guest "*) need_guest=1 ;; esac
+        case " $layers " in *" node "*) need_node=1 ;; esac
+        [ "$tier" = privileged ] && need_guest=0
+        [ -n "$guest" ] && [ "$v" -le "$guest" ] && need_guest=0
+        [ -n "$node" ] && [ "$v" -le "$node" ] && need_node=0
+        [ "$need_guest" = 0 ] && [ "$need_node" = 0 ] && continue
+
+        outstanding=1; rc=1
+        say "  v$v  $title"
+        [ "$need_node" = 1 ]  && say "      node:  console work outstanding"
+        [ "$need_guest" = 1 ] && { say "      guest: rollback-sensitive, see the sequence below"; guest_work=1; }
+        say "      $PROG show $v"
+        say ""
+    done
+    [ "$outstanding" = 0 ] && { say "  Nothing. Everything this copy knows about is applied."; say ""; }
+
+    # The thing this tool exists to keep in front of an operator.
+    if [ "$guest_work" = 1 ]; then
+        say "== A guest-side upgrade on a runner is not one step =="
+        say ""
+        say "  The scheduled rollback rebuilds this VM from a snapshot. Apply a"
+        say "  guest change to the running machine and it is undone at the next"
+        say "  rebuild, on a timer, with nothing to see."
+        say ""
+        say "  1. Do the node work first. It lives on the hypervisor and no"
+        say "     rollback touches it."
+        say "  2. Stop the runner and let running jobs drain."
+        say "  3. ROLL BACK to the clean snapshot first, so you upgrade from a"
+        say "     known base rather than baking in whatever a job left behind."
+        say "  4. Apply the guest change."
+        say "  5. Verify."
+        say "  6. Take a NEW snapshot."
+        say "  7. Repoint the rollback job at the new snapshot, and confirm it."
+        say "     Skip this and step 6 was decoration."
+        say ""
+        say "  docs/upgrading.md has this with the commands."
+        say ""
+    fi
+
+    if [ "$VERIFY" = 1 ] && [ -n "$node" ]; then
+        say "== Node checks =="
+        say ""
+        local any=0
+        for v in $(known_versions); do
+            [ "$v" -le "$node" ] || continue
+            case "$(verify_node "$v")" in
+                ok)      any=1; say "  v$v  in force" ;;
+                failed)  any=1; rc=1
+                         say "  v$v  FAILED. The check for this upgrade does not pass, so its"
+                         say "      console work is not in force whatever the state file says."
+                         say "      $PROG show $v" ;;
+                missing) any=1
+                         say "  v$v  could not check - $(note_field "$(note_for "$v")" verify-node) is not installed here." ;;
+            esac
+        done
+        [ "$any" = 0 ] && say "  None of the recorded upgrades declares a check."
+        say ""
+    fi
+    return $rc
+}
+
+# --- the rest ---------------------------------------------------------------
+
+cmd_show() {
+    local v=${1:?usage: $PROG show VERSION} note
+    find_upgrades || { say "$PROG: no upgrade notes found."; return 2; }
+    note=$(note_for "$v") || {
+        say "$PROG: no upgrade note for v$v."
+        say "  Known here: $(known_versions | tr '\n' ' ')"
+        return 2
+    }
+    cat "$note"
+}
+
+cmd_list() {
+    local v note
+    find_upgrades || { say "$PROG: no upgrade notes found."; return 2; }
+    for v in $(known_versions); do
+        note=$(note_for "$v") || continue
+        printf 'v%-4s %-10s %s\n' "$v" "$(note_field "$note" tiers)" "$(note_field "$note" title)"
+    done
+}
+
+FORCE=0
+
+cmd_mark_node() {
+    local v=${1:?usage: $PROG mark-node VERSION} note result
+    find_upgrades || { say "$PROG: no upgrade notes found."; return 2; }
+    note=$(note_for "$v") || { say "$PROG: no upgrade note for v$v."; return 2; }
+
+    result=$(verify_node "$v")
+    case $result in
+        ok) say "$PROG: verified - $(note_field "$note" verify-node) passes." ;;
+        failed)
+            say "$PROG: refusing to record v$v."
+            say ""
+            say "  $(note_field "$note" verify-node) does not pass, so the console"
+            say "  work is not in force. Recording it would put a claim in $STATE"
+            say "  that the machine already contradicts."
+            say ""
+            say "  If you are sure and the check is wrong, --force records the"
+            say "  assertion and marks it unverified so status keeps saying so."
+            [ "$FORCE" = 1 ] || return 1
+            say ""
+            say "  --force given. Recording it as UNVERIFIED." ;;
+        missing)
+            say "$PROG: cannot check - $(note_field "$note" verify-node) is not installed here."
+            say "  Recording as unverified rather than refusing, because a missing"
+            say "  program is not evidence about your firewall." ;;
+        none) say "$PROG: v$v declares no check, so this is your word for it." ;;
+    esac
+
+    state_set node_version "$v"
+    state_set node_asserted "$(date -u +%F)"
+    state_set node_verified "$([ "$result" = ok ] && echo yes || echo no)"
+    say ""
+    say "Recorded: node_version=$v in $STATE"
+}
+
+usage() {
+    cat >&2 <<EOF
+usage: $PROG [status] [--no-verify]
+       $PROG list
+       $PROG show VERSION
+       $PROG mark-node VERSION [--force]
+       $PROG set-tier confined|privileged
+       $PROG check-lan
+
+  status      what this runner is at, what is outstanding, and whether the
+              node-side work it claims is actually in force
+  check-lan   ask the segment who is reachable over IPv6. A narrow test of one
+              node rule, not an audit - this repository has nothing else that
+              runs inside the VM
+
+Run from a checkout for an answer about the current version. The installed copy
+knows only the upgrades that existed when it was installed.
+EOF
+}
+
+main() {
+    local cmd=status args=()
+    for a in "$@"; do
+        case "$a" in
+            --no-verify) VERIFY=0 ;;
+            --force)     FORCE=1 ;;
+            -h|--help)   usage; return 0 ;;
+            -*)          say "$PROG: unknown option: $a"; usage; return 64 ;;
+            *)           args+=("$a") ;;
+        esac
+    done
+    [ "${#args[@]}" -gt 0 ] && { cmd=${args[0]}; args=("${args[@]:1}"); }
+
+    case "$cmd" in
+        status)    cmd_status ;;
+        list)      cmd_list ;;
+        show)      cmd_show "${args[@]:-}" ;;
+        mark-node) cmd_mark_node "${args[@]:-}" ;;
+        set-tier)  cmd_set_tier "${args[@]:-}" ;;
+        check-lan) cmd_check_lan ;;
+        *)         say "$PROG: unknown command: $cmd"; usage; return 64 ;;
+    esac
+}
+
+# Sourced by test/upgrade.bats, which replaces the functions that touch the
+# outside world. The :- guard matters under set -u.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+    main "$@"
+fi
