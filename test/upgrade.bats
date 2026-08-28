@@ -145,6 +145,62 @@ stub_check() {
     grep -q '^node_verified=no$' "$STATE_DIR/state"
 }
 
+@test "a check that could not tell is recorded, not refused" {
+    # check-lan exits 2 for "could not ask". Collapsing that into "not in force"
+    # told the operator their console work was missing on the strength of a
+    # check that never ran - wrong in the alarming direction, about the one
+    # thing they cannot see for themselves.
+    stub_check 2
+    write_state tier=confined guest_version=2
+    run_tool mark-node 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not tell"* ]]
+    [[ "$output" != *"refusing to record"* ]]
+    grep -q '^node_verified=no$' "$STATE_DIR/state"
+}
+
+@test "a check that says not-in-force is still refused" {
+    # The distinction above must not have swallowed the real failure.
+    stub_check 1
+    write_state tier=confined guest_version=2
+    run_tool mark-node 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing to record"* ]]
+}
+
+@test "an unrecorded upgrade whose check passes is not reported as work to do" {
+    # The record lives in the guest and a rollback takes it, while the console
+    # work it described stays on the node. Without this, every rebuilt runner
+    # says console work is outstanding that is in fact done - and an operator
+    # who believes it goes and does it again.
+    stub_check 0
+    write_state tier=confined guest_version=2
+    run_tool status
+    [[ "$output" == *"NOT RECORDED, but its check passes"* ]]
+    [[ "$output" != *"console work outstanding"* ]]
+}
+
+@test "an unrecorded upgrade whose check fails is reported as work to do" {
+    stub_check 1
+    write_state tier=confined guest_version=2
+    run_tool status
+    [[ "$output" == *"console work outstanding"* ]]
+}
+
+@test "the verify command is found beside the tool when it is not on PATH" {
+    # The reported bug: the notes say to run from a checkout, and a PATH-only
+    # lookup then could not find the program doing the looking.
+    lonely="$BATS_TEST_TMPDIR/checkout"
+    mkdir -p "$lonely/bin"
+    cp "$TOOL" "$lonely/bin/dejima-ci-upgrade"
+    ln -s "$REPO/upgrades" "$lonely/upgrades"
+    write_state tier=confined guest_version=2
+    # An empty PATH for the tool name specifically: nothing named
+    # dejima-ci-upgrade is installed, exactly as on a runner at v1.
+    CONF_DIR="$STATE_DIR" run "$lonely/bin/dejima-ci-upgrade" mark-node 2
+    [[ "$output" != *"is not installed here"* ]]
+}
+
 @test "status contradicts a recorded claim the machine no longer supports" {
     stub_check 1
     write_state tier=confined guest_version=2 node_version=2 node_asserted=2026-06-01 node_verified=yes
@@ -240,17 +296,21 @@ stub_check() {
     done
 }
 
-@test "a note with no guest step does not invoke the tool as if it were installed" {
-    # dejima-ci-upgrade arrives WITH a version. A note whose layers do not
-    # include 'guest' installs nothing, so on the machine being upgraded the
-    # tool is not on $PATH and will not be put there by that note - it has to be
-    # run from a checkout. Telling an operator otherwise gives them a command
-    # that cannot work on the host it was written for.
+@test "a note invoking the tool bare also says how it got onto the box" {
+    # dejima-ci-upgrade arrives WITH a version, so on the machine being upgraded
+    # it is not on $PATH until something installs it. A note that only ever says
+    # `sudo dejima-ci-upgrade ...` hands the operator a command that cannot run
+    # on the host it was written for - which is exactly what v2 did, and what
+    # sent someone to read an error about the tool being unable to find itself.
+    #
+    # Not "never invoke it bare": a note may legitimately show the bare form
+    # after an install.sh step, and v2 now shows both, for the two situations an
+    # operator can be in. What it may not do is show only the bare form with no
+    # account of where the program came from.
     for f in "$REPO"/upgrades/0*.md; do
-        layers=$(sed -n '/^---$/,/^---$/p' "$f" | sed -n 's/^layers: //p')
-        case " $layers " in *" guest "*) continue ;; esac
-        ! grep -qE '^[[:space:]]*(sudo )?dejima-ci-upgrade ' "$f" \
-            || { echo "$f: no guest step installs it, so commands must use ./bin/dejima-ci-upgrade"; false; }
+        grep -qE '^[[:space:]]*(sudo )?dejima-ci-upgrade ' "$f" || continue
+        grep -qE '(\./bin/dejima-ci-upgrade|install\.sh)' "$f" \
+            || { echo "$f: invokes the tool bare and never says how it got there"; false; }
     done
 }
 
