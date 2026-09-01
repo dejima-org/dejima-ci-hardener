@@ -26,7 +26,7 @@ usage() {
     cat >&2 <<EOF
 Usage: $PROG [render|check|show] [--config PATH]
        $PROG repos [list|add|remove] [owner/repo...]
-       $PROG projects [list|assign|unassign] [owner/repo]
+       $PROG pools [list|add|remove] [owner/repo | owner]
 
   render   fetch, validate and install the allowlist, reloading the resolver
            only if it changed (the default; what the timer runs)
@@ -38,9 +38,9 @@ Usage: $PROG [render|check|show] [--config PATH]
   repos    list, add to, or remove from the repositories trusted to widen this
            allowlist. Adding one used to mean re-running install.sh and
            retyping every entry already there
-  projects give a repository a network and firewall set of its own, so its
-           names are reachable from its jobs and not from every project's.
-           Unassigned repositories share one set, as they always have
+  pools    declare the runner pools this host has, by what each is registered
+           to. Each gets a network and a firewall set holding the union of what
+           that pool could be made to run, and nothing else
 
 Reads $CONFIG unless --config or \$DEJIMA_CI_CONFIG says otherwise.
 EOF
@@ -75,7 +75,7 @@ declare -A CFG=(
     [forge_api]=""
     [token_file]="/etc/dejima-ci/forge-token"
     [repos_file]="/etc/dejima-ci/repos"
-    [projects_file]="/etc/dejima-ci/projects"
+    [pools_file]="/etc/dejima-ci/pools"
     [base_file]="/etc/dejima-ci/base-domains"
     [upstream]=""
     [out]="/etc/dnsmasq.d/ci-allow.conf"
@@ -325,36 +325,58 @@ collect() {
         # the failure out for free.
         declared=$(fetch_repo "$repo" "$token") || return 1
         [ -n "$declared" ] || continue
-        if [ -z "$(project_id "$repo")" ]; then
+
+        # No pool can run it, so its names have nowhere to go. Almost always a
+        # repository added to the trusted list and never given a runner, which
+        # is a job that would queue forever rather than a security decision -
+        # but rendering its names into nothing would hide that.
+        sets=$(sets_for_repo "$repo")
+        if [ -z "$sets" ]; then
             printf '%s\n' "$repo" >> "$UNSCOPED"
             continue
         fi
-        printf '%s\n' "$declared" | sed "s|^|$(project_set "$repo")\t|"
+        while IFS= read -r one_set; do
+            [ -n "$one_set" ] || continue
+            printf '%s\n' "$declared" | sed "s|^|$one_set\t|"
+        done <<< "$sets"
     done < "${CFG[repos_file]}"
 }
 
-# --- which set a project's names go in ---------------------------------------
+# --- which runner pools a repository's names have to reach ------------------
 #
-# A repository that declares names needs a set of its own. There is no shared
-# fallback, because a shared set is a set every project can reach, which is the
-# thing this exists to end - and it would be arrived at by doing nothing rather
-# than by choosing it.
+# THE SET BELONGS TO A POOL, not to a project, and it holds the union of every
+# declaration that pool could be made to run. That is the only union that is
+# safe: a pool takes jobs from the repositories it is registered for, so a
+# hostile branch in one of them can already put a job on it. Adding that
+# repository's names to that pool's set gives away nothing the branch did not
+# already have, and leaving out every other repository's is the whole point.
 #
-# So an unassigned declaration refuses the whole render. Nothing is installed on
-# a failure, so the previous allowlist stays in force: the cost of arriving here
-# is a loud error on the timer, not a host that has lost its allowlist.
+# Labels cannot do this. A branch chooses its own runs-on, so a label is a
+# request rather than a boundary. What a runner may take is decided by what it
+# is registered to, which a branch cannot change.
 #
-# A repository declaring nothing needs no assignment, having no names to scope.
-# It needs one the day it declares something, and the refusal is what tells
-# whoever added that declaration.
-project_id() {  # project_id owner/repo -> id, or empty
-    [ -r "${CFG[projects_file]}" ] || return 0
-    sed 's/#.*//' "${CFG[projects_file]}" \
-        | awk -v r="$1" '$1 == r { print $2; exit }'
+# So the scoping an operator gets is the scoping they registered:
+#
+#   a pool registered to one repository   its declaration, and nothing else
+#   a pool registered to an owner         the union across that owner's repos
+#
+# Repository scoping is how a pool gets a minimal set. It is the recommendation
+# rather than the mechanism, and an owner-scoped pool is not a misconfiguration:
+# it is a pool that genuinely can run any of those repositories' jobs, holding
+# exactly what that implies.
+pool_ids_for_repo() {  # pool_ids_for_repo owner/repo -> ids, one per line
+    local repo=$1 owner=${1%%/*}
+    [ -r "${CFG[pools_file]}" ] || return 0
+    sed 's/#.*//' "${CFG[pools_file]}" \
+        | awk -v r="$repo" -v o="$owner" 'NF >= 2 && ($1 == r || $1 == o) { print $2 }'
 }
 
-project_set() {  # project_set owner/repo -> the ipset its names belong in
-    printf '%s-%s\n' "${CFG[ipset]}" "$(project_id "$1")"
+sets_for_repo() {  # sets_for_repo owner/repo -> set names, one per line
+    local id
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        printf '%s-%s\n' "${CFG[ipset]}" "$id"
+    done < <(pool_ids_for_repo "$1")
 }
 
 # Base names are reachable from every project, so they get a set of their own
@@ -374,21 +396,22 @@ render() {
     raw=$(collect) || die "collection failed; leaving the existing allowlist in place"
 
     if [ -s "$UNSCOPED" ]; then
-        local list; list=$(sed 's/^/  /' "$UNSCOPED"); rm -f "$UNSCOPED"
-        die "these repositories declare names but have no set of their own:
+        local list; list=$(sort -u "$UNSCOPED" | sed 's/^/  /'); rm -f "$UNSCOPED"
+        die "these repositories declare names, and no runner pool can run them:
 
 $list
 
-Their names are not rendered, and nothing was installed: the allowlist already
-in place is untouched. A repository without a set of its own would have to share
-one with every other project, which is what this stopped doing.
+Nothing was installed; the allowlist already in place is untouched.
 
-For each, assign it and then do what the assignment prints:
+A pool is registered either to one repository or to an owner, and its set holds
+what it could be made to run. Declare the pools you have:
 
-  sudo $PROG projects assign owner/repo
+  sudo $PROG pools add owner/repo   # a pool registered to that repository
+  sudo $PROG pools add owner        # a pool registered to that owner
 
-A repository that should declare nothing at all belongs out of
-${CFG[repos_file]} instead:
+If a repository above has no runner at all, its jobs are queueing rather than
+running, and the fix is a pool rather than an allowlist. If it should not be
+trusted to widen anything:
 
   sudo $PROG repos remove owner/repo"
     fi
@@ -459,6 +482,16 @@ valid_repo_entry() {
     [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
 }
 
+# owner/repo, or a bare owner for a pool registered to an organisation or user.
+valid_scope() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]]
+}
+
+# The bridge names are the configured one with its trailing digits replaced, so
+# there is one source of truth for the prefix and the existing bridge keeps
+# whatever it was called.
+bridge_prefix() { local b="${CFG[bridge]:-dejima-ci0}"; printf '%s\n' "${b%%[0-9]*}"; }
+
 repos_read() {  # the entries, comments and blanks removed
     [ -r "${CFG[repos_file]}" ] || return 0
     sed 's/#.*//' "${CFG[repos_file]}" | tr -d '[:blank:]' | grep -v '^$' || true
@@ -514,68 +547,78 @@ cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo...]
     say "  sudo $PROG render"
 }
 
-cmd_projects() {  # cmd_projects [list|assign|unassign] [owner/repo]
+cmd_pools() {  # cmd_pools [list|add|remove] [scope]
     local action=${1:-list}; shift || true
-    local f="${CFG[projects_file]}"
+    local f="${CFG[pools_file]}"
 
     case "$action" in
         list)
             if [ -s "$f" ]; then
-                printf '%-40s %s\n' REPOSITORY SET
-                sed 's/#.*//' "$f" | awk -v s="${CFG[ipset]}" \
-                    'NF >= 2 { printf "%-40s %s-%s\n", $1, s, $2 }'
+                printf '%-32s %-14s %s\n' SCOPE BRIDGE SET
+                sed 's/#.*//' "$f" | awk -v s="${CFG[ipset]}" -v b="$(bridge_prefix)" \
+                    'NF >= 2 { printf "%-32s %-14s %s-%s\n", $1, b $2, s, $2 }'
             else
-                say "no project is scoped yet."
+                say "no pools declared."
             fi
             say ""
-            say "A repository that declares names needs one of these. Without it the"
-            say "render refuses, rather than putting its names somewhere every other"
-            say "project can reach. One that declares nothing needs no entry."
+            say "A scope is what a pool is REGISTERED to, which is the only thing a"
+            say "branch cannot change. owner/repo is one repository; a bare owner is"
+            say "every repository of theirs, which is what an organisation or user"
+            say "scoped runner can run."
             return 0 ;;
-        assign|unassign) ;;
-        *) die "unknown projects action: $action (list, assign, unassign)" ;;
+        add|remove) ;;
+        *) die "unknown pools action: $action (list, add, remove)" ;;
     esac
 
-    [ "$#" -ge 1 ] || die "$action needs an owner/repo"
-    local repo="$1"
-    valid_repo_entry "$repo" || die "not an owner/repo: $repo"
+    [ "$#" -ge 1 ] || die "$action needs a scope: owner/repo, or a bare owner"
+    local scope="$1"
+    valid_scope "$scope" || die "not a scope: $scope
+
+A scope is owner/repo for a pool registered to one repository, or a bare owner
+for one registered to an organisation or a user."
 
     local current; current=$([ -r "$f" ] && sed 's/#.*//' "$f" | grep -v '^[[:space:]]*$' || true)
 
-    if [ "$action" = unassign ]; then
-        printf '%s\n' "$current" | awk -v r="$repo" '$1 != r' | grep -v '^$' > "$f.new" || true
+    if [ "$action" = remove ]; then
+        printf '%s\n' "$current" | awk -v r="$scope" '$1 != r' | grep -v '^$' > "$f.new" || true
         chmod 0640 "$f.new"; mv "$f.new" "$f"
-        say "$repo now shares ${CFG[ipset]} again."
+        say "$scope removed. Its names go nowhere until another pool covers them."
         say "Re-run: sudo $PROG render, then sudo dejima-ci-firewall"
         return 0
     fi
 
-    local existing; existing=$(printf '%s\n' "$current" | awk -v r="$repo" '$1 == r { print $2; exit }')
-    [ -z "$existing" ] || { say "$repo already has id $existing (${CFG[ipset]}-$existing)"; return 0; }
+    local existing; existing=$(printf '%s\n' "$current" | awk -v r="$scope" '$1 == r { print $2; exit }')
+    [ -z "$existing" ] || { say "$scope already has id $existing (${CFG[ipset]}-$existing)"; return 0; }
 
-    # Never reused, even when an id is freed. An id names a set and a bridge
-    # that may still hold addresses and still carry rules, and handing a
-    # different project the same one would give it whatever the last occupant
-    # left behind.
+    # Never reused, even when one is freed. An id names a set and a bridge that
+    # may still hold addresses and still carry rules, and handing a freed one to
+    # a different pool would give it whatever the last occupant left behind.
     local next; next=$(printf '%s\n' "$current" | awk 'NF >= 2 { print $2 }' | sort -n | tail -1)
     next=$(( ${next:-0} + 1 ))
 
     printf '%s\n' "$current" | grep -v '^$' > "$f.new" || true
-    printf '%s %s\n' "$repo" "$next" >> "$f.new"
+    printf '%s %s\n' "$scope" "$next" >> "$f.new"
     chmod 0640 "$f.new"; mv "$f.new" "$f"
 
-    say "$repo -> ${CFG[ipset]}-$next, on bridge dejima-ci$next"
+    say "$scope -> ${CFG[ipset]}-$next, on bridge $(bridge_prefix)$next"
     say ""
-    say "Nothing is scoped until all three of these have run:"
+    say "That set will hold the union of every declaration this pool could be"
+    say "made to run, which for a bare owner is all of theirs. Register the pool"
+    say "to one repository if you want a smaller set."
+    say ""
+    say "Nothing takes effect until all of these have run:"
     say "  1. create the network, once:"
     say "       docker network create --driver bridge \\"
-    say "         -o com.docker.network.bridge.name=dejima-ci$next dejima-ci-$next"
-    say "  2. sudo $PROG render          # puts its names in its own set"
-    say "  3. sudo dejima-ci-firewall    # points that bridge at that set"
+    say "         -o com.docker.network.bridge.name=$(bridge_prefix)$next \\"
+    say "         dejima-ci-$next"
+    say "  2. sudo $PROG render"
+    say "  3. sudo dejima-ci-firewall"
+    say "  4. point the pool's runners at that network:"
+    say "       sudo dejima-ci-runners --role confined --network dejima-ci-$next"
     say ""
-    say "And a runner pool registered to $repo alone, on that network, or its"
-    say "jobs will keep landing on the shared one:"
-    say "  sudo dejima-ci-runners --role confined --network dejima-ci-$next"
+    say "The pool has to be REGISTERED at this scope for any of it to mean"
+    say "anything. A label is a request a branch makes; the registration is what"
+    say "decides which jobs a runner may take."
 }
 
 # --- commands ---------------------------------------------------------------
@@ -584,7 +627,7 @@ args=()
 repos_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        render|check|show|repos|projects) cmd="$1" ;;
+        render|check|show|repos|pools) cmd="$1" ;;
         --config)
             [ $# -ge 2 ] && [ -n "${2:-}" ] || die "--config needs a path"
             CONFIG="$2"; shift ;;
@@ -597,7 +640,7 @@ done
 # the point `repos` is seen would have been simpler and wrong: it swallowed a
 # following --config, so `repos add x --config /path` edited the file named by
 # the default config rather than the one asked for, silently.
-if [ "$cmd" = repos ] || [ "$cmd" = projects ]; then
+if [ "$cmd" = repos ] || [ "$cmd" = pools ]; then
     repos_args=("${args[@]}")
 else
     [ ${#args[@]} -eq 0 ] || usage
@@ -610,16 +653,16 @@ read_config "$CONFIG"
 # an already-rendered file and the other edits a list of names. Requiring a
 # working configuration to look at either would make them useless on the host
 # whose configuration is the thing being diagnosed.
-case "$cmd" in show|repos|projects) ;; *) preflight ;; esac
+case "$cmd" in show|repos|pools) ;; *) preflight ;; esac
 
 case "$cmd" in
     repos)
         [ -n "${CFG[repos_file]}" ] || die "no repos_file in $CONFIG"
         cmd_repos "${repos_args[@]:-}"
         ;;
-    projects)
-        [ -n "${CFG[projects_file]}" ] || die "no projects_file in $CONFIG"
-        cmd_projects "${repos_args[@]:-}"
+    pools)
+        [ -n "${CFG[pools_file]}" ] || die "no pools_file in $CONFIG"
+        cmd_pools "${repos_args[@]:-}"
         ;;
     show)
         [ -f "${CFG[out]}" ] || die "nothing installed at ${CFG[out]}"

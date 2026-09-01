@@ -318,7 +318,7 @@ privileged() {
 }
 
 @test "the flag dejima-ci-allowlist tells operators to run exists" {
-    # `projects assign` prints a dejima-ci-runners command. A note telling
+    # `pools add` prints a dejima-ci-runners command. A note telling
     # somebody to run a flag that was never added is the shape of mistake this
     # repository keeps making, so the two are held together here.
     flag=$(grep -oE '\-\-network' "$REPO/bin/dejima-ci-allowlist" | head -1)

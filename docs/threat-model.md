@@ -174,11 +174,12 @@ there is one.
   what it cannot do is connect to one outside its own project's set. One dnsmasq
   has one view, and a per-project view would mean a resolver per project. The
   leak is names, which are public in the repositories that declared them.
-- **A project whose runners are on the wrong network.** The sets are only as
-  good as which network a job lands on, and a runner takes whatever jobs it is
-  offered. A pool registered to an organisation rather than a repository puts
-  those jobs on a network that is not that project's, which is why the upgrade
-  note treats moving the pools as part of the change rather than as a follow-up.
+- **Everything a runner pool could be asked to run.** A pool's set is the union
+  of the declarations of every repository it is registered for, so an
+  organisation pool holds that whole organisation's names. That union is what
+  the pool can already be made to run: a branch in any of those repositories can
+  put a job on it. Registering a pool to one repository is how the union gets
+  small, and is the recommendation.
 - **The forge and the resolver.** Both are reachable from this VM on the ports
   listed, by anything on it. "No LAN access" is not literally true.
 - **The forge credential the runner registers with.** It is on the box, and
@@ -237,15 +238,22 @@ declarations are public in the repositories they come from.
 
 So the set is what got scoped. dnsmasq will place a name's addresses in several
 sets at once (`ipset=/name/set-a,set-b`), which means one resolver can fill each
-declaring project's set and no others, and the shared resolver stops mattering.
-The cost is that every job can still resolve every name, which is a names leak
-rather than a reach one.
+pool's set and no others, and the shared resolver stops mattering. The cost is
+that every job can still resolve every name, which is a names leak rather than a
+reach one.
 
-The three pieces have to move together: a set per project, a bridge per project
-because the incoming network is the only thing the firewall can tell about a
-job, and a runner pool registered to that repository so a pool only receives
-jobs it has the network for. A pool left on the shared network undoes the other
-two however carefully they are set up.
+### Scoping by label, rather than by what a pool is registered to
+
+A label looks like the natural handle: give each pool its own, and let workflows
+name it. It is not a boundary. A branch writes its own `runs-on`, so a label is
+a request the job makes rather than a property the operator sets, and a hostile
+branch can name any label whose pool is willing to serve its repository.
+
+What a runner may take is decided by its registration, which a branch cannot
+change: a repository scoped runner only ever takes that repository's jobs. So
+the set is built from the registration, and the union it holds is exactly what
+that pool could be asked to run. Labels are left alone, and pools may share
+them.
 
 Recorded so they are not re-proposed without new information.
 
