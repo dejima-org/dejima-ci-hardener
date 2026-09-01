@@ -50,6 +50,9 @@ EOF
 die() { echo "$PROG: $*" >&2; exit 2; }
 say() { printf '%s\n' "$*" >&2; }
 
+# CFG holds every known key, so an unset one is empty rather than absent.
+cfg_or_default() { [ -n "${CFG[$1]:-}" ] && printf '%s\n' "${CFG[$1]}" || printf '%s\n' "$2"; }
+
 # --- config -----------------------------------------------------------------
 # Parsed, never sourced. This file sits on a CI host and names a token path; a
 # config format that executes is a config format that runs whatever an
@@ -477,7 +480,50 @@ case "$cmd" in
         if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
             exit 0
         fi
+        # REMOVING A NAME DID NOT REVOKE ANYTHING. dnsmasq puts the addresses
+        # it answers with into the firewall's set, and nothing ever took them
+        # out: after a re-render the name stopped resolving, and every address
+        # it had ever resolved to stayed reachable until the host rebooted. A
+        # job that had already looked the name up, or that reads the address
+        # out of the declaration's history, connected to it as before.
+        #
+        # So a name being dropped means the set no longer describes the policy,
+        # and the only fix ipset offers is to empty it: the set holds addresses
+        # with no memory of which name put them there.
+        removed=""
+        if [ -f "${CFG[out]}" ]; then
+            removed=$(comm -23 \
+                <(sed -n 's|^server=/\([^/]*\)/.*|\1|p' "${CFG[out]}" | sort -u) \
+                <(sed -n 's|^server=/\([^/]*\)/.*|\1|p' "$new"          | sort -u))
+        fi
+
         install -m 0644 "$new" "${CFG[out]}"
+
+        # Order matters. Flush first, then reload: the reload is a SIGHUP,
+        # which clears dnsmasq's cache, so the next query for a name that is
+        # still allowed goes upstream and puts its address back. Reloading
+        # first would leave a cached answer that repopulates nothing, and names
+        # that are still on the list would be unreachable until their TTL ran
+        # out.
+        #
+        # Only on a removal. Flushing whenever anything changed would empty the
+        # set every time a name was added, and a job mid-run would find a
+        # destination it had already resolved refused until it looked it up
+        # again. Established connections survive either way - the firewall
+        # accepts ESTABLISHED,RELATED before it consults the set.
+        if [ -n "$removed" ]; then
+            set_name=$(cfg_or_default ipset ci-allow)
+            if command -v ipset >/dev/null 2>&1 && ipset list -n 2>/dev/null | grep -qx "$set_name"; then
+                ipset flush "$set_name" \
+                    && say "flushed $set_name: $(printf '%s\n' "$removed" | grep -c .) name(s) revoked" \
+                    || say "WARNING: could not flush $set_name - the revoked names' addresses stay reachable until it is emptied or the host reboots"
+            else
+                say "WARNING: $set_name does not exist here, so nothing was revoked."
+                say "  The names are gone from the resolver, but any address already"
+                say "  in the firewall's set stays reachable. Run dejima-ci-firewall."
+            fi
+        fi
+
         ${CFG[reload]}
         echo "allowlist updated: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
         ;;
