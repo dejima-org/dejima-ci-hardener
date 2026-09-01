@@ -534,3 +534,102 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     run_tool render
     [[ "$output" == *"owner/repo: 2 name(s) declared"* ]]
 }
+# --- revoking a name --------------------------------------------------------
+#
+# dnsmasq puts the addresses it answers with into the firewall's set, and
+# nothing took them out again. After a re-render the name stopped resolving and
+# every address it had ever resolved to stayed reachable until the host
+# rebooted, so removing a domain from a declaration revoked nothing.
+
+stub_ipset() {
+    cat > "$T/stub/ipset" <<'IPSETEOF'
+#!/usr/bin/env bash
+case "$1" in
+    list) printf '%s\n' "${STUB_IPSET_NAMES:-ci-allow}" ;;
+    flush) printf '%s\n' "$2" >> "$STUB_DIR/flushed" ;;
+esac
+exit 0
+IPSETEOF
+    chmod +x "$T/stub/ipset"
+}
+
+@test "removing a name flushes the set, or it stays reachable by address" {
+    stub_ipset
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx ci-allow "$STUB_DIR/flushed"
+    [[ "$output" == *"1 name(s) revoked"* ]]
+}
+
+@test "adding a name does not flush, since nothing was revoked" {
+    # A flush on every change would empty the set whenever a name was added,
+    # and a job mid-run would find a destination it had already resolved
+    # refused until it looked it up again.
+    stub_ipset
+    mkdir -p "$STUB_DIR/owner"
+    printf 'one.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'one.example.com\ntwo.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    [ ! -f "$STUB_DIR/flushed" ]
+}
+
+@test "an unchanged render flushes nothing and reloads nothing" {
+    stub_ipset
+    mkdir -p "$STUB_DIR/owner"
+    printf 'one.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    run_tool render
+    [ "$status" -eq 0 ]
+    [ ! -f "$STUB_DIR/flushed" ]
+}
+
+@test "a missing set is reported rather than passed over" {
+    # The names go out of the resolver either way, so this half-succeeds. An
+    # operator who is not told will believe a revocation took effect.
+    stub_ipset
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    STUB_IPSET_NAMES="something-else" run_tool render
+    [[ "$output" == *"stays reachable"* ]]
+}
+
+@test "the flush happens before the reload, not after" {
+    # The reload is a SIGHUP, which clears dnsmasq's cache. Flushing after it
+    # would leave cached answers that repopulate nothing, so names still on the
+    # list would be unreachable until their TTL ran out.
+    stub_ipset
+    cat > "$T/stub/reloader" <<'RELEOF'
+#!/usr/bin/env bash
+printf 'reload\n' >> "$STUB_DIR/order"
+RELEOF
+    chmod +x "$T/stub/reloader"
+    cat > "$T/stub/ipset" <<'IPSETEOF'
+#!/usr/bin/env bash
+case "$1" in
+    list) printf 'ci-allow\n' ;;
+    flush) printf 'flush\n' >> "$STUB_DIR/order" ;;
+esac
+exit 0
+IPSETEOF
+    chmod +x "$T/stub/ipset"
+    sed -i "s|^reload = .*|reload = $T/stub/reloader|" "$T/config"
+
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    : > "$STUB_DIR/order"          # the first render installs and reloads too
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$(head -1 "$STUB_DIR/order")" = flush ]
+    [ "$(tail -1 "$STUB_DIR/order")" = reload ]
+}

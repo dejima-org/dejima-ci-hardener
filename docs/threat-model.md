@@ -170,6 +170,15 @@ there is one.
 - **Exfiltration, and command-and-control.** Egress to the internet is unbounded
   from the VM, deliberately. The confined tier's allowlist bounds it for a job,
   and an escape to root on the VM is precisely what leaves that behind.
+- **One trusted project widening another's job network.** The allowlist is
+  rendered as the union of every declaration in `repos_file`, so a name added to
+  any of them is reachable from every project's jobs. It is bounded by who can
+  do it: the declaration is read from `main` of a repository you listed, and a
+  repository on that list is already trusted to run code on this host. So the
+  exposure is between trusted-but-separate projects, and to a dependency that
+  reaches one project's `main`, rather than to anyone who can open a pull
+  request. [Per-project allowlists](#rejected-with-reasons) says what isolating
+  them would take.
 - **The forge and the resolver.** Both are reachable from this VM on the ports
   listed, by anything on it. "No LAN access" is not literally true.
 - **The forge credential the runner registers with.** It is on the box, and
@@ -214,6 +223,31 @@ What to check, rather than re-argue:
   fails silently and completely - `proxmox/README.md` §4 has the check.
 
 ## Rejected, with reasons
+
+### Per-project allowlists, for now
+
+Every job on the confined tier resolves against one list and is filtered by one
+ipset, so every project's declaration is reachable from every project's jobs.
+Isolating them is possible and is not yet done, which is a scheduling answer
+rather than a design one.
+
+What it takes, in the order the pieces constrain each other:
+
+- **A set per project.** The current set holds addresses with no memory of which
+  name put them there, and every bridge's rule matches the same one. So a
+  per-project *resolver* alone buys almost nothing: a project that cannot
+  resolve a name can still connect to the address another project's lookup put
+  in the set, and declarations are public. dnsmasq will populate several sets
+  per name (`ipset=/name/set-a,set-b`), so this part needs one resolver, not
+  one per project.
+- **A bridge per project**, because the only thing the firewall can tell about a
+  job is which network it came in on. That is the handle, and there is no other.
+- **A runner pool per project**, registered to that repository, so a pool only
+  ever receives jobs it has the network for.
+
+The cost is a network, a set and a runner registration per isolated project,
+which is why the likely shape is one pool per repository that actually declares
+domains and one shared pool for those that declare none.
 
 Recorded so they are not re-proposed without new information.
 
