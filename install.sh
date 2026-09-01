@@ -511,23 +511,38 @@ say "Adding one trusts that repository's main branch. One owner/repo per line,"
 say "blank line to finish."
 existing_repos=""
 [ -r "$REPOS_FILE" ] && existing_repos="$(grep -vE '^\s*(#|$)' "$REPOS_FILE" || true)"
+# KEEP, ADD or REPLACE, because the two-way version made adding one project
+# mean retyping every project already there, from memory, in a prompt with no
+# way back. That is also the wrong tool for the job: adding a repository does
+# not need the installer at all now.
 if [ -n "$existing_repos" ]; then
     say "Currently:"; sed 's/^/  /' <<< "$existing_repos" >&2
     say
-    ask keep_repos "Keep this list? (Y/n)" "y"
+    say "Adding one does not need this installer:"
+    say "  sudo $BIN_DIR/dejima-ci-allowlist repos add owner/repo"
+    say
+    ask keep_repos "[K]eep this list, [a]dd to it, or [r]eplace it?" "k"
 else
-    keep_repos=n
+    keep_repos=r
 fi
-if [ "${keep_repos,,}" = n ] || [ "${keep_repos,,}" = no ]; then
-    repos=""
-    if [ "$NONINTERACTIVE" -eq 0 ]; then
-        read_list repos "owner/repo" valid_repo_entry
-    fi
-    [ -n "$repos" ] || repos="$existing_repos"
-    write_if_changed "$REPOS_FILE" 0640 "$repos"
-else
-    write_if_changed "$REPOS_FILE" 0640 "$existing_repos"
-fi
+case "${keep_repos,,}" in
+    a|add)
+        repos=""
+        [ "$NONINTERACTIVE" -eq 0 ] && read_list repos "owner/repo to add" valid_repo_entry
+        if [ -n "$repos" ]; then
+            repos=$(printf '%s\n%s\n' "$existing_repos" "$repos" | grep -v '^$' | sort -u)
+        else
+            repos="$existing_repos"
+        fi
+        write_if_changed "$REPOS_FILE" 0640 "$repos" ;;
+    r|replace|n|no)
+        repos=""
+        [ "$NONINTERACTIVE" -eq 0 ] && read_list repos "owner/repo" valid_repo_entry
+        [ -n "$repos" ] || repos="$existing_repos"
+        write_if_changed "$REPOS_FILE" 0640 "$repos" ;;
+    *)
+        write_if_changed "$REPOS_FILE" 0640 "$existing_repos" ;;
+esac
 say
 
 # --- does the forge actually accept that token? -----------------------------
@@ -813,8 +828,26 @@ say "=============================================================="
 say " The runners"
 say "=============================================================="
 say
-say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
-say "behind it yet, because no runner is configured on this host."
+# Asserted without checking, until a re-run said it on a host with runners
+# already going. Re-running the installer to change one setting is the normal
+# way to use it, so "no runner is configured" was most likely to be read by
+# somebody it was false for - and it reads as the installer having undone
+# something.
+runner_user="${SUDO_USER:-$(id -un)}"
+runner_home=$(getent passwd "$runner_user" | cut -d: -f6)
+[ -n "$runner_home" ] || runner_home="$HOME"
+existing_runners=$(find "$runner_home/runners" -mindepth 2 -maxdepth 2 \
+                        -name docker-compose.yml 2>/dev/null | wc -l)
+
+if [ "$existing_runners" -gt 0 ]; then
+    say "Everything above is the machinery a runner's jobs sit behind, and this"
+    say "host already has $existing_runners runner project(s) under $runner_home/runners."
+    say "Nothing above has changed them. Re-run the generator only if you want to"
+    say "add runners, change the label, or move to a new act_runner image."
+else
+    say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
+    say "behind it yet, because no runner is configured on this host."
+fi
 say
 say "$BIN_DIR/dejima-ci-runners writes the compose project and the"
 say "runner config together, taking the job network and the resolver address"

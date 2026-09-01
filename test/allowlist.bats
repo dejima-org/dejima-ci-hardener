@@ -386,3 +386,118 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [[ "$output" != *"no config at"* ]]
     chmod 644 "$T/config"
 }
+
+# --- the base list is a config file, not a domain list -----------------------
+
+@test "a comment in base-domains is a comment, not a malformed domain" {
+    # It was cat'd raw while the repos file one line below was comment-stripped,
+    # and install.sh strips comments when it reads this same file back. So a
+    # `#` line here reached valid_domain and killed the run with "refusing a
+    # malformed entry: #namesallowedregardless...", which names no file and
+    # sends an operator to /etc/dejima-ci/config - a file that legitimately has
+    # a comment at the top, put there by install.sh, and was never the problem.
+    mkdir -p "$STUB_DIR/owner"; echo example.com > "$STUB_DIR/owner/repo.body"
+    printf '# names allowed regardless of any declaration\nbase.example.com\n' > "$T/base"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -q '^server=/base.example.com/' "$T/out/ci-allow.conf"
+    ! grep -q '#names' "$T/out/ci-allow.conf"
+}
+
+@test "a malformed entry says which file it might have come from" {
+    # Two files can produce one, and they are edited by different people at
+    # different times. Naming neither leaves the operator grepping for a `#`.
+    mkdir -p "$STUB_DIR/owner"; printf 'not a domain!\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"$T/base"* ]]
+    [[ "$output" == *"$T/repos"* ]]
+}
+
+@test "collection says what each repository contributed" {
+    # "My project declared domains and got none of them" had no diagnostic
+    # anywhere: a repository absent from repos_file is never fetched, so it
+    # produced no line, no error and no trace.
+    mkdir -p "$STUB_DIR/owner"; printf 'a.example.com\nb.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [[ "$output" == *"owner/repo: 2 name(s) declared"* ]]
+}
+
+@test "a repository with no declaration says so rather than staying silent" {
+    mkdir -p "$STUB_DIR/owner"
+    echo 404 > "$STUB_DIR/owner/repo.status"
+    echo base.example.com > "$T/base"
+    run_tool render
+    [[ "$output" == *"owner/repo: no .dejima/allowed-domains"* ]]
+}
+
+# --- trusting a repository without re-running the installer ------------------
+
+@test "repos list prints the trusted repositories" {
+    printf 'acme/one\nacme/two\n' > "$T/repos"
+    run_tool repos list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"acme/one"* ]]
+    [[ "$output" == *"acme/two"* ]]
+}
+
+@test "repos add trusts one without touching the others" {
+    # The whole point. Adding one used to mean re-running install.sh and
+    # retyping every entry already there, from memory.
+    printf 'acme/one\nacme/two\n' > "$T/repos"
+    run_tool repos add acme/three
+    [ "$status" -eq 0 ]
+    for r in acme/one acme/two acme/three; do
+        grep -qx "$r" "$T/repos" || { echo "lost $r"; false; }
+    done
+}
+
+@test "repos add is idempotent" {
+    printf 'acme/one\n' > "$T/repos"
+    run_tool repos add acme/one
+    [ "$(grep -c . "$T/repos")" -eq 1 ]
+    [[ "$output" == *"already trusted"* ]]
+}
+
+@test "repos remove takes one out and leaves the rest" {
+    printf 'acme/one\nacme/two\n' > "$T/repos"
+    run_tool repos remove acme/one
+    ! grep -qx acme/one "$T/repos"
+    grep -qx acme/two "$T/repos"
+}
+
+@test "repos add refuses something that is not owner/repo" {
+    printf 'acme/one\n' > "$T/repos"
+    run_tool repos add "https://example.com/acme/two"
+    [ "$status" -eq 2 ]
+    [ "$(grep -c . "$T/repos")" -eq 1 ]
+}
+
+@test "repos says the list is not live until the allowlist is rebuilt" {
+    # Editing the file changes nothing on its own. An operator who adds a repo
+    # and walks away has done half a job.
+    printf 'acme/one\n' > "$T/repos"
+    run_tool repos add acme/two
+    [[ "$output" == *"render"* ]]
+}
+
+@test "repos works without a usable forge configuration" {
+    # It edits a list of names. Requiring a working token and resolver to do
+    # that would make it useless on the host whose configuration is the thing
+    # being diagnosed.
+    rm -f "$T/token"
+    printf 'acme/one\n' > "$T/repos"
+    run_tool repos list
+    [ "$status" -eq 0 ]
+}
+
+@test "repos honours --config placed after the operands" {
+    # `repos` used to consume the rest of the line where it was seen, so a
+    # following --config was swallowed and the edit landed in whatever the
+    # default config pointed at. Silently, on the file that decides whose
+    # branch may widen an allowlist.
+    printf 'acme/one\n' > "$T/repos"
+    run "$BIN" repos add acme/two --config "$T/config"
+    [ "$status" -eq 0 ]
+    grep -qx acme/two "$T/repos"
+}
