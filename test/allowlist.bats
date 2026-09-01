@@ -501,3 +501,36 @@ run_tool() { run "$BIN" "$@" --config "$T/config"; }
     [ "$status" -eq 0 ]
     grep -qx acme/two "$T/repos"
 }
+
+@test "a comment in a repository's declaration is a comment too" {
+    # The first fix stripped base-domains and nothing else, and the very next
+    # run on a real host died on a bare `#` from a repository's own
+    # declaration. A fetched body was cat'd raw, so the bug was the same one a
+    # layer over. Both arrive at one place now, and that is where stripping
+    # happens.
+    mkdir -p "$STUB_DIR/owner"
+    printf '# what this project needs\n#\n# and why\nreal.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -q '^server=/real.example.com/' "$T/out/ci-allow.conf"
+    [ "$(grep -c '^server=' "$T/out/ci-allow.conf")" -eq 1 ]
+}
+
+@test "a bare hash line does not become an entry" {
+    # Exactly what a real host produced: `refusing a malformed entry: #`. A
+    # separator line in a comment block, which is how this organisation's own
+    # generated files are written.
+    mkdir -p "$STUB_DIR/owner"
+    printf '#\nreal.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+}
+
+@test "the declared count is names, not lines" {
+    # A comment block counted as declared names, so a repository reporting
+    # "15 name(s) declared" might be declaring rather fewer.
+    mkdir -p "$STUB_DIR/owner"
+    printf '# three comment lines\n#\n# here\none.example.com\ntwo.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [[ "$output" == *"owner/repo: 2 name(s) declared"* ]]
+}
