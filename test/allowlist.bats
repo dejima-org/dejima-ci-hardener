@@ -50,11 +50,16 @@ EOF
     echo token > "$T/token"
     echo "owner/repo" > "$T/repos"
     : > "$T/base"
+    # A correctly configured host: a repository that declares names has a set of
+    # its own. Without one the render refuses, which is its own test rather than
+    # the state every other test starts from.
+    echo "owner/repo 1" > "$T/projects"
 
     cat > "$T/config" <<EOF
 forge_api = https://gitea.example.com/api/v1
 token_file = $T/token
 repos_file = $T/repos
+projects_file = $T/projects
 base_file = $T/base
 upstream = 198.51.100.53
 out = $T/out/ci-allow.conf
@@ -546,11 +551,43 @@ stub_ipset() {
 #!/usr/bin/env bash
 case "$1" in
     list) printf '%s\n' "${STUB_IPSET_NAMES:-ci-allow}" ;;
+    create) ;;
     flush) printf '%s\n' "$2" >> "$STUB_DIR/flushed" ;;
 esac
 exit 0
 IPSETEOF
     chmod +x "$T/stub/ipset"
+}
+
+@test "a revocation flushes the project sets, not just the bare name" {
+    # The config key is a prefix now: names live in a set per project plus a
+    # base set, and the bare name holds nothing. Flushing it alone would empty
+    # an unused set and report a revocation that had not happened.
+    stub_ipset
+    STUB_IPSET_NAMES=$'ci-allow\nci-allow-base\nci-allow-1'
+    export STUB_IPSET_NAMES
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx ci-allow-1 "$STUB_DIR/flushed"
+    grep -qx ci-allow-base "$STUB_DIR/flushed"
+}
+
+@test "a set belonging to something else is not flushed" {
+    # The prefix is the boundary. Another tool's set on the same host is not
+    # this program's to empty.
+    stub_ipset
+    STUB_IPSET_NAMES=$'ci-allow-1\nsomeone-elses-set'
+    export STUB_IPSET_NAMES
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    ! grep -qx someone-elses-set "$STUB_DIR/flushed"
 }
 
 @test "removing a name flushes the set, or it stays reachable by address" {
@@ -632,4 +669,144 @@ IPSETEOF
     run_tool render
     [ "$(head -1 "$STUB_DIR/order")" = flush ]
     [ "$(tail -1 "$STUB_DIR/order")" = reload ]
+}
+
+# --- scoping a project to its own set ----------------------------------------
+#
+# One list and one set meant every project's declaration was reachable from
+# every project's jobs. The set is the part that matters: it holds addresses
+# with no memory of which name put them there, so scoping the resolver alone
+# would leave a project able to connect by address to anything another project
+# resolved.
+
+@test "a declaration with no set of its own refuses the render" {
+    # There is no shared fallback. A set every project can reach is the thing
+    # this exists to end, and falling back to one would be arriving there by
+    # doing nothing rather than by choosing it.
+    : > "$T/projects"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"owner/repo"* ]]
+    [[ "$output" == *"projects assign"* ]]
+}
+
+@test "a refused render leaves the allowlist that was already there" {
+    # The cost of an unfinished migration is a loud error on the timer, not a
+    # host that has lost its allowlist.
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    before=$(cat "$T/out/ci-allow.conf")
+    : > "$T/projects"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [ "$(cat "$T/out/ci-allow.conf")" = "$before" ]
+}
+
+@test "a repository that declares nothing needs no set" {
+    # It has no names to scope. Requiring an assignment would be friction with
+    # nothing behind it.
+    : > "$T/projects"
+    mkdir -p "$STUB_DIR/owner"; echo 404 > "$STUB_DIR/owner/repo.status"
+    echo base.example.com > "$T/base"
+    run_tool render
+    [ "$status" -eq 0 ]
+}
+
+@test "base names go in a set of their own, not the shared one" {
+    # Otherwise an assigned project matching base would be matching every
+    # unassigned project too, and the scoping would be for nothing.
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    echo base.example.com > "$T/base"
+    run_tool render
+    grep -qx 'ipset=/base.example.com/ci-allow-base' "$T/out/ci-allow.conf"
+}
+
+@test "an assigned project's names go in its own set" {
+    printf 'owner/repo 1\n' > "$T/projects"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx 'ipset=/one.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    ! grep -qx 'ipset=/one.example.com/ci-allow' "$T/out/ci-allow.conf"
+}
+
+@test "a name two projects declare lands in both their sets" {
+    # dnsmasq takes several sets per name, which is what lets one resolver
+    # serve every project without the answer widening anyone else's reach.
+    printf 'owner/repo 1\nother/repo 2\n' > "$T/projects"
+    printf 'owner/repo\nother/repo\n' > "$T/repos"
+    mkdir -p "$STUB_DIR/owner" "$STUB_DIR/other"
+    echo shared.example.com > "$STUB_DIR/owner/repo.body"
+    echo shared.example.com > "$STUB_DIR/other/repo.body"
+    run_tool render
+    grep -qx 'ipset=/shared.example.com/ci-allow-1,ci-allow-2' "$T/out/ci-allow.conf"
+}
+
+@test "a name one project declares does not reach the other's set" {
+    # The whole point.
+    printf 'owner/repo 1\nother/repo 2\n' > "$T/projects"
+    printf 'owner/repo\nother/repo\n' > "$T/repos"
+    mkdir -p "$STUB_DIR/owner" "$STUB_DIR/other"
+    echo mine.example.com > "$STUB_DIR/owner/repo.body"
+    echo theirs.example.com > "$STUB_DIR/other/repo.body"
+    run_tool render
+    grep -qx 'ipset=/mine.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    grep -qx 'ipset=/theirs.example.com/ci-allow-2' "$T/out/ci-allow.conf"
+}
+
+@test "every name still resolves, since the scoping is the set and not the view" {
+    # One dnsmasq has one view. The leak is names, which are public in the
+    # repositories they come from; what a job can reach is the set.
+    printf 'owner/repo 1\n' > "$T/projects"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    grep -q '^server=/one.example.com/' "$T/out/ci-allow.conf"
+}
+
+@test "the name count is names, not lines" {
+    # Each name emits a server= and an ipset= line now. Counting lines and
+    # subtracting the header reported double.
+    mkdir -p "$STUB_DIR/owner"; printf 'a.example.com\nb.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [[ "$output" == *"2 names"* ]]
+}
+
+@test "projects assign gives out an id and never reuses one" {
+    # An id names a set and a bridge that may still hold addresses and still
+    # carry rules. Handing a freed one to a different project would give it
+    # whatever the last occupant left behind.
+    : > "$T/projects"          # the fixture assigns owner/repo id 1
+    run_tool projects assign acme/one
+    run_tool projects assign acme/two
+    run_tool projects unassign acme/one
+    run_tool projects assign acme/three
+    [ "$(awk '$1 == "acme/three" { print $2 }' "$T/projects")" = 3 ]
+}
+
+@test "projects assign is idempotent" {
+    run_tool projects assign acme/one
+    run_tool projects assign acme/one
+    [ "$(grep -c 'acme/one' "$T/projects")" -eq 1 ]
+    [[ "$output" == *"already has id"* ]]
+}
+
+@test "projects assign says the three things that have to happen next" {
+    # Writing the file scopes nothing on its own: the network has to exist, the
+    # allowlist has to be re-rendered, and the firewall has to point the bridge
+    # at the set.
+    run_tool projects assign acme/one
+    [[ "$output" == *"docker network create"* ]]
+    [[ "$output" == *"render"* ]]
+    [[ "$output" == *"dejima-ci-firewall"* ]]
+    [[ "$output" == *"--network"* ]]
+}
+
+@test "projects list says what an entry is for, and what its absence costs" {
+    # The absence of an entry is the interesting state, and a list that only
+    # shows entries never mentions it.
+    run_tool projects list
+    [[ "$output" == *"render refuses"* ]]
+    [[ "$output" == *"declares nothing needs no entry"* ]]
 }

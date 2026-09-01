@@ -114,6 +114,37 @@ fi
 # open one.
 ipset create "$SET" hash:net -exist
 
+# --- one set per project, plus one every project matches ---------------------
+#
+# The set holds addresses and nothing else - no memory of which name put one
+# there - so a single shared set is a union at the address layer, not just at
+# the name layer. A project that cannot resolve another's name could still
+# connect to the address that name resolved to, and declarations are public.
+# That is why scoping the resolver alone would have bought nothing.
+#
+# A project assigned an id in the projects file gets a set and a bridge of its
+# own; its jobs match that set and the base set, and nothing else. A project
+# with no id keeps using the shared set, which is what every project did before
+# this existed - so this file changes no behaviour until an id is assigned.
+PROJECTS=${PROJECTS:-$(cfg_get projects_file)}
+: "${PROJECTS:=/etc/dejima-ci/projects}"
+
+ipset create "${SET}-base" hash:net -exist
+
+declare -A BRIDGE_SET=()
+if [ -r "$PROJECTS" ]; then
+    while read -r repo id extra || [ -n "$repo" ]; do
+        repo="${repo%%#*}"
+        [ -n "$repo" ] && [ -n "${id:-}" ] || continue
+        # The bridge name is derived, not configured, because it has to agree
+        # with what created the network. 15 characters is the kernel's limit on
+        # an interface name, which is why the id is a number and not the
+        # repository's own name.
+        ipset create "${SET}-${id}" hash:net -exist
+        BRIDGE_SET["${BRIDGE_BASE:-dejima-ci}${id}"]="${SET}-${id}"
+    done < "$PROJECTS"
+fi
+
 # --- job egress: DOCKER-USER is the chain Docker jumps to first from FORWARD,
 # --- and the only one whose contents Docker will not rewrite underneath you.
 # Own a chain per table rather than appending into shared ones. This script
@@ -151,8 +182,18 @@ for b in "${BRIDGES[@]}"; do
 
     # The allowlist proper. Port-restricted: a name being allowed is not a reason
     # for every port on it to be reachable.
-    iptables -A DEJIMA-CI-FWD -i "$b" -p tcp -m set --match-set "$SET" dst \
-        -m multiport --dports 80,443 -j ACCEPT
+    #
+    # Two sets per bridge: the one this bridge's project declared, and the base
+    # every project shares. A bridge with no entry in the projects file falls
+    # back to the shared set, which is the pre-existing behaviour.
+    # Base only where a bridge has no project. There is no shared set of
+    # project names any more, so a bridge nothing claims reaches the names every
+    # project shares and nothing else. A job there fails rather than reaching
+    # too far, which is the direction to be wrong in.
+    for set_for_bridge in ${BRIDGE_SET[$b]:+"${BRIDGE_SET[$b]}"} "${SET}-base"; do
+        iptables -A DEJIMA-CI-FWD -i "$b" -p tcp -m set --match-set "$set_for_bridge" dst \
+            -m multiport --dports 80,443 -j ACCEPT
+    done
 
     # Uncomment for git-over-ssh to a forge. Prefer https where the forge offers
     # it, so that this stays closed.

@@ -308,3 +308,20 @@ privileged() {
     parse "$OUT/docker-compose.yml"
     parse "$OUT/config.yaml"
 }
+
+@test "--network overrides the job network the config records" {
+    # A pool scoped to one project needs that project's network. Left on the
+    # shared one, its jobs land among every other project's names however
+    # carefully the sets were assigned.
+    grep -q '\-\-network) OPT_NETWORK=' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_NETWORK:-\$(cfg_get network)' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the flag dejima-ci-allowlist tells operators to run exists" {
+    # `projects assign` prints a dejima-ci-runners command. A note telling
+    # somebody to run a flag that was never added is the shape of mistake this
+    # repository keeps making, so the two are held together here.
+    flag=$(grep -oE '\-\-network' "$REPO/bin/dejima-ci-allowlist" | head -1)
+    [ "$flag" = "--network" ]
+    grep -q '\-\-network)' "$REPO/bin/dejima-ci-runners"
+}

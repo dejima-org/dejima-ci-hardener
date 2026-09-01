@@ -26,6 +26,7 @@ usage() {
     cat >&2 <<EOF
 Usage: $PROG [render|check|show] [--config PATH]
        $PROG repos [list|add|remove] [owner/repo...]
+       $PROG projects [list|assign|unassign] [owner/repo]
 
   render   fetch, validate and install the allowlist, reloading the resolver
            only if it changed (the default; what the timer runs)
@@ -37,6 +38,9 @@ Usage: $PROG [render|check|show] [--config PATH]
   repos    list, add to, or remove from the repositories trusted to widen this
            allowlist. Adding one used to mean re-running install.sh and
            retyping every entry already there
+  projects give a repository a network and firewall set of its own, so its
+           names are reachable from its jobs and not from every project's.
+           Unassigned repositories share one set, as they always have
 
 Reads $CONFIG unless --config or \$DEJIMA_CI_CONFIG says otherwise.
 EOF
@@ -51,6 +55,11 @@ die() { echo "$PROG: $*" >&2; exit 2; }
 say() { printf '%s\n' "$*" >&2; }
 
 # CFG holds every known key, so an unset one is empty rather than absent.
+# Names, not lines. Each name emits a server= and an ipset= line now, so
+# counting lines and subtracting the header reported double and would have gone
+# on reporting double quietly.
+name_count() { grep -c '^server=/' "$1" 2>/dev/null || true; }
+
 cfg_or_default() { [ -n "${CFG[$1]:-}" ] && printf '%s\n' "${CFG[$1]}" || printf '%s\n' "$2"; }
 
 # --- config -----------------------------------------------------------------
@@ -66,6 +75,7 @@ declare -A CFG=(
     [forge_api]=""
     [token_file]="/etc/dejima-ci/forge-token"
     [repos_file]="/etc/dejima-ci/repos"
+    [projects_file]="/etc/dejima-ci/projects"
     [base_file]="/etc/dejima-ci/base-domains"
     [upstream]=""
     [out]="/etc/dnsmasq.d/ci-allow.conf"
@@ -294,32 +304,108 @@ collect() {
     if [ -r "${CFG[base_file]}" ]; then
         say "collecting:"
         say "  ${CFG[base_file]}: $(sed 's/#.*//' "${CFG[base_file]}" | grep -c . || true) name(s) always allowed"
-        sed 's/#.*//' "${CFG[base_file]}"
+        sed 's/#.*//' "${CFG[base_file]}" | sed "s|^|$(base_set)\t|"
     fi
 
     while read -r repo || [ -n "$repo" ]; do
         repo="${repo%%#*}"; repo="${repo//[[:space:]]/}"
         [ -n "$repo" ] || continue
-        fetch_repo "$repo" "$token"
+        # Tagged with the set the names belong in, because which project asked
+        # for a name is the whole of what makes it scopable. Collection used to
+        # return bare names and the caller had no way to tell them apart again.
+        # A repository that declares names and has no set of its own is
+        # recorded rather than rendered. Recorded, not died on here: a die
+        # inside a command substitution ends only the subshell, and the caller
+        # would print its own vaguer message on top of this one.
+        # Status propagated explicitly. Capturing into a variable put
+        # fetch_repo's exit code where nothing looked at it, so a forge that
+        # rejected the token became a repository that happened to declare
+        # nothing, and the render carried on and installed a shorter allowlist.
+        # It used to be the last command of a pipeline, where pipefail carried
+        # the failure out for free.
+        declared=$(fetch_repo "$repo" "$token") || return 1
+        [ -n "$declared" ] || continue
+        if [ -z "$(project_id "$repo")" ]; then
+            printf '%s\n' "$repo" >> "$UNSCOPED"
+            continue
+        fi
+        printf '%s\n' "$declared" | sed "s|^|$(project_set "$repo")\t|"
     done < "${CFG[repos_file]}"
 }
 
+# --- which set a project's names go in ---------------------------------------
+#
+# A repository that declares names needs a set of its own. There is no shared
+# fallback, because a shared set is a set every project can reach, which is the
+# thing this exists to end - and it would be arrived at by doing nothing rather
+# than by choosing it.
+#
+# So an unassigned declaration refuses the whole render. Nothing is installed on
+# a failure, so the previous allowlist stays in force: the cost of arriving here
+# is a loud error on the timer, not a host that has lost its allowlist.
+#
+# A repository declaring nothing needs no assignment, having no names to scope.
+# It needs one the day it declares something, and the refusal is what tells
+# whoever added that declaration.
+project_id() {  # project_id owner/repo -> id, or empty
+    [ -r "${CFG[projects_file]}" ] || return 0
+    sed 's/#.*//' "${CFG[projects_file]}" \
+        | awk -v r="$1" '$1 == r { print $2; exit }'
+}
+
+project_set() {  # project_set owner/repo -> the ipset its names belong in
+    printf '%s-%s\n' "${CFG[ipset]}" "$(project_id "$1")"
+}
+
+# Base names are reachable from every project, so they get a set of their own
+# rather than sharing the one unassigned projects use - otherwise an assigned
+# project matching "base" would be matching every unassigned project too, and
+# the scoping would be for nothing.
+base_set() { printf '%s-base\n' "${CFG[ipset]}"; }
+
 render() {
-    local raw domains d out
+    local raw pairs domains d out sets
     # Collected first, filtered second, so that the two failures stay
     # distinguishable. Filtering in the same pipeline makes "the forge did not
     # answer" and "every declaration is empty" arrive as the same error under
     # pipefail - grep exits 1 on no matches - and they send whoever reads it
     # to entirely different places.
+    UNSCOPED=$(mktemp); export UNSCOPED
     raw=$(collect) || die "collection failed; leaving the existing allowlist in place"
+
+    if [ -s "$UNSCOPED" ]; then
+        local list; list=$(sed 's/^/  /' "$UNSCOPED"); rm -f "$UNSCOPED"
+        die "these repositories declare names but have no set of their own:
+
+$list
+
+Their names are not rendered, and nothing was installed: the allowlist already
+in place is untouched. A repository without a set of its own would have to share
+one with every other project, which is what this stopped doing.
+
+For each, assign it and then do what the assignment prints:
+
+  sudo $PROG projects assign owner/repo
+
+A repository that should declare nothing at all belongs out of
+${CFG[repos_file]} instead:
+
+  sudo $PROG repos remove owner/repo"
+    fi
+    rm -f "$UNSCOPED"
     # COMMENTS STRIPPED HERE, over everything, rather than at each source. The
     # first attempt at this stripped base-domains only, and the very next run
     # died on a `#` from a repository's own declaration - the same bug one
     # layer over, because a fetched body was cat'd raw too. There is one place
     # every name arrives, and this is it. A domain cannot contain `#`, so
     # nothing legitimate is lost.
-    domains=$(printf '%s\n' "$raw" | sed 's/#.*//' \
-        | tr -d '\r' | tr -d '[:blank:]' | grep -v '^$' | sort -u || true)
+    # Each line arrives as SET<tab>name. Blanks are squeezed out of the name
+    # only: the tab is the structure, and tr -d '[:blank:]' across the line
+    # would eat it and glue the two together.
+    pairs=$(printf '%s\n' "$raw" | sed 's/#.*//' | tr -d '\r' \
+        | awk -F'\t' 'NF == 2 { gsub(/[[:blank:]]/, "", $2); if ($2 != "") print $1 "\t" $2 }' \
+        | sort -u || true)
+    domains=$(printf '%s\n' "$pairs" | cut -f2 | sort -u)
 
     # An empty render is refused rather than installed. This is the failure
     # direction that matters: an allowlist of nothing looks identical to a
@@ -335,6 +421,22 @@ It came from ${CFG[base_file]} or from a .dejima/allowed-domains on one of the
 repositories in ${CFG[repos_file]}. Nothing was installed; the existing
 allowlist is untouched."
         printf 'server=/%s/%s\n' "$d" "${CFG[upstream]}" >> "$out"
+
+        # THE SETS ARE WHERE THE SCOPING LIVES, not the server= line above.
+        #
+        # Every job can still resolve every allowlisted name: one dnsmasq has
+        # one view, and giving each project its own would mean an instance per
+        # project. That leak is names, and declarations are public in the
+        # repositories they come from.
+        #
+        # What a job can CONNECT to is the set its bridge matches, and a name
+        # only lands in the sets of the projects that asked for it. dnsmasq
+        # takes several per name, so one lookup fills each project's set that
+        # declared it and no others - which is what makes a shared resolver
+        # safe here.
+        sets=$(printf '%s\n' "$pairs" | awk -F'\t' -v n="$d" '$2 == n { print $1 }' \
+               | sort -u | paste -sd, -)
+        printf 'ipset=/%s/%s\n' "$d" "$sets" >> "$out"
     done <<< "$domains"
 
     # Only replace a working config with one that parses. dnsmasq exits on a
@@ -412,13 +514,77 @@ cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo...]
     say "  sudo $PROG render"
 }
 
+cmd_projects() {  # cmd_projects [list|assign|unassign] [owner/repo]
+    local action=${1:-list}; shift || true
+    local f="${CFG[projects_file]}"
+
+    case "$action" in
+        list)
+            if [ -s "$f" ]; then
+                printf '%-40s %s\n' REPOSITORY SET
+                sed 's/#.*//' "$f" | awk -v s="${CFG[ipset]}" \
+                    'NF >= 2 { printf "%-40s %s-%s\n", $1, s, $2 }'
+            else
+                say "no project is scoped yet."
+            fi
+            say ""
+            say "A repository that declares names needs one of these. Without it the"
+            say "render refuses, rather than putting its names somewhere every other"
+            say "project can reach. One that declares nothing needs no entry."
+            return 0 ;;
+        assign|unassign) ;;
+        *) die "unknown projects action: $action (list, assign, unassign)" ;;
+    esac
+
+    [ "$#" -ge 1 ] || die "$action needs an owner/repo"
+    local repo="$1"
+    valid_repo_entry "$repo" || die "not an owner/repo: $repo"
+
+    local current; current=$([ -r "$f" ] && sed 's/#.*//' "$f" | grep -v '^[[:space:]]*$' || true)
+
+    if [ "$action" = unassign ]; then
+        printf '%s\n' "$current" | awk -v r="$repo" '$1 != r' | grep -v '^$' > "$f.new" || true
+        chmod 0640 "$f.new"; mv "$f.new" "$f"
+        say "$repo now shares ${CFG[ipset]} again."
+        say "Re-run: sudo $PROG render, then sudo dejima-ci-firewall"
+        return 0
+    fi
+
+    local existing; existing=$(printf '%s\n' "$current" | awk -v r="$repo" '$1 == r { print $2; exit }')
+    [ -z "$existing" ] || { say "$repo already has id $existing (${CFG[ipset]}-$existing)"; return 0; }
+
+    # Never reused, even when an id is freed. An id names a set and a bridge
+    # that may still hold addresses and still carry rules, and handing a
+    # different project the same one would give it whatever the last occupant
+    # left behind.
+    local next; next=$(printf '%s\n' "$current" | awk 'NF >= 2 { print $2 }' | sort -n | tail -1)
+    next=$(( ${next:-0} + 1 ))
+
+    printf '%s\n' "$current" | grep -v '^$' > "$f.new" || true
+    printf '%s %s\n' "$repo" "$next" >> "$f.new"
+    chmod 0640 "$f.new"; mv "$f.new" "$f"
+
+    say "$repo -> ${CFG[ipset]}-$next, on bridge dejima-ci$next"
+    say ""
+    say "Nothing is scoped until all three of these have run:"
+    say "  1. create the network, once:"
+    say "       docker network create --driver bridge \\"
+    say "         -o com.docker.network.bridge.name=dejima-ci$next dejima-ci-$next"
+    say "  2. sudo $PROG render          # puts its names in its own set"
+    say "  3. sudo dejima-ci-firewall    # points that bridge at that set"
+    say ""
+    say "And a runner pool registered to $repo alone, on that network, or its"
+    say "jobs will keep landing on the shared one:"
+    say "  sudo dejima-ci-runners --role confined --network dejima-ci-$next"
+}
+
 # --- commands ---------------------------------------------------------------
 cmd=render
 args=()
 repos_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        render|check|show|repos) cmd="$1" ;;
+        render|check|show|repos|projects) cmd="$1" ;;
         --config)
             [ $# -ge 2 ] && [ -n "${2:-}" ] || die "--config needs a path"
             CONFIG="$2"; shift ;;
@@ -431,7 +597,7 @@ done
 # the point `repos` is seen would have been simpler and wrong: it swallowed a
 # following --config, so `repos add x --config /path` edited the file named by
 # the default config rather than the one asked for, silently.
-if [ "$cmd" = repos ]; then
+if [ "$cmd" = repos ] || [ "$cmd" = projects ]; then
     repos_args=("${args[@]}")
 else
     [ ${#args[@]} -eq 0 ] || usage
@@ -444,12 +610,16 @@ read_config "$CONFIG"
 # an already-rendered file and the other edits a list of names. Requiring a
 # working configuration to look at either would make them useless on the host
 # whose configuration is the thing being diagnosed.
-case "$cmd" in show|repos) ;; *) preflight ;; esac
+case "$cmd" in show|repos|projects) ;; *) preflight ;; esac
 
 case "$cmd" in
     repos)
         [ -n "${CFG[repos_file]}" ] || die "no repos_file in $CONFIG"
         cmd_repos "${repos_args[@]:-}"
+        ;;
+    projects)
+        [ -n "${CFG[projects_file]}" ] || die "no projects_file in $CONFIG"
+        cmd_projects "${repos_args[@]:-}"
         ;;
     show)
         [ -f "${CFG[out]}" ] || die "nothing installed at ${CFG[out]}"
@@ -458,7 +628,7 @@ case "$cmd" in
     check)
         new=$(render); trap 'rm -f "$new"' EXIT
         if [ -f "${CFG[out]}" ] && cmp -s "$new" "${CFG[out]}"; then
-            echo "up to date: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
+            echo "up to date: $(name_count "${CFG[out]}") names"
         elif [ -f "${CFG[out]}" ]; then
             echo "would change:"
             diff -u "${CFG[out]}" "$new" || true
@@ -467,7 +637,7 @@ case "$cmd" in
             # :- substitutes an EMPTY variable, not a missing file, so this
             # used to hand diff a path that is not there and print its
             # complaint - on a first install, where nothing is wrong at all.
-            echo "would install ${CFG[out]}: $(( $(wc -l < "$new") - 1 )) names"
+            echo "would install ${CFG[out]}: $(name_count "$new") names"
             diff -u /dev/null "$new" || true
             exit 1
         fi
@@ -512,19 +682,40 @@ case "$cmd" in
         # again. Established connections survive either way - the firewall
         # accepts ESTABLISHED,RELATED before it consults the set.
         if [ -n "$removed" ]; then
-            set_name=$(cfg_or_default ipset ci-allow)
-            if command -v ipset >/dev/null 2>&1 && ipset list -n 2>/dev/null | grep -qx "$set_name"; then
-                ipset flush "$set_name" \
-                    && say "flushed $set_name: $(printf '%s\n' "$removed" | grep -c .) name(s) revoked" \
-                    || say "WARNING: could not flush $set_name - the revoked names' addresses stay reachable until it is emptied or the host reboots"
-            else
-                say "WARNING: $set_name does not exist here, so nothing was revoked."
+            # EVERY set, not the one named by the config key.
+            #
+            # That key is a prefix now: names live in a set per project plus a
+            # base set, and the bare name holds nothing. Flushing it alone would
+            # have emptied an unused set and reported a revocation that had not
+            # happened - the same failure this flush was added to fix, wearing
+            # the fix as a disguise.
+            #
+            # A set holds addresses with no memory of which name put them there,
+            # so there is no way to flush only the project a removed name
+            # belonged to. All of them, and they refill from the next lookup.
+            set_prefix=$(cfg_or_default ipset ci-allow)
+            if ! command -v ipset >/dev/null 2>&1; then
+                say "WARNING: ipset is not installed here, so nothing was revoked."
                 say "  The names are gone from the resolver, but any address already"
-                say "  in the firewall's set stays reachable. Run dejima-ci-firewall."
+                say "  in the firewall's sets stays reachable."
+            else
+                flushed=0
+                while IFS= read -r one; do
+                    case "$one" in "$set_prefix"|"$set_prefix"-*) ;; *) continue ;; esac
+                    ipset flush "$one" && flushed=$(( flushed + 1 )) \
+                        || say "WARNING: could not flush $one"
+                done < <(ipset list -n 2>/dev/null || true)
+                if [ "$flushed" -gt 0 ]; then
+                    say "flushed $flushed set(s): $(printf '%s\n' "$removed" | grep -c .) name(s) revoked"
+                else
+                    say "WARNING: no $set_prefix set exists here, so nothing was revoked."
+                    say "  The names are gone from the resolver, but any address already"
+                    say "  in the firewall's sets stays reachable. Run dejima-ci-firewall."
+                fi
             fi
         fi
 
         ${CFG[reload]}
-        echo "allowlist updated: $(( $(wc -l < "${CFG[out]}") - 1 )) names"
+        echo "allowlist updated: $(name_count "${CFG[out]}") names"
         ;;
 esac

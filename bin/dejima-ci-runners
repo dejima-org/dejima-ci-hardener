@@ -39,6 +39,7 @@ fi
 
 ROLE=""
 DIR=""
+OPT_NETWORK=""
 FORGE=""
 OPT_NAME=""
 OPT_LABEL=""
@@ -61,6 +62,9 @@ Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
                      network namespace
   --dir PATH         where the compose project goes (default ~/runners of the
                      user who invoked sudo)
+  --network NAME     the job network, overriding the one in the config. For a
+                     pool scoped to one project, whose network and firewall set
+                     are its own - see dejima-ci-allowlist projects
   --forge URL        the forge, e.g. https://gitea.example.com. Read from
                      $CONFIG when install.sh has run; required on a privileged
                      host, where it has not
@@ -91,6 +95,7 @@ while [ $# -gt 0 ]; do
         --role) ROLE="${2:?}"; shift ;;
         --dir) DIR="${2:?}"; shift ;;
         --forge) FORGE="${2:?}"; shift ;;
+        --network) OPT_NETWORK="${2:?}"; shift ;;
         --name) OPT_NAME="${2:?}"; shift ;;
         --label) OPT_LABEL="${2:?}"; shift ;;
         --count) OPT_COUNT="${2:?}"; shift ;;
@@ -175,7 +180,11 @@ say "=============================================================="
 say
 
 # --- values install.sh already knows ----------------------------------------
-network="$(cfg_get network)"
+# --network overrides the one config records, for a pool scoped to a single
+# project. That project has a network and a firewall set of its own, and a pool
+# left on the shared network would put its jobs back among everybody else's
+# names however carefully the sets were assigned.
+network="${OPT_NETWORK:-$(cfg_get network)}"
 gateway="$(cfg_get gateway)"
 forge_api="$(cfg_get forge_api)"
 instance="${forge_api%/api/v1}"
@@ -190,7 +199,11 @@ The confined tier's runners attach jobs to the network install.sh creates; there
 is nothing to point them at until it has run."
     [ -n "$gateway" ] || die "no gateway in $CONFIG - re-run install.sh"
     say "From $CONFIG, not asked again:"
-    say "  job network   $network      (container.network)"
+    if [ -n "${OPT_NETWORK:-}" ]; then
+        say "  job network   $network      (container.network, from --network)"
+    else
+        say "  job network   $network      (container.network)"
+    fi
     say "  resolver      $gateway      (--dns, the allowlisting resolver)"
     say
 else
