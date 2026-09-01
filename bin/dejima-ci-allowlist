@@ -207,7 +207,7 @@ fetch_repo() {
     # Now every consulted repository says what it gave, and the one that is
     # missing is missing from a list rather than from the operator's memory.
     case "$http" in
-        200) say "  $repo: $(grep -c . "$body" || true) name(s) declared"
+        200) say "  $repo: $(sed 's/#.*//' "$body" | grep -c '[^[:space:]]' || true) name(s) declared"
              cat "$body" ;;
         404) say "  $repo: no .dejima/allowed-domains on ${CFG[ref]}" ;;
         # 401 and 403 are the two an operator will actually meet, and they mean
@@ -309,7 +309,14 @@ render() {
     # pipefail - grep exits 1 on no matches - and they send whoever reads it
     # to entirely different places.
     raw=$(collect) || die "collection failed; leaving the existing allowlist in place"
-    domains=$(printf '%s\n' "$raw" | tr -d '\r' | tr -d '[:blank:]' | grep -v '^$' | sort -u || true)
+    # COMMENTS STRIPPED HERE, over everything, rather than at each source. The
+    # first attempt at this stripped base-domains only, and the very next run
+    # died on a `#` from a repository's own declaration - the same bug one
+    # layer over, because a fetched body was cat'd raw too. There is one place
+    # every name arrives, and this is it. A domain cannot contain `#`, so
+    # nothing legitimate is lost.
+    domains=$(printf '%s\n' "$raw" | sed 's/#.*//' \
+        | tr -d '\r' | tr -d '[:blank:]' | grep -v '^$' | sort -u || true)
 
     # An empty render is refused rather than installed. This is the failure
     # direction that matters: an allowlist of nothing looks identical to a
