@@ -423,3 +423,60 @@ privileged() {
     # that matters most.
     grep -q '\[ -n "\$DIR" \] && read_existing_project "\$DIR"' "$REPO/bin/dejima-ci-runners"
 }
+
+@test "a pool naming a directory with no project says so" {
+    # Silence here is how "why is it suggesting three runners" happens. With
+    # --pool the operator asserted this directory is that pool's project, so
+    # finding nothing in it is a wrong path rather than a new group - and every
+    # default that follows is a built-in one.
+    printf 'branderson 2 %s/nowhere\n' "$TMP" > "$CONF_DIR/pools"
+    printf 'pools_file = %s/pools\n' "$CONF_DIR" >> "$CONF_DIR/config"
+    run bash "$RUNNERS" --pool branderson --non-interactive --no-start
+    [[ "$output" == *"NOTHING AT"* ]]
+    [[ "$output" == *"NEW group"* ]]
+}
+
+@test "the project summary is printed once, not once per call site" {
+    # It is read before the questions when the directory is known, and again
+    # after the directory prompt for when it was not. The same summary twice
+    # reads as two different projects.
+    confined --name branderson --count 2
+    confined
+    [ "$(printf '%s\n' "$output" | grep -c 'A project is already at')" -eq 1 ]
+}
+
+@test "the count is read from a project that predates container_name" {
+    # An older project still reports its own count rather than the built-in one.
+    confined --name branderson --count 2
+    sed -i '/container_name:/d' "$OUT/docker-compose.yml"
+    confined
+    [ "$(grep -c 'GITEA_RUNNER_NAME:' "$OUT/docker-compose.yml")" -eq 2 ]
+}
+
+# --- bringing them up after a change -----------------------------------------
+
+@test "a rewritten file recreates the containers" {
+    # config.yaml is bind-mounted into each container as a FILE, so the mount
+    # follows the inode. write_if_changed replaces the file by rename, giving
+    # the new content a new inode, and a container that is already up keeps
+    # reading the old one. Compose will not recreate it either: the service
+    # definition did not change, only a file it mounts did. The runners come up,
+    # register, and run with the previous allowlist and the previous network.
+    grep -q 'force-recreate' "$REPO/bin/dejima-ci-runners"
+    grep -q 'WROTE_SOMETHING=1' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "an unchanged run does not recreate them" {
+    # Recreating on every run would restart a healthy pool for nothing, and a
+    # runner mid-job would lose it.
+    grep -q '\[ "$WROTE_SOMETHING" = 1 \] && compose_up_args+=(--force-recreate)' \
+        "$REPO/bin/dejima-ci-runners"
+}
+
+@test "shrinking a pool removes the runner it dropped" {
+    # Going from three to two leaves the third running, with the config and the
+    # network it was started with: a runner still taking jobs on the allowlist
+    # this change was meant to move it off, no longer described by any file
+    # here.
+    grep -q 'remove-orphans' "$REPO/bin/dejima-ci-runners"
+}

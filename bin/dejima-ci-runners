@@ -161,6 +161,9 @@ ask() {
     printf -v "$__var" '%s' "$reply"
 }
 
+# WROTE_SOMETHING is read before `up`, because a file bind mount binds an inode
+# and this replaces one.
+WROTE_SOMETHING=0
 write_if_changed() {
     local path="$1" mode="$2" content="$3"
     if [ -f "$path" ] && [ "$content" = "$(cat "$path")" ]; then
@@ -171,6 +174,7 @@ write_if_changed() {
     printf '%s\n' "$content" > "$path.new"
     chmod "$mode" "$path.new"
     mv "$path.new" "$path"
+    WROTE_SOMETHING=1
     say "  written    $path"
 }
 
@@ -287,14 +291,43 @@ say
 # writes a second set of both into the same directory and orphans the running
 # ones. With --pool the directory is known before anything is asked, which is
 # what makes reading it this early possible.
+READ_PROJECT_DONE=0
 read_existing_project() {  # read_existing_project DIR
     local d=$1
-    [ -f "$d/docker-compose.yml" ] || return 0
+    # Once. It is called before the questions when the directory is already
+    # known, and again after the directory prompt for when it was not, and
+    # printing the same summary twice reads as two different projects.
+    [ "$READ_PROJECT_DONE" = 0 ] || return 0
+
+    if [ ! -f "$d/docker-compose.yml" ]; then
+        # Silence here is how "why is it suggesting three runners" happens. For
+        # a new pool there is nothing to say, but --pool means the operator
+        # asserted this directory is that pool's project, so finding nothing in
+        # it is a wrong path rather than a new group - and every default below
+        # will be a built-in one.
+        if [ -n "$OPT_POOL" ]; then
+            say
+            say "NOTHING AT $d"
+            say "  $OPT_POOL names that directory in the pools file, but there is no"
+            say "  compose project in it. Every default below is a built-in one, so"
+            say "  taking them writes a NEW group rather than changing yours."
+            say
+            say "  Check where the project actually is and record it:"
+            say "    sudo dejima-ci-allowlist pools add $OPT_POOL /the/right/path"
+            say
+        fi
+        return 0
+    fi
+    READ_PROJECT_DONE=1
     local n c l j
     n=$(sed -n 's|^ *container_name: *"\{0,1\}\(.*\)-[0-9]\{1,\}"\{0,1\} *$|\1|p' \
         "$d/docker-compose.yml" | head -1)
     [ -n "$n" ] && OPT_NAME="${OPT_NAME:-$n}"
     c=$(grep -c '^ *container_name:' "$d/docker-compose.yml" || true)
+    # GITEA_RUNNER_NAME is the fallback, so a project written by a version that
+    # did not set container_name still reports its own count rather than the
+    # built-in one.
+    [ "${c:-0}" -eq 0 ] && c=$(grep -c '^ *GITEA_RUNNER_NAME:' "$d/docker-compose.yml" || true)
     [ "${c:-0}" -gt 0 ] && OPT_COUNT="${OPT_COUNT:-$c}"
     if [ -f "$d/config.yaml" ]; then
         l=$(sed -n 's|^ *- "\([^:]*\):docker://.*|\1|p' "$d/config.yaml" | head -1)
@@ -636,8 +669,29 @@ fi
 
 # --- start ------------------------------------------------------------------
 say
+# --remove-orphans, and --force-recreate when a file changed.
+#
+# ORPHANS: dropping a pool from three runners to two leaves the third running,
+# with the config and the network it was started with. On this tier that is a
+# runner still taking jobs on the allowlist the change was meant to move it off,
+# which is the failure the change existed to prevent, still running and no
+# longer described by any file here.
+#
+# FORCE-RECREATE: config.yaml is bind-mounted into each container as a FILE, so
+# the mount follows the inode rather than the path. write_if_changed replaces
+# the file by rename, which gives the new content a new inode, and a container
+# that is already up keeps reading the old one. Compose will not recreate it
+# either, because the service definition did not change - only a file it mounts
+# did. The result is runners that come up, register, and run with the previous
+# allowlist and the previous network, reported by the check below as
+# "registered, but /config.yaml differs".
+compose_up_args=(-d --remove-orphans)
+[ "$WROTE_SOMETHING" = 1 ] && compose_up_args+=(--force-recreate)
+
 say "Starting $count runner(s)..."
-( cd "$DIR" && docker compose up -d ) || die "docker compose up failed in $DIR"
+[ "$WROTE_SOMETHING" = 1 ] && say "  recreating them: a file they mount was rewritten"
+( cd "$DIR" && docker compose up "${compose_up_args[@]}" ) \
+    || die "docker compose up failed in $DIR"
 
 # --- verify -----------------------------------------------------------------
 # Facts, not log lines. act_runner's messages change between releases, and a
