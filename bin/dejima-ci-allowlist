@@ -708,6 +708,29 @@ V_UNKNOWN=0
 v_ok()      { printf '  ok        %s\n' "$*" >&2; }
 v_fail()    { printf '  FAIL      %s\n' "$*" >&2; V_FAIL=$((V_FAIL + 1)); }
 v_unknown() { printf '  UNKNOWN   %s\n' "$*" >&2; V_UNKNOWN=$((V_UNKNOWN + 1)); }
+# Neither a pass nor a failure: something to tidy, which should not make an
+# otherwise correct host report a problem. A verifier that cries about leftovers
+# is one whose real findings get skimmed past.
+v_note()    { printf '  note      %s\n' "$*" >&2; }
+
+# The docker network sitting on a bridge, since the two are named independently
+# and the pre-pools one is not called dejima-ci-<id> at all.
+network_on_bridge() {  # network_on_bridge iface -> network name, or empty
+    command -v docker >/dev/null 2>&1 || return 0
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        [ "$(docker network inspect "$n" \
+             --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)" = "$1" ] \
+            && { printf '%s\n' "$n"; return 0; }
+    done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+    return 0
+}
+
+attached_count() {  # attached_count network -> how many containers, or empty
+    command -v docker >/dev/null 2>&1 || return 0
+    docker network inspect "$1" --format '{{len .Containers}}' 2>/dev/null || true
+}
 
 verify_network() {  # verify_network id bridge
     local id=$1 br=$2 net="dejima-ci-$id" actual
@@ -824,9 +847,34 @@ cmd_verify() {
             | grep -vxF -e "$claimed" || true) || true
         if [ -n "$stray" ]; then
             say "unclaimed"
+            local configured=" $(cfg_or_default bridge '') "
             while IFS= read -r b; do
                 [ -n "$b" ] || continue
-                v_fail "$b has rules but no pool in $f claims it"
+                local net att what
+                net=$(network_on_bridge "$b")
+                att=$(attached_count "${net:-}")
+
+                case "$configured" in
+                    *" $b "*) what="the shared network from before pools existed" ;;
+                    *)        what="a pool that was removed while its rules stayed" ;;
+                esac
+
+                if [ "${att:-0}" -gt 0 ] 2>/dev/null; then
+                    # Containers on a bridge no pool describes are jobs running
+                    # under an allowlist nothing here decided. That is a finding.
+                    v_fail "$b has ${att} container(s) and no pool claims it: $what."
+                    say "              Those jobs reach the base names only, since its rules"
+                    say "              name no pool's set. Move them onto their pool:"
+                    say "                sudo dejima-ci-runners --pool <scope>"
+                else
+                    # Rules for a bridge nothing is on. Untidy rather than unsafe,
+                    # so it does not fail the run.
+                    v_note "$b carries rules but nothing is on it: $what."
+                    say "              Nothing reaches anything through it. To retire it:"
+                    [ -n "$net" ] && say "                docker network rm $net"
+                    say "                remove $b from 'bridge' in $CONFIG"
+                    say "                sudo dejima-ci-firewall"
+                fi
             done <<< "$stray"
             say ""
         fi

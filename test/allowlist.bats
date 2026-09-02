@@ -1040,14 +1040,49 @@ EOF2
     [[ "$output" == *"problem(s)"* ]]
 }
 
-@test "verify catches a bridge no pool claims" {
-    # Almost always a pool removed from the file while its rules and its
-    # runners kept going.
+@test "a bridge with jobs on it and no pool is a failure" {
+    # Containers on a bridge no pool describes are jobs running under an
+    # allowlist nothing here decided.
     verify_stubs
+    cat > "$T/stub/docker" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"network ls"*) printf 'dejima-ci-9
+' ;;
+  *"network inspect dejima-ci-1"*) echo "dejima-ci1" ;;
+  *'{{index .Options "com.docker.network.bridge.name"}}'*) echo "dejima-ci9" ;;
+  *"{{len .Containers}}"*) echo 3 ;;
+  *) exit 1 ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/docker"
     printf -- '-A DEJIMA-CI-FWD -i dejima-ci9 -p tcp -m set --match-set ci-allow-9 dst -j ACCEPT\n' >> "$T/rules"
     run_tool verify
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no pool in"* ]]
+    [[ "$output" == *"3 container(s) and no pool claims it"* ]]
+    [[ "$output" == *"--pool"* ]]
+}
+
+@test "a bridge with nothing on it is a note, not a failure" {
+    # Rules for a bridge nothing is on are untidy rather than unsafe. A verifier
+    # that cries about leftovers is one whose real findings get skimmed past.
+    verify_stubs
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci9 -p tcp -m set --match-set ci-allow-9 dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nothing is on it"* ]]
+    [[ "$output" == *"dejima-ci-firewall"* ]]
+}
+
+@test "the pre-pools shared bridge is named as what it is" {
+    # It is not a pool that was removed; it is the network everything used
+    # before pools existed, still named by the config.
+    verify_stubs
+    echo "bridge = dejima-ci0" >> "$T/config"
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [[ "$output" == *"shared network from before pools existed"* ]]
 }
 
 @test "verify refuses to pass what it could not check" {
@@ -1069,4 +1104,19 @@ EOF2
     run_tool verify
     [ "$status" -eq 2 ]
     [[ "$output" == *"no pools declared"* ]]
+}
+
+@test "install.sh --tools deploys programs without the setup flow" {
+    # Most upgrades change only what is in bin/, and running the whole installer
+    # to put them there means answering prompts about a network, a resolver and
+    # a token that are already correct.
+    inst="${BATS_TEST_DIRNAME}/../install.sh"
+    grep -q '\-\-tools) TOOLS_ONLY=1' "$inst"
+    grep -q '^deploy_files() {' "$inst"
+}
+
+@test "--tools on a host with no config refuses rather than half-installing" {
+    # The programs would have nothing to read, and an installer that looks like
+    # it worked is worse than one that says what it did not do.
+    grep -q 'no \$CONF_DIR/config on this host' "${BATS_TEST_DIRNAME}/../install.sh"
 }

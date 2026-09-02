@@ -55,6 +55,11 @@ git pull
 sudo ./install.sh
 ```
 
+**Not `--tools` for this one.** That flag deploys the programs and stops, which
+is right for an upgrade that changes only what is in `bin/`. This one is a full
+run, because the questions about the network and the resolver are what let it
+notice anything else that has moved.
+
 **Say no to the runner question.** On a host that already has pools it now
 defaults to no, and lists what you have with each pool's count, label and
 network, so there is nothing to go and look up. Your runners are untouched
