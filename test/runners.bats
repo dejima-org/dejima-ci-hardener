@@ -318,12 +318,24 @@ privileged() {
 }
 
 @test "the flag dejima-ci-allowlist tells operators to run exists" {
-    # `pools add` prints a dejima-ci-runners command. A note telling
-    # somebody to run a flag that was never added is the shape of mistake this
-    # repository keeps making, so the two are held together here.
-    flag=$(grep -oE '\-\-network' "$REPO/bin/dejima-ci-allowlist" | head -1)
-    [ "$flag" = "--network" ]
-    grep -q '\-\-network)' "$REPO/bin/dejima-ci-runners"
+    # `pools add` prints a dejima-ci-runners command. Telling somebody to run a
+    # flag that was never added is the shape of mistake this repository keeps
+    # making, so the two are held together here.
+    grep -q '\-\-pool ' "$REPO/bin/dejima-ci-allowlist"
+    grep -q '\-\-pool) OPT_POOL=' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "--pool takes the network and the project from the pools file" {
+    # Two values that have to agree, typed once per pool. The second time, the
+    # path is the part that obviously differs, so the network stays as it was
+    # and both pools land on the first one's.
+    grep -q 'OPT_NETWORK="dejima-ci-\$pool_id"' "$REPO/bin/dejima-ci-runners"
+    grep -q 'DIR="\$pool_dir"' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "a project pointed at another pool's network is refused" {
+    # The mistake named above, caught rather than described.
+    grep -q 'belongs to a different pool' "$REPO/bin/dejima-ci-runners"
 }
 
 @test "an existing project's values become the defaults for a re-run" {

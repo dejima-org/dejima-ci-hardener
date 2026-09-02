@@ -794,15 +794,14 @@ IPSETEOF
 }
 
 @test "pools add says what has to happen before it means anything" {
-    # Writing the file scopes nothing on its own: the network has to exist, the
-    # allowlist has to be re-rendered, the firewall has to point the bridge at
-    # the set, and the pool's runners have to be on that network.
+    # Writing the file scopes nothing on its own: the allowlist has to be
+    # re-rendered, the firewall has to point the bridge at the set, and the
+    # pool's runners have to be on that network.
     : > "$T/pools"
     run_tool pools add acme/one
-    [[ "$output" == *"docker network create"* ]]
     [[ "$output" == *"render"* ]]
     [[ "$output" == *"dejima-ci-firewall"* ]]
-    [[ "$output" == *"--network"* ]]
+    [[ "$output" == *"--pool"* ]]
 }
 
 @test "pools add says the registration is what decides, not the label" {
@@ -926,11 +925,41 @@ DOCKEREOF
     [[ "$output" == *"network create"* ]]
 }
 
-@test "pools add tells you the generator will keep your count and label" {
-    # The migration that prompted this had an operator reading their own count
-    # out of a compose file in another terminal.
+@test "pools add points at the pool by name, not at a network and a path" {
+    # Two values that have to agree, in a command run once per pool. The second
+    # time, the path is the part that obviously differs, so the network stays as
+    # it was and both pools end up on the first one's.
     : > "$T/pools"
     run_tool pools add acme/one
-    [[ "$output" == *"reads an"* ]]
-    [[ "$output" == *"--dir"* ]]
+    [[ "$output" == *"--pool acme/one"* ]]
+    [[ "$output" != *"--network dejima-ci-1 --dir"* ]]
+}
+
+@test "pools add records the runner project when given one" {
+    : > "$T/pools"
+    run_tool pools add acme/one /srv/runners/one
+    [ "$(awk '$1 == "acme/one" { print $3 }' "$T/pools")" = /srv/runners/one ]
+}
+
+@test "pools add on an existing scope records the project rather than refusing" {
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/one /srv/runners/one
+    [ "$(awk '$1 == "acme/one" { print $3 }' "$T/pools")" = /srv/runners/one ]
+    [[ "$output" == *"--pool acme/one"* ]]
+}
+
+@test "a pool with no project recorded says it cannot be moved by name" {
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/one
+    [[ "$output" == *"not recorded"* ]]
+}
+
+@test "pools list shows the network and the project for each pool" {
+    printf 'acme/one 1 /srv/runners/one\nacme 2\n' > "$T/pools"
+    run_tool pools list
+    [[ "$output" == *"dejima-ci-1"* ]]
+    [[ "$output" == *"/srv/runners/one"* ]]
+    [[ "$output" == *"not recorded"* ]]
 }

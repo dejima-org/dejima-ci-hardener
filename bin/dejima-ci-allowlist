@@ -26,7 +26,7 @@ usage() {
     cat >&2 <<EOF
 Usage: $PROG [render|check|show] [--config PATH]
        $PROG repos [list|add|remove] [owner/repo...]
-       $PROG pools [list|add|remove] [owner/repo | owner]
+       $PROG pools [list|add|remove] [owner/repo | owner] [project-dir]
 
   render   fetch, validate and install the allowlist, reloading the resolver
            only if it changed (the default; what the timer runs)
@@ -364,6 +364,20 @@ collect() {
 # rather than the mechanism, and an owner-scoped pool is not a misconfiguration:
 # it is a pool that genuinely can run any of those repositories' jobs, holding
 # exactly what that implies.
+# Fields: scope, id, and optionally the runner project directory. The directory
+# is what lets dejima-ci-runners be told a pool rather than a path and a network,
+# which is the difference between one wrong word and a pool quietly running on
+# another pool's set.
+pool_dir() {  # pool_dir scope -> the project directory, or empty
+    [ -r "${CFG[pools_file]}" ] || return 0
+    sed 's/#.*//' "${CFG[pools_file]}" | awk -v r="$1" '$1 == r { print $3; exit }'
+}
+
+pool_id() {  # pool_id scope -> id, or empty
+    [ -r "${CFG[pools_file]}" ] || return 0
+    sed 's/#.*//' "${CFG[pools_file]}" | awk -v r="$1" '$1 == r { print $2; exit }'
+}
+
 pool_ids_for_repo() {  # pool_ids_for_repo owner/repo -> ids, one per line
     local repo=$1 owner=${1%%/*}
     [ -r "${CFG[pools_file]}" ] || return 0
@@ -554,9 +568,9 @@ cmd_pools() {  # cmd_pools [list|add|remove] [scope]
     case "$action" in
         list)
             if [ -s "$f" ]; then
-                printf '%-32s %-14s %s\n' SCOPE BRIDGE SET
-                sed 's/#.*//' "$f" | awk -v s="${CFG[ipset]}" -v b="$(bridge_prefix)" \
-                    'NF >= 2 { printf "%-32s %-14s %s-%s\n", $1, b $2, s, $2 }'
+                printf '%-24s %-12s %-14s %s\n' SCOPE NETWORK SET 'RUNNER PROJECT'
+                sed 's/#.*//' "$f" | awk -v s="${CFG[ipset]}" \
+                    'NF >= 2 { printf "%-24s %-12s %-14s %s\n", $1, "dejima-ci-" $2, s "-" $2, ($3 == "" ? "(not recorded)" : $3) }'
             else
                 say "no pools declared."
             fi
@@ -571,7 +585,7 @@ cmd_pools() {  # cmd_pools [list|add|remove] [scope]
     esac
 
     [ "$#" -ge 1 ] || die "$action needs a scope: owner/repo, or a bare owner"
-    local scope="$1"
+    local scope="$1" dir="${2:-}"
     valid_scope "$scope" || die "not a scope: $scope
 
 A scope is owner/repo for a pool registered to one repository, or a bare owner
@@ -588,7 +602,28 @@ for one registered to an organisation or a user."
     fi
 
     local existing; existing=$(printf '%s\n' "$current" | awk -v r="$scope" '$1 == r { print $2; exit }')
-    [ -z "$existing" ] || { say "$scope already has id $existing (${CFG[ipset]}-$existing)"; return 0; }
+    if [ -n "$existing" ]; then
+        # Re-running with a directory records it, rather than reporting the id
+        # and leaving the operator to edit the file. Attaching the project is
+        # the step that lets the pool be named instead of described.
+        if [ -n "$dir" ]; then
+            printf '%s\n' "$current" | awk -v r="$scope" '$1 != r' | grep -v '^$' > "$f.new" || true
+            printf '%s %s %s\n' "$scope" "$existing" "$dir" >> "$f.new"
+            chmod 0640 "$f.new"; mv "$f.new" "$f"
+            say "$scope: runner project recorded as $dir"
+            say ""
+            say "Now it can be moved onto its own network by name:"
+            say "  sudo dejima-ci-runners --pool $scope"
+            return 0
+        fi
+        say "$scope already has id $existing (${CFG[ipset]}-$existing)"
+        [ -n "$(pool_dir "$scope")" ] || {
+            say ""
+            say "Its runner project is not recorded, so it cannot be moved by name."
+            say "  sudo $PROG pools add $scope /path/to/that/project"
+        }
+        return 0
+    fi
 
     # Never reused, even when one is freed. An id names a set and a bridge that
     # may still hold addresses and still carry rules, and handing a freed one to
@@ -597,7 +632,7 @@ for one registered to an organisation or a user."
     next=$(( ${next:-0} + 1 ))
 
     printf '%s\n' "$current" | grep -v '^$' > "$f.new" || true
-    printf '%s %s\n' "$scope" "$next" >> "$f.new"
+    printf '%s %s %s\n' "$scope" "$next" "$dir" >> "$f.new"
     chmod 0640 "$f.new"; mv "$f.new" "$f"
 
     local br="$(bridge_prefix)$next" net="dejima-ci-$next"
@@ -634,10 +669,16 @@ for one registered to an organisation or a user."
     say "  sudo $PROG render"
     say "  sudo dejima-ci-firewall"
     say ""
-    say "And point this pool's runners at that network. The generator reads an"
-    say "existing project and offers its values back, so this changes the network"
-    say "and leaves the count and the label alone:"
-    say "  sudo dejima-ci-runners --role confined --network $net --dir <project>"
+    say "And point this pool's runners at that network. Name the pool rather"
+    say "than the network and the path: both are in this file, and a command"
+    say "carrying them is a command somebody copies for the second pool while"
+    say "changing only one of them."
+    if [ -n "$dir" ]; then
+        say "  sudo dejima-ci-runners --pool $scope"
+    else
+        say "  sudo $PROG pools add $scope /path/to/its/runner/project"
+        say "  sudo dejima-ci-runners --pool $scope"
+    fi
     say ""
     say "The pool has to be REGISTERED at this scope for any of it to mean"
     say "anything. A label is a request a branch makes; the registration is what"

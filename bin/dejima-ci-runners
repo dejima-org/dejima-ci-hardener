@@ -40,6 +40,7 @@ fi
 ROLE=""
 DIR=""
 OPT_NETWORK=""
+OPT_POOL=""
 FORGE=""
 OPT_NAME=""
 OPT_LABEL=""
@@ -62,9 +63,12 @@ Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
                      network namespace
   --dir PATH         where the compose project goes (default ~/runners of the
                      user who invoked sudo)
-  --network NAME     the job network, overriding the one in the config. For a
-                     pool scoped to one project, whose network and firewall set
-                     are its own - see dejima-ci-allowlist projects
+  --pool SCOPE       the pool to work on, named by what it is registered to.
+                     Its network and its project directory come from the pools
+                     file, so neither is typed - see dejima-ci-allowlist pools
+  --network NAME     the job network, overriding the one in the config. Prefer
+                     --pool: a network named by hand is a network somebody
+                     copies for the second pool and forgets to change
   --forge URL        the forge, e.g. https://gitea.example.com. Read from
                      $CONFIG when install.sh has run; required on a privileged
                      host, where it has not
@@ -96,6 +100,7 @@ while [ $# -gt 0 ]; do
         --dir) DIR="${2:?}"; shift ;;
         --forge) FORGE="${2:?}"; shift ;;
         --network) OPT_NETWORK="${2:?}"; shift ;;
+        --pool) OPT_POOL="${2:?}"; shift ;;
         --name) OPT_NAME="${2:?}"; shift ;;
         --label) OPT_LABEL="${2:?}"; shift ;;
         --count) OPT_COUNT="${2:?}"; shift ;;
@@ -180,10 +185,37 @@ say "=============================================================="
 say
 
 # --- values install.sh already knows ----------------------------------------
-# --network overrides the one config records, for a pool scoped to a single
-# project. That project has a network and a firewall set of its own, and a pool
-# left on the shared network would put its jobs back among everybody else's
-# names however carefully the sets were assigned.
+# --- a pool named, rather than described ------------------------------------
+#
+# `--network dejima-ci-1 --dir ~/runners/whatever` is two values that have to
+# agree with each other and with a third file, in a command an operator runs
+# once per pool. The second time they run it they change the path, because the
+# path is the part that obviously differs, and both pools end up on the first
+# one's network: one pool silently running with another's allowlist, which looks
+# exactly like success.
+#
+# So a pool can be named by what it is registered to, and both values come from
+# the file that already knows them.
+if [ -n "$OPT_POOL" ]; then
+    pools_file=$(cfg_get pools_file); : "${pools_file:=/etc/dejima-ci/pools}"
+    [ -r "$pools_file" ] || die "no pools file at $pools_file - declare the pool first:
+  sudo dejima-ci-allowlist pools add $OPT_POOL"
+    pool_id=$(sed 's/#.*//' "$pools_file" | awk -v r="$OPT_POOL" '$1 == r { print $2; exit }')
+    [ -n "$pool_id" ] || die "no pool registered to '$OPT_POOL' in $pools_file.
+What is there:
+$(sed 's/#.*//' "$pools_file" | awk 'NF >= 2 { print "  " $1 }')
+  sudo dejima-ci-allowlist pools add $OPT_POOL"
+    pool_dir=$(sed 's/#.*//' "$pools_file" | awk -v r="$OPT_POOL" '$1 == r { print $3; exit }')
+    [ -n "$pool_dir" ] || die "pool '$OPT_POOL' has no runner project recorded, so there is
+nothing to point at its network. Record it once:
+  sudo dejima-ci-allowlist pools add $OPT_POOL /path/to/that/project"
+    OPT_NETWORK="dejima-ci-$pool_id"
+    [ -n "$DIR" ] || DIR="$pool_dir"
+    say "Pool $OPT_POOL: network $OPT_NETWORK, project $DIR"
+    say "Both from $pools_file, so neither was typed here."
+    say
+fi
+
 network="${OPT_NETWORK:-$(cfg_get network)}"
 gateway="$(cfg_get gateway)"
 forge_api="$(cfg_get forge_api)"
@@ -271,6 +303,37 @@ ask DIR "Compose project directory" "$DIR"
 # So an existing project is read and its own values become the defaults. The
 # questions are still asked, because this creates new groups too, but pressing
 # enter through them reproduces what is there rather than replacing it.
+# THE MISTAKE THIS CATCHES: copy the command for the second pool, change the
+# path because the path is the part that obviously differs, and leave the
+# network as it was. Both pools then run on the first one's network, which is
+# one pool holding another's allowlist and looks exactly like it worked.
+#
+# The pools file knows which project belongs to which pool, so when it disagrees
+# with what was asked for, this stops.
+if [ -n "$OPT_NETWORK" ] && [ -z "$OPT_POOL" ]; then
+    pools_file=$(cfg_get pools_file); : "${pools_file:=/etc/dejima-ci/pools}"
+    if [ -r "$pools_file" ]; then
+        owning=$(sed 's/#.*//' "$pools_file" \
+                 | awk -v d="$DIR" '$3 != "" && $3 == d { print $1 " " $2; exit }')
+        if [ -n "$owning" ]; then
+            owning_scope="${owning%% *}"; owning_id="${owning##* }"
+            if [ "$OPT_NETWORK" != "dejima-ci-$owning_id" ]; then
+                die "that project belongs to a different pool.
+
+  $DIR
+    is the runner project for '$owning_scope', whose network is dejima-ci-$owning_id
+  --network $OPT_NETWORK
+    belongs to another pool.
+
+Putting it on that network gives this pool the other one's allowlist, which
+looks like it worked. Name the pool instead and neither value is typed:
+
+  sudo $PROG --pool $owning_scope"
+            fi
+        fi
+    fi
+fi
+
 if [ -f "$DIR/docker-compose.yml" ]; then
     existing_count=$(grep -c '^ *container_name:' "$DIR/docker-compose.yml" || true)
     [ "${existing_count:-0}" -gt 0 ] && OPT_COUNT="${OPT_COUNT:-$existing_count}"

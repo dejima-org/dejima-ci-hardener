@@ -71,18 +71,18 @@ it.
 
 ## 2. Declare the pools you have
 
-One line per pool, named by what it is **registered** to. The installer just
-listed your projects; the forge's **Actions, Runners** pages say which scope
-each was registered at, since a runner appears under the repository or the owner
-it belongs to.
+One line per pool, named by what it is **registered** to, with the runner
+project it belongs to. The installer just listed those projects; the forge's
+**Actions, Runners** pages say which scope each was registered at, since a
+runner appears under the repository or the owner it belongs to.
 
 ```sh
-sudo dejima-ci-allowlist pools add dejima          # an org-scoped pool
-sudo dejima-ci-allowlist pools add branderson      # a user-scoped pool
-sudo dejima-ci-allowlist pools add acme/widget     # one registered to a repo
+sudo dejima-ci-allowlist pools add dejima     ~/runners/dejima-runners
+sudo dejima-ci-allowlist pools add branderson ~/runners/branderson-runners
 ```
 
-Each assigns an id, **creates that pool's network**, and prints what is left.
+Each assigns an id, **creates that pool's network**, and records which project
+is that pool's, so nothing after this takes a path or a network name.
 
 ## 3. Render and apply
 
@@ -100,9 +100,16 @@ the meantime.
 the shared network reaches the base names only.
 
 ```sh
-sudo dejima-ci-runners --role confined --network dejima-ci-1 \
-     --dir ~/runners/<the project the installer listed>
+sudo dejima-ci-runners --pool dejima
+sudo dejima-ci-runners --pool branderson
 ```
+
+**Name the pool, not the network.** Both the network and the project directory
+come from the pools file. A command carrying them by hand is one an operator
+runs twice, changing the path the second time because the path is the part that
+obviously differs, and leaving both pools on the first one's network: one pool
+holding another's allowlist, which looks exactly like it worked. If you do pass
+`--network` by hand, that mistake is refused rather than performed.
 
 The generator reads the project already in that directory and offers its values
 back, so entering through its questions changes the network and keeps your count
