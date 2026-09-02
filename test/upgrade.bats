@@ -71,17 +71,24 @@ stub_check() {
 }
 
 @test "an up-to-date confined runner reports nothing outstanding" {
-    write_state tier=confined guest_version=2 node_version=2 node_asserted=2026-08-25 node_verified=yes
+    # Read from VERSION, not written in. Hard-coding the current version makes
+    # this fail on the next bump for a reason that has nothing to do with what
+    # it checks.
+    v=$(cat "$REPO/VERSION")
+    write_state tier=confined guest_version=$v node_version=$v node_asserted=2026-08-25 node_verified=yes
     run_tool status --no-verify
     [ "$status" -eq 0 ]
     [[ "$output" == *"Nothing."* ]]
 }
 
-@test "v2 needs node work only, so it must not ask for a re-snapshot" {
+@test "a node-only upgrade must not ask for a re-snapshot" {
     # The cheap kind of upgrade. Everything it changes lives on the hypervisor,
     # where no rollback reaches it. Reporting otherwise would train an operator
     # to ignore the sequence when it does matter.
-    write_state tier=confined guest_version=2 node_version=1 node_asserted=2026-06-01
+    #
+    # The guest is held at the current version so the only thing outstanding is
+    # v2's node work, which is what this is about.
+    write_state tier=confined guest_version=$(cat "$REPO/VERSION") node_version=1 node_asserted=2026-06-01
     run_tool status --no-verify
     [[ "$output" == *"console work outstanding"* ]]
     [[ "$output" != *"not one step"* ]]

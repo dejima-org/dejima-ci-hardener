@@ -308,3 +308,175 @@ privileged() {
     parse "$OUT/docker-compose.yml"
     parse "$OUT/config.yaml"
 }
+
+@test "--network overrides the job network the config records" {
+    # A pool scoped to one project needs that project's network. Left on the
+    # shared one, its jobs land among every other project's names however
+    # carefully the sets were assigned.
+    grep -q '\-\-network) OPT_NETWORK=' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_NETWORK:-\$(cfg_get network)' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the flag dejima-ci-allowlist tells operators to run exists" {
+    # `pools add` prints a dejima-ci-runners command. Telling somebody to run a
+    # flag that was never added is the shape of mistake this repository keeps
+    # making, so the two are held together here.
+    grep -q '\-\-pool ' "$REPO/bin/dejima-ci-allowlist"
+    grep -q '\-\-pool) OPT_POOL=' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "--pool takes the network and the project from the pools file" {
+    # Two values that have to agree, typed once per pool. The second time, the
+    # path is the part that obviously differs, so the network stays as it was
+    # and both pools land on the first one's.
+    grep -q 'OPT_NETWORK="dejima-ci-\$pool_id"' "$REPO/bin/dejima-ci-runners"
+    grep -q 'DIR="\$pool_dir"' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "a project pointed at another pool's network is refused" {
+    # The mistake named above, caught rather than described.
+    grep -q 'belongs to a different pool' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "an existing project's values become the defaults for a re-run" {
+    # Re-running to change one thing used to mean answering every question again
+    # from built-in defaults, with the existing answers readable only by opening
+    # the compose file in another terminal. An operator migrating a host that
+    # way loses the count and the label they had.
+    grep -q 'read_existing_project()' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_COUNT="\${OPT_COUNT:-\$c}"' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_NAME="\${OPT_NAME:-\$n}"' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the installer does not offer to build runners by default where they exist" {
+    # Re-running the installer to change one setting is the normal way to use
+    # it, and pressing enter through is how it is meant to be re-run. On a host
+    # with pools already, enter walked into generating a new one.
+    grep -q 'Set up or change a runner pool now? (y/N)" "n"' "$REPO/install.sh"
+}
+
+@test "the installer reads out the pools that are already there" {
+    # Wanting to know the count and label of what is running is the first thing
+    # anybody does at that prompt.
+    grep -q 'runner(s), label' "$REPO/install.sh"
+}
+
+@test "--pool implies the confined tier, since only it has a pool" {
+    # Requiring --role beside --pool was a second flag to get right for no
+    # decision the operator was making, and it printed usage rather than saying
+    # so. The privileged tier has no allowlist and no job network to scope.
+    grep -q 'if \[ -n "$OPT_POOL" \]; then' "$REPO/bin/dejima-ci-runners"
+    grep -q '"")          ROLE=confined ;;' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "--pool with the privileged tier is refused, not silently confined" {
+    # Quietly switching the tier under somebody who asked for privileged would
+    # be worse than the usage message it replaces.
+    grep -q 'pool is confined only' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the command the note gives runs without a second flag" {
+    # The note said `dejima-ci-runners --pool dejima`, which printed usage.
+    note=$(grep -h 'dejima-ci-runners --pool' "$REPO"/upgrades/*.md | head -1)
+    [ -n "$note" ]
+    [[ "$note" != *"--role"* ]]
+}
+
+# --- re-running against a project that already exists ------------------------
+
+@test "a re-run keeps the group name, rather than deriving it from the label" {
+    # The group name names the containers and the volumes. Accepting a default
+    # that does not match the project already there writes a second set of both
+    # into the same directory and orphans the running ones - and the default was
+    # derived from the label, which is shared across pools by design.
+    confined --name branderson --count 2
+    [ "$status" -eq 0 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+
+    # Again, taking every default, which is how a re-run is meant to be driven.
+    confined
+    [ "$status" -eq 0 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+    ! grep -q 'container_name: "dejima-confined-1"' "$OUT/docker-compose.yml"
+}
+
+@test "a re-run keeps the runner count" {
+    confined --name branderson --count 2
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+    confined
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+}
+
+@test "a re-run changing one thing leaves the rest alone" {
+    # The property that makes moving a pool to its own network a one-line change
+    # rather than a re-registration.
+    confined --name branderson --count 2
+    confined --network dejima-ci-2
+    grep -q 'network: "dejima-ci-2"' "$OUT/config.yaml"
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+}
+
+@test "the project is read before the questions it answers" {
+    # The group name is asked before the compose directory is, so reading the
+    # project only after the directory prompt was too late for the one default
+    # that matters most.
+    grep -q '\[ -n "\$DIR" \] && read_existing_project "\$DIR"' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "a pool naming a directory with no project says so" {
+    # Silence here is how "why is it suggesting three runners" happens. With
+    # --pool the operator asserted this directory is that pool's project, so
+    # finding nothing in it is a wrong path rather than a new group - and every
+    # default that follows is a built-in one.
+    printf 'branderson 2 %s/nowhere\n' "$TMP" > "$CONF_DIR/pools"
+    printf 'pools_file = %s/pools\n' "$CONF_DIR" >> "$CONF_DIR/config"
+    run bash "$RUNNERS" --pool branderson --non-interactive --no-start
+    [[ "$output" == *"NOTHING AT"* ]]
+    [[ "$output" == *"NEW group"* ]]
+}
+
+@test "the project summary is printed once, not once per call site" {
+    # It is read before the questions when the directory is known, and again
+    # after the directory prompt for when it was not. The same summary twice
+    # reads as two different projects.
+    confined --name branderson --count 2
+    confined
+    [ "$(printf '%s\n' "$output" | grep -c 'A project is already at')" -eq 1 ]
+}
+
+@test "the count is read from a project that predates container_name" {
+    # An older project still reports its own count rather than the built-in one.
+    confined --name branderson --count 2
+    sed -i '/container_name:/d' "$OUT/docker-compose.yml"
+    confined
+    [ "$(grep -c 'GITEA_RUNNER_NAME:' "$OUT/docker-compose.yml")" -eq 2 ]
+}
+
+# --- bringing them up after a change -----------------------------------------
+
+@test "a rewritten file recreates the containers" {
+    # config.yaml is bind-mounted into each container as a FILE, so the mount
+    # follows the inode. write_if_changed replaces the file by rename, giving
+    # the new content a new inode, and a container that is already up keeps
+    # reading the old one. Compose will not recreate it either: the service
+    # definition did not change, only a file it mounts did. The runners come up,
+    # register, and run with the previous allowlist and the previous network.
+    grep -q 'force-recreate' "$REPO/bin/dejima-ci-runners"
+    grep -q 'WROTE_SOMETHING=1' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "an unchanged run does not recreate them" {
+    # Recreating on every run would restart a healthy pool for nothing, and a
+    # runner mid-job would lose it.
+    grep -q '\[ "$WROTE_SOMETHING" = 1 \] && compose_up_args+=(--force-recreate)' \
+        "$REPO/bin/dejima-ci-runners"
+}
+
+@test "shrinking a pool removes the runner it dropped" {
+    # Going from three to two leaves the third running, with the config and the
+    # network it was started with: a runner still taking jobs on the allowlist
+    # this change was meant to move it off, no longer described by any file
+    # here.
+    grep -q 'remove-orphans' "$REPO/bin/dejima-ci-runners"
+}

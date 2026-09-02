@@ -39,6 +39,8 @@ fi
 
 ROLE=""
 DIR=""
+OPT_NETWORK=""
+OPT_POOL=""
 FORGE=""
 OPT_NAME=""
 OPT_LABEL=""
@@ -61,6 +63,13 @@ Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
                      network namespace
   --dir PATH         where the compose project goes (default ~/runners of the
                      user who invoked sudo)
+  --pool SCOPE       the pool to work on, named by what it is registered to.
+                     Its network and its project directory come from the pools
+                     file, so neither is typed, and it implies --role confined -
+                     see dejima-ci-allowlist pools
+  --network NAME     the job network, overriding the one in the config. Prefer
+                     --pool: a network named by hand is a network somebody
+                     copies for the second pool and forgets to change
   --forge URL        the forge, e.g. https://gitea.example.com. Read from
                      $CONFIG when install.sh has run; required on a privileged
                      host, where it has not
@@ -91,6 +100,8 @@ while [ $# -gt 0 ]; do
         --role) ROLE="${2:?}"; shift ;;
         --dir) DIR="${2:?}"; shift ;;
         --forge) FORGE="${2:?}"; shift ;;
+        --network) OPT_NETWORK="${2:?}"; shift ;;
+        --pool) OPT_POOL="${2:?}"; shift ;;
         --name) OPT_NAME="${2:?}"; shift ;;
         --label) OPT_LABEL="${2:?}"; shift ;;
         --count) OPT_COUNT="${2:?}"; shift ;;
@@ -104,6 +115,21 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+# --pool is a confined-tier idea, so it says which tier. The privileged tier has
+# no allowlist and no job network to scope: its jobs are in this host's network
+# namespace by design. Requiring --role beside it was a second flag to get right
+# for no decision the operator was actually making, and the whole point of --pool
+# is that nothing has to be typed twice.
+if [ -n "$OPT_POOL" ]; then
+    case "$ROLE" in
+        "")          ROLE=confined ;;
+        confined|ci) ROLE=confined ;;
+        *) echo "$PROG: --pool is confined only. The privileged tier has no allowlist" >&2
+           echo "and no job network to scope, so there is no pool for it." >&2
+           exit 2 ;;
+    esac
+fi
+
 case "$ROLE" in
     confined|privileged) ;;
     ci)      echo "$PROG: --role ci is now --role confined" >&2;        ROLE=confined ;;
@@ -135,6 +161,9 @@ ask() {
     printf -v "$__var" '%s' "$reply"
 }
 
+# WROTE_SOMETHING is read before `up`, because a file bind mount binds an inode
+# and this replaces one.
+WROTE_SOMETHING=0
 write_if_changed() {
     local path="$1" mode="$2" content="$3"
     if [ -f "$path" ] && [ "$content" = "$(cat "$path")" ]; then
@@ -145,6 +174,7 @@ write_if_changed() {
     printf '%s\n' "$content" > "$path.new"
     chmod "$mode" "$path.new"
     mv "$path.new" "$path"
+    WROTE_SOMETHING=1
     say "  written    $path"
 }
 
@@ -175,7 +205,38 @@ say "=============================================================="
 say
 
 # --- values install.sh already knows ----------------------------------------
-network="$(cfg_get network)"
+# --- a pool named, rather than described ------------------------------------
+#
+# `--network dejima-ci-1 --dir ~/runners/whatever` is two values that have to
+# agree with each other and with a third file, in a command an operator runs
+# once per pool. The second time they run it they change the path, because the
+# path is the part that obviously differs, and both pools end up on the first
+# one's network: one pool silently running with another's allowlist, which looks
+# exactly like success.
+#
+# So a pool can be named by what it is registered to, and both values come from
+# the file that already knows them.
+if [ -n "$OPT_POOL" ]; then
+    pools_file=$(cfg_get pools_file); : "${pools_file:=/etc/dejima-ci/pools}"
+    [ -r "$pools_file" ] || die "no pools file at $pools_file - declare the pool first:
+  sudo dejima-ci-allowlist pools add $OPT_POOL"
+    pool_id=$(sed 's/#.*//' "$pools_file" | awk -v r="$OPT_POOL" '$1 == r { print $2; exit }')
+    [ -n "$pool_id" ] || die "no pool registered to '$OPT_POOL' in $pools_file.
+What is there:
+$(sed 's/#.*//' "$pools_file" | awk 'NF >= 2 { print "  " $1 }')
+  sudo dejima-ci-allowlist pools add $OPT_POOL"
+    pool_dir=$(sed 's/#.*//' "$pools_file" | awk -v r="$OPT_POOL" '$1 == r { print $3; exit }')
+    [ -n "$pool_dir" ] || die "pool '$OPT_POOL' has no runner project recorded, so there is
+nothing to point at its network. Record it once:
+  sudo dejima-ci-allowlist pools add $OPT_POOL /path/to/that/project"
+    OPT_NETWORK="dejima-ci-$pool_id"
+    [ -n "$DIR" ] || DIR="$pool_dir"
+    say "Pool $OPT_POOL: network $OPT_NETWORK, project $DIR"
+    say "Both from $pools_file, so neither was typed here."
+    say
+fi
+
+network="${OPT_NETWORK:-$(cfg_get network)}"
 gateway="$(cfg_get gateway)"
 forge_api="$(cfg_get forge_api)"
 instance="${forge_api%/api/v1}"
@@ -190,7 +251,11 @@ The confined tier's runners attach jobs to the network install.sh creates; there
 is nothing to point them at until it has run."
     [ -n "$gateway" ] || die "no gateway in $CONFIG - re-run install.sh"
     say "From $CONFIG, not asked again:"
-    say "  job network   $network      (container.network)"
+    if [ -n "${OPT_NETWORK:-}" ]; then
+        say "  job network   $network      (container.network, from --network)"
+    else
+        say "  job network   $network      (container.network)"
+    fi
     say "  resolver      $gateway      (--dns, the allowlisting resolver)"
     say
 else
@@ -213,6 +278,107 @@ instance="${instance%/}"
 instance="${instance%/api/v1}"
 say "  forge         $instance"
 say
+
+# --- what is already in that directory --------------------------------------
+#
+# Read BEFORE the questions it should be answering. Re-running this to change
+# one thing used to mean answering every question again from built-in defaults,
+# with the existing answers readable only by opening the compose file in another
+# terminal.
+#
+# The group name is the one that matters most: it names the containers and the
+# volumes, so accepting a default that does not match the project already there
+# writes a second set of both into the same directory and orphans the running
+# ones. With --pool the directory is known before anything is asked, which is
+# what makes reading it this early possible.
+READ_PROJECT_DONE=0
+read_existing_project() {  # read_existing_project DIR
+    local d=$1
+    # Once. It is called before the questions when the directory is already
+    # known, and again after the directory prompt for when it was not, and
+    # printing the same summary twice reads as two different projects.
+    [ "$READ_PROJECT_DONE" = 0 ] || return 0
+
+    if [ ! -f "$d/docker-compose.yml" ]; then
+        # Silence here is how "why is it suggesting three runners" happens. For
+        # a new pool there is nothing to say, but --pool means the operator
+        # asserted this directory is that pool's project, so finding nothing in
+        # it is a wrong path rather than a new group - and every default below
+        # will be a built-in one.
+        if [ -n "$OPT_POOL" ]; then
+            say
+            say "NOTHING AT $d"
+            say "  $OPT_POOL names that directory in the pools file, but there is no"
+            say "  compose project in it. Every default below is a built-in one, so"
+            say "  taking them writes a NEW group rather than changing yours."
+            say
+            say "  Check where the project actually is and record it:"
+            say "    sudo dejima-ci-allowlist pools add $OPT_POOL /the/right/path"
+            say
+        fi
+        return 0
+    fi
+    READ_PROJECT_DONE=1
+    local n c l j
+    n=$(sed -n 's|^ *container_name: *"\{0,1\}\(.*\)-[0-9]\{1,\}"\{0,1\} *$|\1|p' \
+        "$d/docker-compose.yml" | head -1)
+    [ -n "$n" ] && OPT_NAME="${OPT_NAME:-$n}"
+    c=$(grep -c '^ *container_name:' "$d/docker-compose.yml" || true)
+    # GITEA_RUNNER_NAME is the fallback, so a project written by a version that
+    # did not set container_name still reports its own count rather than the
+    # built-in one.
+    [ "${c:-0}" -eq 0 ] && c=$(grep -c '^ *GITEA_RUNNER_NAME:' "$d/docker-compose.yml" || true)
+    [ "${c:-0}" -gt 0 ] && OPT_COUNT="${OPT_COUNT:-$c}"
+    if [ -f "$d/config.yaml" ]; then
+        l=$(sed -n 's|^ *- "\([^:]*\):docker://.*|\1|p' "$d/config.yaml" | head -1)
+        [ -n "$l" ] && OPT_LABEL="${OPT_LABEL:-$l}"
+        j=$(sed -n 's|^ *- "[^:]*:docker://\(.*\)"|\1|p' "$d/config.yaml" | head -1)
+        [ -n "$j" ] && OPT_JOB_IMAGE="${OPT_JOB_IMAGE:-$j}"
+    fi
+    say
+    say "A project is already at $d, and its values are the defaults below:"
+    say "  group    ${OPT_NAME:-?}"
+    say "  runners  ${OPT_COUNT:-?}"
+    say "  label    ${OPT_LABEL:-?}"
+    say
+    say "Enter through the questions reproduces it. Change only what you came"
+    say "for; nothing falls back to a built-in default."
+}
+
+# THE MISTAKE THIS CATCHES: copy the command for the second pool, change the
+# path because the path is the part that obviously differs, and leave the
+# network as it was. Both pools then run on the first one's network, which is
+# one pool holding another's allowlist and looks exactly like it worked.
+#
+# The pools file knows which project belongs to which pool, so when it disagrees
+# with what was asked for, this stops. Only for the hand-written form: --pool
+# takes both values from that file and cannot disagree with itself.
+if [ -n "$OPT_NETWORK" ] && [ -z "$OPT_POOL" ] && [ -n "$DIR" ]; then
+    pools_file=$(cfg_get pools_file); : "${pools_file:=/etc/dejima-ci/pools}"
+    if [ -r "$pools_file" ]; then
+        owning=$(sed 's/#.*//' "$pools_file" \
+                 | awk -v d="$DIR" '$3 != "" && $3 == d { print $1 " " $2; exit }')
+        if [ -n "$owning" ]; then
+            owning_scope="${owning%% *}"; owning_id="${owning##* }"
+            if [ "$OPT_NETWORK" != "dejima-ci-$owning_id" ]; then
+                die "that project belongs to a different pool.
+
+  $DIR
+    is the runner project for '$owning_scope', whose network is dejima-ci-$owning_id
+  --network $OPT_NETWORK
+    belongs to another pool.
+
+Putting it on that network gives this pool the other one's allowlist, which
+looks like it worked. Name the pool instead and neither value is typed:
+
+  sudo $PROG --pool $owning_scope"
+            fi
+        fi
+    fi
+fi
+
+# Known up front when the pool named it, or when --dir was passed.
+[ -n "$DIR" ] && read_existing_project "$DIR"
 
 # --- what it asks -----------------------------------------------------------
 
@@ -247,6 +413,11 @@ say "second group registered later sits beside this one rather than replacing"
 say "it - which is why the default carries the group name."
 ask DIR "Compose project directory" "$DIR"
 [ -n "$DIR" ] || die "a directory is required"
+
+# Only reachable when the directory was not known before the questions, since
+# read_existing_project fills nothing that is already set.
+read_existing_project "$DIR"
+
 
 case "$label" in
     ubuntu-*|ubuntu|latest|self-hosted)
@@ -498,8 +669,29 @@ fi
 
 # --- start ------------------------------------------------------------------
 say
+# --remove-orphans, and --force-recreate when a file changed.
+#
+# ORPHANS: dropping a pool from three runners to two leaves the third running,
+# with the config and the network it was started with. On this tier that is a
+# runner still taking jobs on the allowlist the change was meant to move it off,
+# which is the failure the change existed to prevent, still running and no
+# longer described by any file here.
+#
+# FORCE-RECREATE: config.yaml is bind-mounted into each container as a FILE, so
+# the mount follows the inode rather than the path. write_if_changed replaces
+# the file by rename, which gives the new content a new inode, and a container
+# that is already up keeps reading the old one. Compose will not recreate it
+# either, because the service definition did not change - only a file it mounts
+# did. The result is runners that come up, register, and run with the previous
+# allowlist and the previous network, reported by the check below as
+# "registered, but /config.yaml differs".
+compose_up_args=(-d --remove-orphans)
+[ "$WROTE_SOMETHING" = 1 ] && compose_up_args+=(--force-recreate)
+
 say "Starting $count runner(s)..."
-( cd "$DIR" && docker compose up -d ) || die "docker compose up failed in $DIR"
+[ "$WROTE_SOMETHING" = 1 ] && say "  recreating them: a file they mount was rewritten"
+( cd "$DIR" && docker compose up "${compose_up_args[@]}" ) \
+    || die "docker compose up failed in $DIR"
 
 # --- verify -----------------------------------------------------------------
 # Facts, not log lines. act_runner's messages change between releases, and a

@@ -170,15 +170,16 @@ there is one.
 - **Exfiltration, and command-and-control.** Egress to the internet is unbounded
   from the VM, deliberately. The confined tier's allowlist bounds it for a job,
   and an escape to root on the VM is precisely what leaves that behind.
-- **One trusted project widening another's job network.** The allowlist is
-  rendered as the union of every declaration in `repos_file`, so a name added to
-  any of them is reachable from every project's jobs. It is bounded by who can
-  do it: the declaration is read from `main` of a repository you listed, and a
-  repository on that list is already trusted to run code on this host. So the
-  exposure is between trusted-but-separate projects, and to a dependency that
-  reaches one project's `main`, rather than to anyone who can open a pull
-  request. [Per-project allowlists](#rejected-with-reasons) says what isolating
-  them would take.
+- **Resolution, though not reach.** A job can resolve every allowlisted name;
+  what it cannot do is connect to one outside its own project's set. One dnsmasq
+  has one view, and a per-project view would mean a resolver per project. The
+  leak is names, which are public in the repositories that declared them.
+- **Everything a runner pool could be asked to run.** A pool's set is the union
+  of the declarations of every repository it is registered for, so an
+  organisation pool holds that whole organisation's names. That union is what
+  the pool can already be made to run: a branch in any of those repositories can
+  put a job on it. Registering a pool to one repository is how the union gets
+  small, and is the recommendation.
 - **The forge and the resolver.** Both are reachable from this VM on the ports
   listed, by anything on it. "No LAN access" is not literally true.
 - **The forge credential the runner registers with.** It is on the box, and
@@ -224,30 +225,35 @@ What to check, rather than re-argue:
 
 ## Rejected, with reasons
 
-### Per-project allowlists, for now
+### A per-project resolver, rather than a per-project set
 
-Every job on the confined tier resolves against one list and is filtered by one
-ipset, so every project's declaration is reachable from every project's jobs.
-Isolating them is possible and is not yet done, which is a scheduling answer
-rather than a design one.
+Scoping the resolver is the obvious way to keep one project's names away from
+another's jobs, and it would have bought almost nothing.
 
-What it takes, in the order the pieces constrain each other:
+The set holds addresses with no memory of which name put them there, and every
+bridge's rule matched the same one, so the union was at the address layer and
+not only at the name layer. A project that could not resolve a name could still
+connect to the address another project's lookup had already put in the set, and
+declarations are public in the repositories they come from.
 
-- **A set per project.** The current set holds addresses with no memory of which
-  name put them there, and every bridge's rule matches the same one. So a
-  per-project *resolver* alone buys almost nothing: a project that cannot
-  resolve a name can still connect to the address another project's lookup put
-  in the set, and declarations are public. dnsmasq will populate several sets
-  per name (`ipset=/name/set-a,set-b`), so this part needs one resolver, not
-  one per project.
-- **A bridge per project**, because the only thing the firewall can tell about a
-  job is which network it came in on. That is the handle, and there is no other.
-- **A runner pool per project**, registered to that repository, so a pool only
-  ever receives jobs it has the network for.
+So the set is what got scoped. dnsmasq will place a name's addresses in several
+sets at once (`ipset=/name/set-a,set-b`), which means one resolver can fill each
+pool's set and no others, and the shared resolver stops mattering. The cost is
+that every job can still resolve every name, which is a names leak rather than a
+reach one.
 
-The cost is a network, a set and a runner registration per isolated project,
-which is why the likely shape is one pool per repository that actually declares
-domains and one shared pool for those that declare none.
+### Scoping by label, rather than by what a pool is registered to
+
+A label looks like the natural handle: give each pool its own, and let workflows
+name it. It is not a boundary. A branch writes its own `runs-on`, so a label is
+a request the job makes rather than a property the operator sets, and a hostile
+branch can name any label whose pool is willing to serve its repository.
+
+What a runner may take is decided by its registration, which a branch cannot
+change: a repository scoped runner only ever takes that repository's jobs. So
+the set is built from the registration, and the union it holds is exactly what
+that pool could be asked to run. Labels are left alone, and pools may share
+them.
 
 Recorded so they are not re-proposed without new information.
 

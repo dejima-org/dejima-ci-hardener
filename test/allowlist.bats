@@ -50,11 +50,16 @@ EOF
     echo token > "$T/token"
     echo "owner/repo" > "$T/repos"
     : > "$T/base"
+    # A correctly configured host: a repository that declares names has a set of
+    # its own. Without one the render refuses, which is its own test rather than
+    # the state every other test starts from.
+    echo "owner/repo 1" > "$T/pools"
 
     cat > "$T/config" <<EOF
 forge_api = https://gitea.example.com/api/v1
 token_file = $T/token
 repos_file = $T/repos
+pools_file = $T/pools
 base_file = $T/base
 upstream = 198.51.100.53
 out = $T/out/ci-allow.conf
@@ -546,11 +551,43 @@ stub_ipset() {
 #!/usr/bin/env bash
 case "$1" in
     list) printf '%s\n' "${STUB_IPSET_NAMES:-ci-allow}" ;;
+    create) ;;
     flush) printf '%s\n' "$2" >> "$STUB_DIR/flushed" ;;
 esac
 exit 0
 IPSETEOF
     chmod +x "$T/stub/ipset"
+}
+
+@test "a revocation flushes the project sets, not just the bare name" {
+    # The config key is a prefix now: names live in a set per project plus a
+    # base set, and the bare name holds nothing. Flushing it alone would empty
+    # an unused set and report a revocation that had not happened.
+    stub_ipset
+    STUB_IPSET_NAMES=$'ci-allow\nci-allow-base\nci-allow-1'
+    export STUB_IPSET_NAMES
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx ci-allow-1 "$STUB_DIR/flushed"
+    grep -qx ci-allow-base "$STUB_DIR/flushed"
+}
+
+@test "a set belonging to something else is not flushed" {
+    # The prefix is the boundary. Another tool's set on the same host is not
+    # this program's to empty.
+    stub_ipset
+    STUB_IPSET_NAMES=$'ci-allow-1\nsomeone-elses-set'
+    export STUB_IPSET_NAMES
+    mkdir -p "$STUB_DIR/owner"
+    printf 'keep.example.com\ndrop.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    printf 'keep.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    ! grep -qx someone-elses-set "$STUB_DIR/flushed"
 }
 
 @test "removing a name flushes the set, or it stays reachable by address" {
@@ -632,4 +669,297 @@ IPSETEOF
     run_tool render
     [ "$(head -1 "$STUB_DIR/order")" = flush ]
     [ "$(tail -1 "$STUB_DIR/order")" = reload ]
+}
+
+# --- scoping a project to its own set ----------------------------------------
+#
+# One list and one set meant every project's declaration was reachable from
+# every project's jobs. The set is the part that matters: it holds addresses
+# with no memory of which name put them there, so scoping the resolver alone
+# would leave a project able to connect by address to anything another project
+# resolved.
+
+@test "a declaration with no set of its own refuses the render" {
+    # There is no shared fallback. A set every project can reach is the thing
+    # this exists to end, and falling back to one would be arriving there by
+    # doing nothing rather than by choosing it.
+    : > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"owner/repo"* ]]
+    [[ "$output" == *"pools add"* ]]
+}
+
+@test "a refused render leaves the allowlist that was already there" {
+    # The cost of an unfinished migration is a loud error on the timer, not a
+    # host that has lost its allowlist.
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    before=$(cat "$T/out/ci-allow.conf")
+    : > "$T/pools"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [ "$(cat "$T/out/ci-allow.conf")" = "$before" ]
+}
+
+@test "a repository that declares nothing needs no set" {
+    # It has no names to scope. Requiring an assignment would be friction with
+    # nothing behind it.
+    : > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo 404 > "$STUB_DIR/owner/repo.status"
+    echo base.example.com > "$T/base"
+    run_tool render
+    [ "$status" -eq 0 ]
+}
+
+@test "base names go in a set of their own, not the shared one" {
+    # Otherwise an assigned project matching base would be matching every
+    # unassigned project too, and the scoping would be for nothing.
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    echo base.example.com > "$T/base"
+    run_tool render
+    grep -qx 'ipset=/base.example.com/ci-allow-base' "$T/out/ci-allow.conf"
+}
+
+@test "an assigned project's names go in its own set" {
+    printf 'owner/repo 1\n' > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx 'ipset=/one.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    ! grep -qx 'ipset=/one.example.com/ci-allow' "$T/out/ci-allow.conf"
+}
+
+@test "a name two projects declare lands in both their sets" {
+    # dnsmasq takes several sets per name, which is what lets one resolver
+    # serve every project without the answer widening anyone else's reach.
+    printf 'owner/repo 1\nother/repo 2\n' > "$T/pools"
+    printf 'owner/repo\nother/repo\n' > "$T/repos"
+    mkdir -p "$STUB_DIR/owner" "$STUB_DIR/other"
+    echo shared.example.com > "$STUB_DIR/owner/repo.body"
+    echo shared.example.com > "$STUB_DIR/other/repo.body"
+    run_tool render
+    grep -qx 'ipset=/shared.example.com/ci-allow-1,ci-allow-2' "$T/out/ci-allow.conf"
+}
+
+@test "a name one project declares does not reach the other's set" {
+    # The whole point.
+    printf 'owner/repo 1\nother/repo 2\n' > "$T/pools"
+    printf 'owner/repo\nother/repo\n' > "$T/repos"
+    mkdir -p "$STUB_DIR/owner" "$STUB_DIR/other"
+    echo mine.example.com > "$STUB_DIR/owner/repo.body"
+    echo theirs.example.com > "$STUB_DIR/other/repo.body"
+    run_tool render
+    grep -qx 'ipset=/mine.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    grep -qx 'ipset=/theirs.example.com/ci-allow-2' "$T/out/ci-allow.conf"
+}
+
+@test "every name still resolves, since the scoping is the set and not the view" {
+    # One dnsmasq has one view. The leak is names, which are public in the
+    # repositories they come from; what a job can reach is the set.
+    printf 'owner/repo 1\n' > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    grep -q '^server=/one.example.com/' "$T/out/ci-allow.conf"
+}
+
+@test "the name count is names, not lines" {
+    # Each name emits a server= and an ipset= line now. Counting lines and
+    # subtracting the header reported double.
+    mkdir -p "$STUB_DIR/owner"; printf 'a.example.com\nb.example.com\n' > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [[ "$output" == *"2 names"* ]]
+}
+
+@test "pools add gives out an id and never reuses one" {
+    # An id names a set and a bridge that may still hold addresses and still
+    # carry rules. Handing a freed one to a different pool would give it
+    # whatever the last occupant left behind.
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/two
+    run_tool pools remove acme/one
+    run_tool pools add acme/three
+    [ "$(awk '$1 == "acme/three" { print $2 }' "$T/pools")" = 3 ]
+}
+
+@test "pools add is idempotent" {
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/one
+    [ "$(grep -c 'acme/one' "$T/pools")" -eq 1 ]
+    [[ "$output" == *"already has id"* ]]
+}
+
+@test "pools add says what has to happen before it means anything" {
+    # Writing the file scopes nothing on its own: the allowlist has to be
+    # re-rendered, the firewall has to point the bridge at the set, and the
+    # pool's runners have to be on that network.
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [[ "$output" == *"render"* ]]
+    [[ "$output" == *"dejima-ci-firewall"* ]]
+    [[ "$output" == *"--pool"* ]]
+}
+
+@test "pools add says the registration is what decides, not the label" {
+    # A branch chooses its own runs-on, so a label is a request. What a runner
+    # may take is decided by what it is registered to, which a branch cannot
+    # change.
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [[ "$output" == *"REGISTERED"* ]]
+    [[ "$output" == *"label"* ]]
+}
+
+@test "pools list explains what a scope is" {
+    run_tool pools list
+    [[ "$output" == *"REGISTERED"* ]]
+    [[ "$output" == *"bare owner"* ]]
+}
+
+# --- an owner-scoped pool holds the union it can actually run ----------------
+
+@test "an owner-scoped pool gets every repository of that owner" {
+    # Safe, because a pool takes jobs from the repositories it is registered
+    # for: a hostile branch in one of them can already put a job on it, so its
+    # names being in that pool's set gives away nothing new.
+    printf 'acme 1
+' > "$T/pools"
+    printf 'acme/one
+acme/two
+' > "$T/repos"
+    mkdir -p "$STUB_DIR/acme"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo two.example.com > "$STUB_DIR/acme/two.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx 'ipset=/one.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    grep -qx 'ipset=/two.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+}
+
+@test "a repository-scoped pool does not get the owner's other repositories" {
+    # The reason repository scoping is the recommendation: it is how a pool
+    # gets a small set.
+    printf 'acme/one 1
+acme 2
+' > "$T/pools"
+    printf 'acme/one
+acme/two
+' > "$T/repos"
+    mkdir -p "$STUB_DIR/acme"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo two.example.com > "$STUB_DIR/acme/two.body"
+    run_tool render
+    # acme/one runs on both pools, so both may reach its name.
+    grep -qx 'ipset=/one.example.com/ci-allow-1,ci-allow-2' "$T/out/ci-allow.conf"
+    # acme/two runs only on the owner pool, and the repository pool never sees it.
+    grep -qx 'ipset=/two.example.com/ci-allow-2' "$T/out/ci-allow.conf"
+}
+
+@test "a declaration no pool can run refuses the render" {
+    # Almost always a repository trusted to widen the allowlist and never given
+    # a runner, which is a job queueing rather than a security decision.
+    # Rendering its names into nothing would hide that.
+    printf 'other/repo 1
+' > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"owner/repo"* ]]
+    [[ "$output" == *"pools add"* ]]
+}
+
+@test "an owner scope does not match a different owner" {
+    printf 'other 1
+' > "$T/pools"
+    mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
+    run_tool render
+    [ "$status" -eq 2 ]
+}
+
+# --- the migration an operator actually performs -----------------------------
+
+@test "pools add creates the network rather than printing it to paste" {
+    # The bridge name has to match what the firewall writes rules for, and it is
+    # the one value in the procedure that nothing else checks: a typo produces a
+    # network that works, a set that fills, and a firewall rule for an interface
+    # that does not exist.
+    cat > "$T/stub/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/docker.log"
+case "$1 $2" in
+    "network inspect") exit 1 ;;   # not there yet
+esac
+exit 0
+DOCKEREOF
+    chmod +x "$T/stub/docker"
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [ "$status" -eq 0 ]
+    grep -q 'network create' "$STUB_DIR/docker.log"
+    grep -q 'com.docker.network.bridge.name=dejima-ci1' "$STUB_DIR/docker.log"
+    [[ "$output" == *"created network"* ]]
+}
+
+@test "pools add leaves a network that is already there" {
+    cat > "$T/stub/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/docker.log"
+exit 0
+DOCKEREOF
+    chmod +x "$T/stub/docker"
+    : > "$T/pools"
+    run_tool pools add acme/one
+    ! grep -q 'network create' "$STUB_DIR/docker.log"
+    [[ "$output" == *"already exists"* ]]
+}
+
+@test "pools add on a host without docker says what to run where" {
+    # The allowlist can be edited from somewhere that is not the runner host.
+    : > "$T/pools"
+    PATH="/usr/bin:/bin" run "$BIN" pools add acme/one --config "$T/config"
+    [[ "$output" == *"docker is not on this host"* ]]
+    [[ "$output" == *"network create"* ]]
+}
+
+@test "pools add points at the pool by name, not at a network and a path" {
+    # Two values that have to agree, in a command run once per pool. The second
+    # time, the path is the part that obviously differs, so the network stays as
+    # it was and both pools end up on the first one's.
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [[ "$output" == *"--pool acme/one"* ]]
+    [[ "$output" != *"--network dejima-ci-1 --dir"* ]]
+}
+
+@test "pools add records the runner project when given one" {
+    : > "$T/pools"
+    run_tool pools add acme/one /srv/runners/one
+    [ "$(awk '$1 == "acme/one" { print $3 }' "$T/pools")" = /srv/runners/one ]
+}
+
+@test "pools add on an existing scope records the project rather than refusing" {
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/one /srv/runners/one
+    [ "$(awk '$1 == "acme/one" { print $3 }' "$T/pools")" = /srv/runners/one ]
+    [[ "$output" == *"--pool acme/one"* ]]
+}
+
+@test "a pool with no project recorded says it cannot be moved by name" {
+    : > "$T/pools"
+    run_tool pools add acme/one
+    run_tool pools add acme/one
+    [[ "$output" == *"not recorded"* ]]
+}
+
+@test "pools list shows the network and the project for each pool" {
+    printf 'acme/one 1 /srv/runners/one\nacme 2\n' > "$T/pools"
+    run_tool pools list
+    [[ "$output" == *"dejima-ci-1"* ]]
+    [[ "$output" == *"/srv/runners/one"* ]]
+    [[ "$output" == *"not recorded"* ]]
 }
