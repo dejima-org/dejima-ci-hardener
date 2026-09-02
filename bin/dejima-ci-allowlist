@@ -814,11 +814,40 @@ verify_set() {  # verify_set name
     fi
 }
 
+# The address dnsmasq answers on, and the one every pool's runners are given as
+# --dns. It belongs to the shared network's bridge, not to any pool's, so it is
+# the one thing the shared network is still for after every pool has its own.
+#
+# Checked first because losing it takes DNS away from every pool at once, and
+# the symptom is jobs failing in apt rather than anything naming a resolver.
+verify_gateway() {
+    local gw="${CFG[gateway]}"
+    [ -n "$gw" ] || { v_unknown "no gateway in $CONFIG, so nothing says where the resolver listens"; return; }
+    if ! command -v ip >/dev/null 2>&1; then
+        v_unknown "resolver address $gw: 'ip' is not on this host"; return
+    fi
+    local on; on=$(ip -o -4 addr show 2>/dev/null | awk -v g="$gw" '$4 ~ "^" g "/" { print $2; exit }')
+    if [ -n "$on" ]; then
+        v_ok "resolver address $gw is on $on"
+    else
+        v_fail "resolver address $gw is on no interface, so dnsmasq cannot answer"
+        say "              Every pool's runners are given --dns $gw, so this is DNS"
+        say "              gone for all of them at once. It belongs to the shared"
+        say "              network's bridge. Recreate that network:"
+        say "                docker network create --driver bridge \\"
+        say "                  -o com.docker.network.bridge.name=$(cfg_or_default bridge dejima-ci0) \\"
+        say "                  --subnet $(cfg_or_default subnet '<subnet>') --gateway $gw \\"
+        say "                  $(cfg_or_default network dejima-ci)"
+        say "                sudo systemctl restart dnsmasq"
+    fi
+}
+
 cmd_verify() {
     local f="${CFG[pools_file]}" any=0
     [ -s "$f" ] || die "no pools declared in $f - nothing to verify.
   sudo $PROG pools add <owner/repo | owner> [project-dir]"
 
+    verify_gateway
     verify_set "${CFG[ipset]}-base"
     say ""
 
@@ -859,7 +888,25 @@ cmd_verify() {
                     *)        what="a pool that was removed while its rules stayed" ;;
                 esac
 
-                if [ "${att:-0}" -gt 0 ] 2>/dev/null; then
+                # The shared network holds the resolver address every pool
+                # depends on, so it is not retirable however empty it looks.
+                # Advising `docker network rm` on it took DNS away from every
+                # pool on a live host.
+                local holds_resolver=0
+                if [ -n "${CFG[gateway]}" ] && command -v ip >/dev/null 2>&1; then
+                    [ "$(ip -o -4 addr show dev "$b" 2>/dev/null \
+                         | awk -v g="${CFG[gateway]}" '$4 ~ "^" g "/" { print "y"; exit }')" = y ] \
+                        && holds_resolver=1
+                fi
+
+                if [ "$holds_resolver" = 1 ]; then
+                    v_note "$b carries rules and holds the resolver address ${CFG[gateway]}."
+                    say "              Keep the network: every pool's runners are given it as"
+                    say "              --dns, so removing it takes DNS from all of them. To stop"
+                    say "              writing rules for it, without removing it:"
+                    say "                set 'bridge =' in $CONFIG, with nothing after it"
+                    say "                sudo dejima-ci-firewall"
+                elif [ "${att:-0}" -gt 0 ] 2>/dev/null; then
                     # Containers on a bridge no pool describes are jobs running
                     # under an allowlist nothing here decided. That is a finding.
                     v_fail "$b has ${att} container(s) and no pool claims it: $what."

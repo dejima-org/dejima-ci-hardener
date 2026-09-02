@@ -972,6 +972,20 @@ DOCKEREOF
 # getting it wrong looks like it worked.
 
 verify_stubs() {  # verify_stubs [rules-file]
+    # The resolver's address, on the shared bridge. Losing it takes DNS from
+    # every pool at once, so verify checks for it and the fixture has to have
+    # one for anything else to be exercised.
+    cat > "$T/stub/ip" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"addr show dev dejima-ci0"*) [ -n "${STUB_NO_GW:-}" ] || echo "1: dejima-ci0    inet 192.0.2.1/24 scope global" ;;
+  *"addr show dev"*) ;;
+  *"addr show"*) [ -n "${STUB_NO_GW:-}" ] || echo "1: dejima-ci0    inet 192.0.2.1/24 scope global" ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/ip"
+    grep -q '^gateway' "$T/config" || echo "gateway = 192.0.2.1" >> "$T/config"
     cat > "$T/stub/docker" <<'EOF2'
 #!/usr/bin/env bash
 case "$*" in *"network inspect dejima-ci-1"*) echo "dejima-ci1"; exit 0 ;; esac
@@ -1075,20 +1089,36 @@ EOF2
     [[ "$output" == *"dejima-ci-firewall"* ]]
 }
 
-@test "the pre-pools shared bridge is named as what it is" {
-    # It is not a pool that was removed; it is the network everything used
-    # before pools existed, still named by the config.
+@test "the bridge holding the resolver is never advised away" {
+    # It is where dnsmasq answers, and every pool's runners are given that
+    # address as --dns. Advising `docker network rm` on it took DNS away from
+    # every pool on a live host.
     verify_stubs
     echo "bridge = dejima-ci0" >> "$T/config"
     printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
     run_tool verify
-    [[ "$output" == *"shared network from before pools existed"* ]]
+    [[ "$output" == *"holds the resolver address"* ]]
+    [[ "$output" == *"Keep the network"* ]]
+    [[ "$output" != *"docker network rm"* ]]
+}
+
+@test "a resolver address on no interface is a failure, not a note" {
+    # Losing it takes DNS from every pool at once, and the symptom is jobs
+    # failing in apt rather than anything naming a resolver.
+    verify_stubs
+    STUB_NO_GW=1 run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot answer"* ]]
+    [[ "$output" == *"docker network create"* ]]
 }
 
 @test "verify refuses to pass what it could not check" {
     # A verifier that reports success when it did not look is worse than no
     # verifier, because it is the one that gets believed.
     verify_stubs
+    # No gateway either, or the check for it runs with the real `ip` and reports
+    # a genuine failure, which is a different answer from "could not look".
+    sed -i '/^gateway /d' "$T/config"
     # A PATH without /usr/sbin, rather than deleting the stubs: this container
     # has a real iptables and a real ipset, so removing the stubs finds those
     # instead of finding nothing.

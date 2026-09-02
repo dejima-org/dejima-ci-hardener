@@ -138,6 +138,13 @@ the jobs pass either way.
 It exits 0 when they agree, 1 when they do not, and **2 when something could not
 be checked**, which is not a pass. Run it on the runner host, with sudo.
 
+**Do not retire the shared network.** Once every pool has one of its own it
+carries no jobs, and it can stop having firewall rules written for it by
+clearing `bridge` in the config. But the resolver listens on its gateway
+address, and every pool's runners are given that address as `--dns`, so removing
+the network takes DNS from all of them at once. `verify` will not suggest it and
+says so if the address goes missing.
+
 ## What this does not do
 
 **Every job can still resolve every allowlisted name.** One dnsmasq has one
