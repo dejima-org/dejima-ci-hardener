@@ -360,3 +360,24 @@ privileged() {
     # anybody does at that prompt.
     grep -q 'runner(s), label' "$REPO/install.sh"
 }
+
+@test "--pool implies the confined tier, since only it has a pool" {
+    # Requiring --role beside --pool was a second flag to get right for no
+    # decision the operator was making, and it printed usage rather than saying
+    # so. The privileged tier has no allowlist and no job network to scope.
+    grep -q 'if \[ -n "$OPT_POOL" \]; then' "$REPO/bin/dejima-ci-runners"
+    grep -q '"")          ROLE=confined ;;' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "--pool with the privileged tier is refused, not silently confined" {
+    # Quietly switching the tier under somebody who asked for privileged would
+    # be worse than the usage message it replaces.
+    grep -q 'pool is confined only' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the command the note gives runs without a second flag" {
+    # The note said `dejima-ci-runners --pool dejima`, which printed usage.
+    note=$(grep -h 'dejima-ci-runners --pool' "$REPO"/upgrades/*.md | head -1)
+    [ -n "$note" ]
+    [[ "$note" != *"--role"* ]]
+}

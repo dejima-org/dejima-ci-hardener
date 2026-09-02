@@ -65,7 +65,8 @@ Usage: sudo $PROG --role confined|privileged [--dir PATH] [--forge URL]
                      user who invoked sudo)
   --pool SCOPE       the pool to work on, named by what it is registered to.
                      Its network and its project directory come from the pools
-                     file, so neither is typed - see dejima-ci-allowlist pools
+                     file, so neither is typed, and it implies --role confined -
+                     see dejima-ci-allowlist pools
   --network NAME     the job network, overriding the one in the config. Prefer
                      --pool: a network named by hand is a network somebody
                      copies for the second pool and forgets to change
@@ -114,6 +115,21 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+# --pool is a confined-tier idea, so it says which tier. The privileged tier has
+# no allowlist and no job network to scope: its jobs are in this host's network
+# namespace by design. Requiring --role beside it was a second flag to get right
+# for no decision the operator was actually making, and the whole point of --pool
+# is that nothing has to be typed twice.
+if [ -n "$OPT_POOL" ]; then
+    case "$ROLE" in
+        "")          ROLE=confined ;;
+        confined|ci) ROLE=confined ;;
+        *) echo "$PROG: --pool is confined only. The privileged tier has no allowlist" >&2
+           echo "and no job network to scope, so there is no pool for it." >&2
+           exit 2 ;;
+    esac
+fi
+
 case "$ROLE" in
     confined|privileged) ;;
     ci)      echo "$PROG: --role ci is now --role confined" >&2;        ROLE=confined ;;
