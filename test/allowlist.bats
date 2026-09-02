@@ -963,3 +963,110 @@ DOCKEREOF
     [[ "$output" == *"/srv/runners/one"* ]]
     [[ "$output" == *"not recorded"* ]]
 }
+
+# --- does the host agree with the file ---------------------------------------
+#
+# Four things have to line up, each written by a different command at a
+# different time: the pools file, docker's network, iptables' rules, and the
+# runner project. Three of them agreeing is not scoping, and every way of
+# getting it wrong looks like it worked.
+
+verify_stubs() {  # verify_stubs [rules-file]
+    cat > "$T/stub/docker" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in *"network inspect dejima-ci-1"*) echo "dejima-ci1"; exit 0 ;; esac
+exit 1
+EOF2
+    cat > "$T/stub/ipset" <<'EOF2'
+#!/usr/bin/env bash
+[ "$1" = list ] && printf '%s\n' "${STUB_SETS:-ci-allow-base ci-allow-1}" | tr ' ' '\n'
+exit 0
+EOF2
+    cat > "$T/stub/iptables" <<EOF2
+#!/usr/bin/env bash
+cat "${1:-$T/rules}" 2>/dev/null
+exit 0
+EOF2
+    chmod +x "$T/stub/docker" "$T/stub/ipset" "$T/stub/iptables"
+    mkdir -p "$T/proj"; printf '  network: "dejima-ci-1"\n' > "$T/proj/config.yaml"
+    printf 'acme/one 1 %s/proj\n' "$T" > "$T/pools"
+    cat > "$T/rules" <<'EOF2'
+-A DEJIMA-CI-FWD -i dejima-ci1 -p tcp -m set --match-set ci-allow-1 dst -j ACCEPT
+-A DEJIMA-CI-FWD -i dejima-ci1 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT
+EOF2
+}
+
+@test "verify passes a host that agrees with its pools file" {
+    verify_stubs
+    run_tool verify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Everything agrees"* ]]
+}
+
+@test "verify catches a bridge matching another pool's set" {
+    # The failure this whole design exists to prevent, and the one that is
+    # invisible from every other angle: the runners register and the jobs pass.
+    verify_stubs
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci1 -p tcp -m set --match-set ci-allow-2 dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"which is another pool's"* ]]
+}
+
+@test "verify catches runners on the wrong network" {
+    verify_stubs
+    printf '  network: "dejima-ci-9"\n' > "$T/proj/config.yaml"
+    run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"carry another pool's allowlist"* ]]
+}
+
+@test "verify catches a bridge with no rule at all" {
+    verify_stubs
+    : > "$T/rules"
+    run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no allowlist rule"* ]]
+}
+
+@test "a bridge with no rules does not stop the checks after it" {
+    # grep answers "nothing matched" with a non-zero status, and under pipefail
+    # that aborted the run. The one pool that needed reporting took every check
+    # after it down too, leaving a report that looked merely short.
+    verify_stubs
+    printf 'acme/one 1 %s/proj\nacme 2 %s/proj\n' "$T" "$T" > "$T/pools"
+    run_tool verify
+    [[ "$output" == *"acme"* ]]
+    [[ "$output" == *"problem(s)"* ]]
+}
+
+@test "verify catches a bridge no pool claims" {
+    # Almost always a pool removed from the file while its rules and its
+    # runners kept going.
+    verify_stubs
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci9 -p tcp -m set --match-set ci-allow-9 dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no pool in"* ]]
+}
+
+@test "verify refuses to pass what it could not check" {
+    # A verifier that reports success when it did not look is worse than no
+    # verifier, because it is the one that gets believed.
+    verify_stubs
+    # A PATH without /usr/sbin, rather than deleting the stubs: this container
+    # has a real iptables and a real ipset, so removing the stubs finds those
+    # instead of finding nothing.
+    PATH="/usr/bin:/bin" run "$BIN" verify --config "$T/config"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"could not be checked"* ]]
+    [[ "$output" != *"Everything agrees"* ]]
+}
+
+@test "verify with no pools declared says so rather than passing" {
+    verify_stubs
+    : > "$T/pools"
+    run_tool verify
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no pools declared"* ]]
+}
