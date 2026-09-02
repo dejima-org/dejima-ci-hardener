@@ -343,9 +343,9 @@ privileged() {
     # from built-in defaults, with the existing answers readable only by opening
     # the compose file in another terminal. An operator migrating a host that
     # way loses the count and the label they had.
-    grep -q 'existing_count=' "$REPO/bin/dejima-ci-runners"
-    grep -q 'existing_label=' "$REPO/bin/dejima-ci-runners"
-    grep -q 'OPT_COUNT="\${OPT_COUNT:-\$existing_count}"' "$REPO/bin/dejima-ci-runners"
+    grep -q 'read_existing_project()' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_COUNT="\${OPT_COUNT:-\$c}"' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_NAME="\${OPT_NAME:-\$n}"' "$REPO/bin/dejima-ci-runners"
 }
 
 @test "the installer does not offer to build runners by default where they exist" {
@@ -380,4 +380,46 @@ privileged() {
     note=$(grep -h 'dejima-ci-runners --pool' "$REPO"/upgrades/*.md | head -1)
     [ -n "$note" ]
     [[ "$note" != *"--role"* ]]
+}
+
+# --- re-running against a project that already exists ------------------------
+
+@test "a re-run keeps the group name, rather than deriving it from the label" {
+    # The group name names the containers and the volumes. Accepting a default
+    # that does not match the project already there writes a second set of both
+    # into the same directory and orphans the running ones - and the default was
+    # derived from the label, which is shared across pools by design.
+    confined --name branderson --count 2
+    [ "$status" -eq 0 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+
+    # Again, taking every default, which is how a re-run is meant to be driven.
+    confined
+    [ "$status" -eq 0 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+    ! grep -q 'container_name: "dejima-confined-1"' "$OUT/docker-compose.yml"
+}
+
+@test "a re-run keeps the runner count" {
+    confined --name branderson --count 2
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+    confined
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+}
+
+@test "a re-run changing one thing leaves the rest alone" {
+    # The property that makes moving a pool to its own network a one-line change
+    # rather than a re-registration.
+    confined --name branderson --count 2
+    confined --network dejima-ci-2
+    grep -q 'network: "dejima-ci-2"' "$OUT/config.yaml"
+    [ "$(grep -c 'container_name:' "$OUT/docker-compose.yml")" -eq 2 ]
+    grep -q 'container_name: "branderson-1"' "$OUT/docker-compose.yml"
+}
+
+@test "the project is read before the questions it answers" {
+    # The group name is asked before the compose directory is, so reading the
+    # project only after the directory prompt was too late for the one default
+    # that matters most.
+    grep -q '\[ -n "\$DIR" \] && read_existing_project "\$DIR"' "$REPO/bin/dejima-ci-runners"
 }
