@@ -55,21 +55,26 @@ git pull
 sudo ./install.sh
 ```
 
+**Say no to the runner question.** On a host that already has pools it now
+defaults to no, and lists what you have with each pool's count, label and
+network, so there is nothing to go and look up. Your runners are untouched
+either way.
+
 The timer's next render will refuse, naming repositories no declared pool can
-run. That is expected here and it is safe: nothing is installed on a failure,
-so the allowlist already in force stays in force while you work through the
-rest.
+run. Expected here, and safe: nothing is installed on a failure, so the
+allowlist already in force stays in force while you work through the rest.
 
 **Re-snapshot before this tier's next scheduled rollback.** These are guest
 changes on a runner rebuilt from a snapshot, so one taken before this restores a
 host without them, and the render starts refusing again with nothing to explain
 it.
 
-## 2. Declare the pools you already have
+## 2. Declare the pools you have
 
-One line per pool, named by what it is registered to. Check the forge's
-**Actions, Runners** pages if you are unsure which is which: a runner appears
-under the repository or the organisation it was registered to.
+One line per pool, named by what it is **registered** to. The installer just
+listed your projects; the forge's **Actions, Runners** pages say which scope
+each was registered at, since a runner appears under the repository or the owner
+it belongs to.
 
 ```sh
 sudo dejima-ci-allowlist pools add dejima          # an org-scoped pool
@@ -77,18 +82,9 @@ sudo dejima-ci-allowlist pools add branderson      # a user-scoped pool
 sudo dejima-ci-allowlist pools add acme/widget     # one registered to a repo
 ```
 
-Each prints an id, a bridge and a set, and the commands that make it real.
+Each assigns an id, **creates that pool's network**, and prints what is left.
 
-## 3. Give each pool its network
-
-Once per pool, using the bridge name the previous step printed:
-
-```sh
-docker network create --driver bridge \
-  -o com.docker.network.bridge.name=dejima-ci1 dejima-ci-1
-```
-
-## 4. Render and apply
+## 3. Render and apply
 
 ```sh
 sudo dejima-ci-allowlist render      # should stop refusing
@@ -98,17 +94,19 @@ sudo dejima-ci-firewall
 If it still refuses it names what is missing, and nothing has been installed in
 the meantime.
 
-## 5. Point each pool's runners at its own network
+## 4. Move each pool onto its network
 
-**This is the step that decides whether any of it took effect.** A pool still
-on the shared network reaches the base names only.
+**This is the step that decides whether any of it took effect.** A pool still on
+the shared network reaches the base names only.
 
 ```sh
 sudo dejima-ci-runners --role confined --network dejima-ci-1 \
-     --dir ~/runners/acme-widget
+     --dir ~/runners/<the project the installer listed>
 ```
 
-Labels can stay as they are. The registration is what decides which jobs a
+The generator reads the project already in that directory and offers its values
+back, so entering through its questions changes the network and keeps your count
+and label. Labels do not need to change: the registration decides which jobs a
 runner may take, and a pool registered to one repository cannot take another's
 however a branch writes its `runs-on`.
 

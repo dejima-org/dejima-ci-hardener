@@ -600,21 +600,44 @@ for one registered to an organisation or a user."
     printf '%s %s\n' "$scope" "$next" >> "$f.new"
     chmod 0640 "$f.new"; mv "$f.new" "$f"
 
-    say "$scope -> ${CFG[ipset]}-$next, on bridge $(bridge_prefix)$next"
+    local br="$(bridge_prefix)$next" net="dejima-ci-$next"
+    say "$scope -> ${CFG[ipset]}-$next, on bridge $br"
     say ""
     say "That set will hold the union of every declaration this pool could be"
     say "made to run, which for a bare owner is all of theirs. Register the pool"
     say "to one repository if you want a smaller set."
     say ""
-    say "Nothing takes effect until all of these have run:"
-    say "  1. create the network, once:"
-    say "       docker network create --driver bridge \\"
-    say "         -o com.docker.network.bridge.name=$(bridge_prefix)$next \\"
-    say "         dejima-ci-$next"
-    say "  2. sudo $PROG render"
-    say "  3. sudo dejima-ci-firewall"
-    say "  4. point the pool's runners at that network:"
-    say "       sudo dejima-ci-runners --role confined --network dejima-ci-$next"
+
+    # Created here rather than printed for the operator to paste. The bridge
+    # name has to match what the firewall will write rules for, and it is the
+    # one value in this whole procedure that is neither guessable nor checked
+    # anywhere else: a typo in it produces a network that works, a set that
+    # fills, and a firewall rule for an interface that does not exist.
+    if ! command -v docker >/dev/null 2>&1; then
+        say "docker is not on this host, so the network was not created. On the"
+        say "host that runs the runners:"
+        say "  docker network create --driver bridge \\"
+        say "    -o com.docker.network.bridge.name=$br $net"
+    elif docker network inspect "$net" >/dev/null 2>&1; then
+        say "network $net already exists, left alone."
+    elif docker network create --driver bridge \
+            -o "com.docker.network.bridge.name=$br" "$net" >/dev/null 2>&1; then
+        say "created network $net on bridge $br"
+    else
+        say "COULD NOT CREATE network $net. Create it before rendering:"
+        say "  docker network create --driver bridge \\"
+        say "    -o com.docker.network.bridge.name=$br $net"
+    fi
+
+    say ""
+    say "Then, to put it in force:"
+    say "  sudo $PROG render"
+    say "  sudo dejima-ci-firewall"
+    say ""
+    say "And point this pool's runners at that network. The generator reads an"
+    say "existing project and offers its values back, so this changes the network"
+    say "and leaves the count and the label alone:"
+    say "  sudo dejima-ci-runners --role confined --network $net --dir <project>"
     say ""
     say "The pool has to be REGISTERED at this scope for any of it to mean"
     say "anything. A label is a request a branch makes; the registration is what"

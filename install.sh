@@ -841,9 +841,21 @@ existing_runners=$(find "$runner_home/runners" -mindepth 2 -maxdepth 2 \
 
 if [ "$existing_runners" -gt 0 ]; then
     say "Everything above is the machinery a runner's jobs sit behind, and this"
-    say "host already has $existing_runners runner project(s) under $runner_home/runners."
-    say "Nothing above has changed them. Re-run the generator only if you want to"
-    say "add runners, change the label, or move to a new act_runner image."
+    say "host already has $existing_runners runner project(s). Nothing above has"
+    say "changed them:"
+    say
+    # Read out here rather than left for the operator to go and find. Wanting
+    # to know the count and the label of what is already running is the first
+    # thing anybody does at this point, and cat'ing a compose file in another
+    # terminal is not an answer this program should make them look for.
+    while IFS= read -r proj; do
+        d=$(dirname "$proj")
+        n=$(grep -c '^ *container_name:' "$proj" 2>/dev/null || echo 0)
+        l=$(sed -n 's|^ *- "\([^:]*\):docker://.*|\1|p' "$d/config.yaml" 2>/dev/null | head -1)
+        net=$(sed -n 's|^ *network: *"\{0,1\}\([^"]*\)"\{0,1\} *$|\1|p' "$d/config.yaml" 2>/dev/null | head -1)
+        say "  $(basename "$d"): $n runner(s), label ${l:-?}, network ${net:-?}"
+        say "    $d"
+    done < <(find "$runner_home/runners" -mindepth 2 -maxdepth 2 -name docker-compose.yml 2>/dev/null | sort)
 else
     say "Everything above is the machinery a runner's jobs sit behind. Nothing is"
     say "behind it yet, because no runner is configured on this host."
@@ -856,9 +868,27 @@ say "--dns disagrees with what was set up here starts, accepts jobs, and"
 say "filters nothing - so neither is left for you to copy across."
 say
 
+# DEFAULTS TO NO WHERE RUNNERS EXIST, and that is not a style choice.
+#
+# Re-running this installer to change one setting is the normal way to use it,
+# and pressing enter through the questions is how it is meant to be re-run. On a
+# host that already had two pools, enter here walked into generating a new one
+# from built-in defaults - so the operator had to background the installer, read
+# their count and label out of a compose file in another terminal, and come back
+# to a prompt that had moved on. Answering the safe way should be the thing that
+# happens when nobody answers.
 run_runners=n
 if [ "$NONINTERACTIVE" -eq 0 ]; then
-    ask run_runners "Set up the runners now? (Y/n)" "y"
+    if [ "$existing_runners" -gt 0 ]; then
+        say "Your existing runners are untouched either way. Say yes only to add"
+        say "a pool, or to change one - the generator reads what is already in a"
+        say "project directory and offers it back, so enter through its questions"
+        say "reproduces that pool rather than replacing it."
+        say
+        ask run_runners "Set up or change a runner pool now? (y/N)" "n"
+    else
+        ask run_runners "Set up the runners now? (Y/n)" "y"
+    fi
 fi
 if [ "${run_runners,,}" != n ] && [ "${run_runners,,}" != no ]; then
     say

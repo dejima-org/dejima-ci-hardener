@@ -880,3 +880,57 @@ acme/two
     run_tool render
     [ "$status" -eq 2 ]
 }
+
+# --- the migration an operator actually performs -----------------------------
+
+@test "pools add creates the network rather than printing it to paste" {
+    # The bridge name has to match what the firewall writes rules for, and it is
+    # the one value in the procedure that nothing else checks: a typo produces a
+    # network that works, a set that fills, and a firewall rule for an interface
+    # that does not exist.
+    cat > "$T/stub/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/docker.log"
+case "$1 $2" in
+    "network inspect") exit 1 ;;   # not there yet
+esac
+exit 0
+DOCKEREOF
+    chmod +x "$T/stub/docker"
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [ "$status" -eq 0 ]
+    grep -q 'network create' "$STUB_DIR/docker.log"
+    grep -q 'com.docker.network.bridge.name=dejima-ci1' "$STUB_DIR/docker.log"
+    [[ "$output" == *"created network"* ]]
+}
+
+@test "pools add leaves a network that is already there" {
+    cat > "$T/stub/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/docker.log"
+exit 0
+DOCKEREOF
+    chmod +x "$T/stub/docker"
+    : > "$T/pools"
+    run_tool pools add acme/one
+    ! grep -q 'network create' "$STUB_DIR/docker.log"
+    [[ "$output" == *"already exists"* ]]
+}
+
+@test "pools add on a host without docker says what to run where" {
+    # The allowlist can be edited from somewhere that is not the runner host.
+    : > "$T/pools"
+    PATH="/usr/bin:/bin" run "$BIN" pools add acme/one --config "$T/config"
+    [[ "$output" == *"docker is not on this host"* ]]
+    [[ "$output" == *"network create"* ]]
+}
+
+@test "pools add tells you the generator will keep your count and label" {
+    # The migration that prompted this had an operator reading their own count
+    # out of a compose file in another terminal.
+    : > "$T/pools"
+    run_tool pools add acme/one
+    [[ "$output" == *"reads an"* ]]
+    [[ "$output" == *"--dir"* ]]
+}

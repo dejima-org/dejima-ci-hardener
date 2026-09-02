@@ -325,3 +325,26 @@ privileged() {
     [ "$flag" = "--network" ]
     grep -q '\-\-network)' "$REPO/bin/dejima-ci-runners"
 }
+
+@test "an existing project's values become the defaults for a re-run" {
+    # Re-running to change one thing used to mean answering every question again
+    # from built-in defaults, with the existing answers readable only by opening
+    # the compose file in another terminal. An operator migrating a host that
+    # way loses the count and the label they had.
+    grep -q 'existing_count=' "$REPO/bin/dejima-ci-runners"
+    grep -q 'existing_label=' "$REPO/bin/dejima-ci-runners"
+    grep -q 'OPT_COUNT="\${OPT_COUNT:-\$existing_count}"' "$REPO/bin/dejima-ci-runners"
+}
+
+@test "the installer does not offer to build runners by default where they exist" {
+    # Re-running the installer to change one setting is the normal way to use
+    # it, and pressing enter through is how it is meant to be re-run. On a host
+    # with pools already, enter walked into generating a new one.
+    grep -q 'Set up or change a runner pool now? (y/N)" "n"' "$REPO/install.sh"
+}
+
+@test "the installer reads out the pools that are already there" {
+    # Wanting to know the count and label of what is running is the first thing
+    # anybody does at that prompt.
+    grep -q 'runner(s), label' "$REPO/install.sh"
+}
