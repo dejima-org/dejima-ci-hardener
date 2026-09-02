@@ -27,6 +27,7 @@ usage() {
 Usage: $PROG [render|check|show] [--config PATH]
        $PROG repos [list|add|remove] [owner/repo...]
        $PROG pools [list|add|remove] [owner/repo | owner] [project-dir]
+       $PROG verify
 
   render   fetch, validate and install the allowlist, reloading the resolver
            only if it changed (the default; what the timer runs)
@@ -38,6 +39,10 @@ Usage: $PROG [render|check|show] [--config PATH]
   repos    list, add to, or remove from the repositories trusted to widen this
            allowlist. Adding one used to mean re-running install.sh and
            retyping every entry already there
+  verify   check that the host agrees with the pools file: every pool has its
+           network, its rules name its own set and nothing else, and its
+           runners are on its network. Exit 1 if they disagree, 2 if something
+           could not be checked
   pools    declare the runner pools this host has, by what each is registered
            to. Each gets a network and a firewall set holding the union of what
            that pool could be made to run, and nothing else
@@ -685,13 +690,171 @@ for one registered to an organisation or a user."
     say "decides which jobs a runner may take."
 }
 
+# --- does the host agree with the file ---------------------------------------
+#
+# Four things have to line up for a pool to be scoped, and each is written by a
+# different command at a different time: the pools file says which set and
+# bridge are its, docker owns the network, iptables owns the rules, and the
+# runner project says which network its jobs land on. Three of them agreeing is
+# not scoping, and every way of getting it wrong looks like it worked - the
+# runners register, the jobs pass, and the allowlist is somebody else's.
+#
+# NEVER PASSES WHAT IT COULD NOT CHECK. Missing docker, missing iptables or no
+# privilege is INDETERMINATE, not a clean report. A verifier that reports
+# success when it did not look is worse than no verifier, because it is the one
+# that gets believed.
+V_FAIL=0
+V_UNKNOWN=0
+v_ok()      { printf '  ok        %s\n' "$*" >&2; }
+v_fail()    { printf '  FAIL      %s\n' "$*" >&2; V_FAIL=$((V_FAIL + 1)); }
+v_unknown() { printf '  UNKNOWN   %s\n' "$*" >&2; V_UNKNOWN=$((V_UNKNOWN + 1)); }
+
+verify_network() {  # verify_network id bridge
+    local id=$1 br=$2 net="dejima-ci-$id" actual
+    if ! command -v docker >/dev/null 2>&1; then
+        v_unknown "network $net: docker is not on this host"; return
+    fi
+    if ! actual=$(docker network inspect "$net" \
+                  --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null); then
+        v_fail "network $net does not exist, so its bridge carries no jobs"
+        return
+    fi
+    if [ "$actual" = "$br" ]; then
+        v_ok "network $net is on $br"
+    else
+        # The rules name a bridge. A network on a different one means the rules
+        # are written for an interface nothing arrives on, which fails open:
+        # the jobs are on an interface with no rules at all.
+        v_fail "network $net is on bridge '${actual:-<unset>}', but its rules name $br"
+    fi
+}
+
+verify_rules() {  # verify_rules id bridge set
+    local id=$1 br=$2 want=$3 base="${CFG[ipset]}-base" rules
+    if ! command -v iptables >/dev/null 2>&1; then
+        v_unknown "rules for $br: iptables is not on this host"; return
+    fi
+    if ! rules=$(iptables -S DEJIMA-CI-FWD 2>/dev/null); then
+        v_unknown "rules for $br: cannot read DEJIMA-CI-FWD (try sudo, or run dejima-ci-firewall)"
+        return
+    fi
+    # || true, because a bridge with no rules is a FINDING and grep answers
+    # "nothing matched" with a non-zero status. Under pipefail that aborts the
+    # whole command, so the one pool that needed reporting took every check
+    # after it down too, silently, leaving a report that looked merely short.
+    local named; named=$(printf '%s\n' "$rules" \
+        | grep -- "-i $br " | grep -oE -- '--match-set [^ ]+' | awk '{print $2}' | sort -u || true)
+    if [ -z "$named" ]; then
+        v_fail "$br has no allowlist rule, so its jobs reach nothing (or everything, if another chain permits them)"
+        return
+    fi
+    local unexpected; unexpected=$(printf '%s\n' "$named" | grep -vx -e "$want" -e "$base" || true)
+    if [ -n "$unexpected" ]; then
+        # The failure this whole design exists to prevent, and the one that is
+        # invisible from every other angle.
+        v_fail "$br matches $(printf '%s' "$unexpected" | paste -sd, -), which is another pool's"
+        return
+    fi
+    printf '%s\n' "$named" | grep -qx "$want" \
+        || { v_fail "$br does not match its own set $want"; return; }
+    printf '%s\n' "$named" | grep -qx "$base" \
+        || { v_fail "$br does not match $base, so shared names are unreachable"; return; }
+    v_ok "$br matches $want and $base, and nothing else"
+}
+
+verify_project() {  # verify_project scope id dir
+    local scope=$1 id=$2 dir=$3 want="dejima-ci-$id" actual
+    if [ -z "$dir" ]; then
+        v_unknown "$scope: no runner project recorded, so nothing says which network its jobs use"
+        return
+    fi
+    if [ ! -f "$dir/config.yaml" ]; then
+        v_fail "$scope: no runner project at $dir"
+        return
+    fi
+    actual=$(sed -n 's|^ *network: *"\{0,1\}\([^"]*\)"\{0,1\} *$|\1|p' "$dir/config.yaml" | head -1)
+    if [ "$actual" = "$want" ]; then
+        v_ok "$scope runners are on $want"
+    else
+        v_fail "$scope runners are on '${actual:-<unset>}', not $want - they carry another pool's allowlist"
+    fi
+}
+
+verify_set() {  # verify_set name
+    if ! command -v ipset >/dev/null 2>&1; then
+        v_unknown "set $1: ipset is not on this host"; return
+    fi
+    if ipset list -n 2>/dev/null | grep -qx "$1"; then
+        v_ok "set $1 exists"
+    else
+        v_fail "set $1 does not exist, so the rules naming it cannot load"
+    fi
+}
+
+cmd_verify() {
+    local f="${CFG[pools_file]}" any=0
+    [ -s "$f" ] || die "no pools declared in $f - nothing to verify.
+  sudo $PROG pools add <owner/repo | owner> [project-dir]"
+
+    verify_set "${CFG[ipset]}-base"
+    say ""
+
+    while read -r scope id dir || [ -n "$scope" ]; do
+        scope="${scope%%#*}"
+        [ -n "$scope" ] && [ -n "${id:-}" ] || continue
+        any=1
+        say "$scope"
+        verify_set "${CFG[ipset]}-$id"
+        verify_network "$id" "$(bridge_prefix)$id"
+        verify_rules "$id" "$(bridge_prefix)$id" "${CFG[ipset]}-$id"
+        verify_project "$scope" "$id" "${dir:-}"
+        say ""
+    done < "$f"
+    [ "$any" = 1 ] || die "no usable lines in $f"
+
+    # A bridge with rules that no pool claims. Almost always a pool removed from
+    # the file while its rules and its runners kept going, which is a set of
+    # jobs nothing here describes any more.
+    if command -v iptables >/dev/null 2>&1 && iptables -S DEJIMA-CI-FWD >/dev/null 2>&1; then
+        local claimed stray
+        claimed=$(sed 's/#.*//' "$f" | awk -v b="$(bridge_prefix)" 'NF >= 2 { print b $2 }' | sort -u)
+        stray=$(iptables -S DEJIMA-CI-FWD 2>/dev/null \
+            | grep -oE -- '-i [^ ]+' | awk '{print $2}' | sort -u \
+            | grep -E "^$(bridge_prefix)[0-9]+$" \
+            | grep -vxF -e "$claimed" || true) || true
+        if [ -n "$stray" ]; then
+            say "unclaimed"
+            while IFS= read -r b; do
+                [ -n "$b" ] || continue
+                v_fail "$b has rules but no pool in $f claims it"
+            done <<< "$stray"
+            say ""
+        fi
+    fi
+
+    if [ "$V_FAIL" -gt 0 ]; then
+        say "$V_FAIL problem(s). Each one is a pool running with an allowlist that is"
+        say "not the one its file describes, which looks like success from every"
+        say "other angle: the runners register and the jobs pass."
+        return 1
+    fi
+    if [ "$V_UNKNOWN" -gt 0 ]; then
+        say "$V_UNKNOWN thing(s) could not be checked, so this is not a pass. Run it"
+        say "on the runner host, with sudo."
+        return 2
+    fi
+    say "Everything agrees: each pool has its network, its rules name its own set"
+    say "and the base set, and its runners are on its network."
+    return 0
+}
+
 # --- commands ---------------------------------------------------------------
 cmd=render
 args=()
 repos_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        render|check|show|repos|pools) cmd="$1" ;;
+        render|check|show|repos|pools|verify) cmd="$1" ;;
         --config)
             [ $# -ge 2 ] && [ -n "${2:-}" ] || die "--config needs a path"
             CONFIG="$2"; shift ;;
@@ -717,12 +880,16 @@ read_config "$CONFIG"
 # an already-rendered file and the other edits a list of names. Requiring a
 # working configuration to look at either would make them useless on the host
 # whose configuration is the thing being diagnosed.
-case "$cmd" in show|repos|pools) ;; *) preflight ;; esac
+case "$cmd" in show|repos|pools|verify) ;; *) preflight ;; esac
 
 case "$cmd" in
     repos)
         [ -n "${CFG[repos_file]}" ] || die "no repos_file in $CONFIG"
         cmd_repos "${repos_args[@]:-}"
+        ;;
+    verify)
+        [ -n "${CFG[pools_file]}" ] || die "no pools_file in $CONFIG"
+        cmd_verify
         ;;
     pools)
         [ -n "${CFG[pools_file]}" ] || die "no pools_file in $CONFIG"

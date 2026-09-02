@@ -216,8 +216,16 @@ point of that tier rather than a gap in it.
 sudo dejima-ci-allowlist check    # what would change, without changing it
 sudo dejima-ci-allowlist render   # fetch, validate, install, reload if changed
 sudo dejima-ci-allowlist show     # what is installed right now
+sudo dejima-ci-allowlist pools    # the runner pools, and what each one reaches
+sudo dejima-ci-allowlist verify   # does the host agree with the pools file
 sudo dejima-ci-firewall           # reapply the egress rules
 ```
+
+`verify` is the one to run after changing anything about a pool. Four things
+have to agree for a pool to be scoped, written by four commands at four
+different times, and every way of getting it wrong looks like it worked: the
+runners register and the jobs pass whether or not the rules name the right set.
+It exits 2 rather than 0 for anything it could not check.
 
 `dejima-ci-upgrade` applies to **both** tiers, because the node-side half of a
 version does:

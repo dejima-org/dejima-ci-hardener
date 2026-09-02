@@ -120,12 +120,18 @@ however a branch writes its `runs-on`.
 ## Checking it worked
 
 ```sh
-sudo dejima-ci-allowlist pools list
-sudo iptables -S DEJIMA-CI-FWD | grep dejima-ci1
+sudo dejima-ci-allowlist verify
 ```
 
-The rule for that bridge should name `ci-allow-1` and `ci-allow-base`, and
-nothing else.
+Four things have to line up for a pool to be scoped, each written by a different
+command at a different time: the pools file says which set and bridge are its,
+docker owns the network, iptables owns the rules, and the runner project says
+which network its jobs land on. Three of them agreeing is not scoping, and every
+way of getting it wrong looks like it worked, because the runners register and
+the jobs pass either way.
+
+It exits 0 when they agree, 1 when they do not, and **2 when something could not
+be checked**, which is not a pass. Run it on the runner host, with sudo.
 
 ## What this does not do
 
