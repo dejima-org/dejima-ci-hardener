@@ -55,6 +55,11 @@ git pull
 sudo ./install.sh
 ```
 
+**Not `--tools` for this one.** That flag deploys the programs and stops, which
+is right for an upgrade that changes only what is in `bin/`. This one is a full
+run, because the questions about the network and the resolver are what let it
+notice anything else that has moved.
+
 **Say no to the runner question.** On a host that already has pools it now
 defaults to no, and lists what you have with each pool's count, label and
 network, so there is nothing to go and look up. Your runners are untouched
@@ -132,6 +137,21 @@ the jobs pass either way.
 
 It exits 0 when they agree, 1 when they do not, and **2 when something could not
 be checked**, which is not a pass. Run it on the runner host, with sudo.
+
+**Leave the shared network alone.** Once every pool has one of its own it
+carries no jobs, which makes it look retirable. It is not, for two reasons that
+are easy to meet and hard to diagnose:
+
+- the resolver listens on its gateway address, and every pool's runners are
+  given that address as `--dns`, so removing the network takes DNS from all of
+  them at once;
+- every firewall rule names an interface, so clearing `bridge` leaves that one
+  with no rules. Anything that lands there - a runner made without `--pool`, a
+  container left behind - matches nothing, falls off the end of the chain, and
+  gets Docker's default, which accepts.
+
+`verify` reports it as expected rather than as something to tidy, and fails if
+either the resolver address or its rules go missing.
 
 ## What this does not do
 

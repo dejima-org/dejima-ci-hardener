@@ -86,3 +86,26 @@ setup() {
         esac
     done
 }
+
+@test "an empty bridge is allowed once the pools supply one" {
+    # `bridge` names the shared network from before pools existed, and a host
+    # whose pools all have networks of their own has nothing left on it.
+    # Requiring it meant the only way to retire that bridge was to leave a value
+    # naming an interface nothing uses, so the rules stayed.
+    grep -q 'EMPTY IS ALLOWED, once pools exist' "$BATS_TEST_DIRNAME/../bin/dejima-ci-firewall"
+    ! grep -q 'bridge is not set in \$CONFIG' "$BATS_TEST_DIRNAME/../bin/dejima-ci-firewall"
+}
+
+@test "no bridge from either source is still refused" {
+    grep -q 'no bridges to write rules for' "$BATS_TEST_DIRNAME/../bin/dejima-ci-firewall"
+}
+
+@test "every bridge is checked for existence, including a pool's" {
+    # The check ran before the pools file was read, so a pool whose network was
+    # never created got rules naming an interface that is not there - which
+    # iptables accepts, leaving that pool's jobs on a bridge with no rules.
+    fw="$BATS_TEST_DIRNAME/../bin/dejima-ci-firewall"
+    pools_line=$(grep -n 'done < "$POOLS"' "$fw" | head -1 | cut -d: -f1)
+    check_line=$(grep -n 'ip link show "$b"' "$fw" | head -1 | cut -d: -f1)
+    [ "$check_line" -gt "$pools_line" ]
+}

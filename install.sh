@@ -28,10 +28,12 @@ REPOS_FILE="$CONF_DIR/repos"
 BASE_FILE="$CONF_DIR/base-domains"
 
 NONINTERACTIVE=0
+TOOLS_ONLY=0
 [ -t 0 ] || NONINTERACTIVE=1
 for a in "$@"; do
     case "$a" in
         -n|--non-interactive) NONINTERACTIVE=1 ;;
+        --tools) TOOLS_ONLY=1 ;;
         -h|--help)
             sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
             echo
@@ -50,6 +52,8 @@ writable() { mkdir -p "$1" 2>/dev/null || true; [ -d "$1" ] && [ -w "$1" ]; }
 for d in "$CONF_DIR" "$BIN_DIR"; do
     writable "$d" || die "cannot write $d - run as root, or set CONF_DIR/BIN_DIR/UNIT_DIR"
 done
+
+
 INSTALL_UNITS=1
 writable "$UNIT_DIR" || INSTALL_UNITS=0
 
@@ -69,6 +73,81 @@ ask() {
 
 # Only writes when the content differs, so a no-change run reports as such and
 # leaves mtimes alone.
+# --- the files this repository installs --------------------------------------
+#
+# A function because --tools runs it alone. Most upgrades change only the
+# programs, and going through the whole setup to deploy them means answering
+# prompts about a network, a resolver and a token that are already right - which
+# is both tedious and a chance to change one of them by accident.
+deploy_files() {
+for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip \
+                dejima-ci-upgrade; do
+        if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
+            say "  unchanged  $BIN_DIR/$prog"
+        else
+            install -m 0755 "$SRC/bin/$prog" "$BIN_DIR/$prog"
+            say "  installed  $BIN_DIR/$prog"
+        fi
+    done
+    
+    # The templates dejima-ci-runners renders. Installed rather than read from the
+    # checkout, because it is installed too and has to keep working once whatever
+    # clone it came from is gone.
+    if writable "$TEMPLATE_DIR"; then
+        for tpl in "$SRC"/examples/*; do
+            [ -f "$tpl" ] || continue
+            if cmp -s "$tpl" "$TEMPLATE_DIR/${tpl##*/}" 2>/dev/null; then
+                say "  unchanged  $TEMPLATE_DIR/${tpl##*/}"
+            else
+                install -m 0644 "$tpl" "$TEMPLATE_DIR/${tpl##*/}"
+                say "  installed  $TEMPLATE_DIR/${tpl##*/}"
+            fi
+        done
+    else
+        say "  skipped    $TEMPLATE_DIR (not writable) - dejima-ci-runners will read"
+        say "             them from this checkout instead"
+    fi
+    
+    # The upgrade notes, so an operator on a runner with no checkout can still read
+    # what an upgrade asks of them. The installed copy knows only the versions that
+    # existed when it ran, and dejima-ci-upgrade says so rather than reporting "up
+    # to date" about versions it has never heard of.
+    if writable "$SHARE_DIR/upgrades"; then
+        for note in "$SRC"/upgrades/*.md; do
+            [ -f "$note" ] || continue
+            if cmp -s "$note" "$SHARE_DIR/upgrades/${note##*/}" 2>/dev/null; then
+                say "  unchanged  $SHARE_DIR/upgrades/${note##*/}"
+            else
+                install -m 0644 "$note" "$SHARE_DIR/upgrades/${note##*/}"
+                say "  installed  $SHARE_DIR/upgrades/${note##*/}"
+            fi
+        done
+    fi
+    
+    # What this host is now at, guest-side, and which tier it is.
+    #
+    # Both are recorded rather than asked or detected. The version comes from the
+    # checkout's VERSION, so it records something this program just did. The tier is
+    # 'confined' by construction: install.sh does not run on a privileged host, and
+    # the whole point of that tier is that nothing here is installed there.
+    #
+    # THIS FILE IS INSIDE THE SNAPSHOT. On a runner that is correct rather than
+    # unfortunate - forget to re-snapshot after a guest-side upgrade and the marker
+    # rolls back alongside the change it was recording, so dejima-ci-upgrade goes
+    # back to reporting the upgrade as outstanding. It fails towards saying there is
+    # work to do.
+    version=$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null || true)
+    [ -n "$version" ] || die "no version in $SRC/VERSION - refusing to record an empty one"
+    {
+        [ -r "$CONF_DIR/state" ] && grep -vE '^(guest_version|tier)=' "$CONF_DIR/state" || true
+        printf 'guest_version=%s\ntier=confined\n' "$version"
+    } > "$CONF_DIR/state.new"
+    sort -o "$CONF_DIR/state.new" "$CONF_DIR/state.new"
+    chmod 0640 "$CONF_DIR/state.new"
+    mv "$CONF_DIR/state.new" "$CONF_DIR/state"
+    say "  recorded   $CONF_DIR/state (guest_version=$version, tier=confined)"
+}
+
 write_if_changed() {
     local path="$1" mode="$2" content="$3"
     if [ -f "$path" ] && [ "$content" = "$(cat "$path")" ]; then
@@ -86,6 +165,43 @@ write_if_changed() {
     mv "$path.new" "$path"
     say "  written    $path"
 }
+
+# --tools: deploy the programs and stop.
+#
+# Most upgrades change only what is in bin/, and running the whole installer to
+# put them there means answering prompts about a network, a resolver and a token
+# that are already correct. Tedious, and a chance to change one of them by
+# accident - which is how a re-run for one reason becomes a re-registration of
+# something else.
+#
+# It writes no config, creates no network, touches no resolver, no firewall and
+# no runner. It does record the guest version, because installing these programs
+# is what guest_version is a record of.
+if [ "$TOOLS_ONLY" = 1 ]; then
+    # A host that has never been set up gets programs with nothing to read. The
+    # programs would each say so on their own, but saying it here is the
+    # difference between an installer that looks like it worked and one that
+    # says what it did.
+    if [ ! -r "$CONF_DIR/config" ]; then
+        say "There is no $CONF_DIR/config on this host, so nothing here is set up"
+        say "yet, and --tools installs programs that have nothing to read."
+        say
+        say "Run the installer without --tools first."
+        exit 1
+    fi
+    say "=============================================================="
+    say " Tools only"
+    say "=============================================================="
+    say
+    deploy_files
+    say
+    say "Programs only. The config, the network, the resolver, the firewall and"
+    say "the runners are untouched, and no prompt above changed any of them."
+    say
+    say "If an upgrade note asks for anything besides new programs, run this"
+    say "again without --tools."
+    exit 0
+fi
 
 # --- existing values become defaults ----------------------------------------
 cfg_get() {
@@ -690,72 +806,7 @@ out = $out
 ref = $ref
 reload = $reload"
 
-for prog in dejima-ci-allowlist dejima-ci-firewall dejima-ci-runners dejima-ci-static-ip \
-            dejima-ci-upgrade; do
-    if cmp -s "$SRC/bin/$prog" "$BIN_DIR/$prog" 2>/dev/null; then
-        say "  unchanged  $BIN_DIR/$prog"
-    else
-        install -m 0755 "$SRC/bin/$prog" "$BIN_DIR/$prog"
-        say "  installed  $BIN_DIR/$prog"
-    fi
-done
-
-# The templates dejima-ci-runners renders. Installed rather than read from the
-# checkout, because it is installed too and has to keep working once whatever
-# clone it came from is gone.
-if writable "$TEMPLATE_DIR"; then
-    for tpl in "$SRC"/examples/*; do
-        [ -f "$tpl" ] || continue
-        if cmp -s "$tpl" "$TEMPLATE_DIR/${tpl##*/}" 2>/dev/null; then
-            say "  unchanged  $TEMPLATE_DIR/${tpl##*/}"
-        else
-            install -m 0644 "$tpl" "$TEMPLATE_DIR/${tpl##*/}"
-            say "  installed  $TEMPLATE_DIR/${tpl##*/}"
-        fi
-    done
-else
-    say "  skipped    $TEMPLATE_DIR (not writable) - dejima-ci-runners will read"
-    say "             them from this checkout instead"
-fi
-
-# The upgrade notes, so an operator on a runner with no checkout can still read
-# what an upgrade asks of them. The installed copy knows only the versions that
-# existed when it ran, and dejima-ci-upgrade says so rather than reporting "up
-# to date" about versions it has never heard of.
-if writable "$SHARE_DIR/upgrades"; then
-    for note in "$SRC"/upgrades/*.md; do
-        [ -f "$note" ] || continue
-        if cmp -s "$note" "$SHARE_DIR/upgrades/${note##*/}" 2>/dev/null; then
-            say "  unchanged  $SHARE_DIR/upgrades/${note##*/}"
-        else
-            install -m 0644 "$note" "$SHARE_DIR/upgrades/${note##*/}"
-            say "  installed  $SHARE_DIR/upgrades/${note##*/}"
-        fi
-    done
-fi
-
-# What this host is now at, guest-side, and which tier it is.
-#
-# Both are recorded rather than asked or detected. The version comes from the
-# checkout's VERSION, so it records something this program just did. The tier is
-# 'confined' by construction: install.sh does not run on a privileged host, and
-# the whole point of that tier is that nothing here is installed there.
-#
-# THIS FILE IS INSIDE THE SNAPSHOT. On a runner that is correct rather than
-# unfortunate - forget to re-snapshot after a guest-side upgrade and the marker
-# rolls back alongside the change it was recording, so dejima-ci-upgrade goes
-# back to reporting the upgrade as outstanding. It fails towards saying there is
-# work to do.
-version=$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null || true)
-[ -n "$version" ] || die "no version in $SRC/VERSION - refusing to record an empty one"
-{
-    [ -r "$CONF_DIR/state" ] && grep -vE '^(guest_version|tier)=' "$CONF_DIR/state" || true
-    printf 'guest_version=%s\ntier=confined\n' "$version"
-} > "$CONF_DIR/state.new"
-sort -o "$CONF_DIR/state.new" "$CONF_DIR/state.new"
-chmod 0640 "$CONF_DIR/state.new"
-mv "$CONF_DIR/state.new" "$CONF_DIR/state"
-say "  recorded   $CONF_DIR/state (guest_version=$version, tier=confined)"
+deploy_files
 
 # The resolver's static half. Its generated half - the server= lines - is
 # written by dejima-ci-allowlist from origin/main, into a separate file in the

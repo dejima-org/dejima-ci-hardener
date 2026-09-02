@@ -219,6 +219,8 @@ sudo dejima-ci-allowlist show     # what is installed right now
 sudo dejima-ci-allowlist pools    # the runner pools, and what each one reaches
 sudo dejima-ci-allowlist verify   # does the host agree with the pools file
 sudo dejima-ci-firewall           # reapply the egress rules
+
+sudo ./install.sh --tools         # new programs only, no setup questions
 ```
 
 `verify` is the one to run after changing anything about a pool. Four things

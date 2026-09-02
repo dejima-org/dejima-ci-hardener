@@ -708,6 +708,29 @@ V_UNKNOWN=0
 v_ok()      { printf '  ok        %s\n' "$*" >&2; }
 v_fail()    { printf '  FAIL      %s\n' "$*" >&2; V_FAIL=$((V_FAIL + 1)); }
 v_unknown() { printf '  UNKNOWN   %s\n' "$*" >&2; V_UNKNOWN=$((V_UNKNOWN + 1)); }
+# Neither a pass nor a failure: something to tidy, which should not make an
+# otherwise correct host report a problem. A verifier that cries about leftovers
+# is one whose real findings get skimmed past.
+v_note()    { printf '  note      %s\n' "$*" >&2; }
+
+# The docker network sitting on a bridge, since the two are named independently
+# and the pre-pools one is not called dejima-ci-<id> at all.
+network_on_bridge() {  # network_on_bridge iface -> network name, or empty
+    command -v docker >/dev/null 2>&1 || return 0
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        [ "$(docker network inspect "$n" \
+             --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)" = "$1" ] \
+            && { printf '%s\n' "$n"; return 0; }
+    done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+    return 0
+}
+
+attached_count() {  # attached_count network -> how many containers, or empty
+    command -v docker >/dev/null 2>&1 || return 0
+    docker network inspect "$1" --format '{{len .Containers}}' 2>/dev/null || true
+}
 
 verify_network() {  # verify_network id bridge
     local id=$1 br=$2 net="dejima-ci-$id" actual
@@ -791,11 +814,40 @@ verify_set() {  # verify_set name
     fi
 }
 
+# The address dnsmasq answers on, and the one every pool's runners are given as
+# --dns. It belongs to the shared network's bridge, not to any pool's, so it is
+# the one thing the shared network is still for after every pool has its own.
+#
+# Checked first because losing it takes DNS away from every pool at once, and
+# the symptom is jobs failing in apt rather than anything naming a resolver.
+verify_gateway() {
+    local gw="${CFG[gateway]}"
+    [ -n "$gw" ] || { v_unknown "no gateway in $CONFIG, so nothing says where the resolver listens"; return; }
+    if ! command -v ip >/dev/null 2>&1; then
+        v_unknown "resolver address $gw: 'ip' is not on this host"; return
+    fi
+    local on; on=$(ip -o -4 addr show 2>/dev/null | awk -v g="$gw" '$4 ~ "^" g "/" { print $2; exit }')
+    if [ -n "$on" ]; then
+        v_ok "resolver address $gw is on $on"
+    else
+        v_fail "resolver address $gw is on no interface, so dnsmasq cannot answer"
+        say "              Every pool's runners are given --dns $gw, so this is DNS"
+        say "              gone for all of them at once. It belongs to the shared"
+        say "              network's bridge. Recreate that network:"
+        say "                docker network create --driver bridge \\"
+        say "                  -o com.docker.network.bridge.name=$(cfg_or_default bridge dejima-ci0) \\"
+        say "                  --subnet $(cfg_or_default subnet '<subnet>') --gateway $gw \\"
+        say "                  $(cfg_or_default network dejima-ci)"
+        say "                sudo systemctl restart dnsmasq"
+    fi
+}
+
 cmd_verify() {
     local f="${CFG[pools_file]}" any=0
     [ -s "$f" ] || die "no pools declared in $f - nothing to verify.
   sudo $PROG pools add <owner/repo | owner> [project-dir]"
 
+    verify_gateway
     verify_set "${CFG[ipset]}-base"
     say ""
 
@@ -812,6 +864,38 @@ cmd_verify() {
     done < "$f"
     [ "$any" = 1 ] || die "no usable lines in $f"
 
+    # THE DANGEROUS DIRECTION, checked first: a network that exists whose bridge
+    # has no rules. Every rule in DEJIMA-CI-FWD names an interface, so a bridge
+    # with none matches nothing, falls off the end of the chain and returns to
+    # Docker's default, which accepts. Anything landing there has unrestricted
+    # egress - a runner made without --pool, or a container left behind.
+    #
+    # Rules without a network are the harmless direction and are reported below.
+    # This is the one that fails open, and it is invisible: the network works,
+    # the jobs pass, and nothing is filtering them.
+    if command -v docker >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 \
+       && iptables -S DEJIMA-CI-FWD >/dev/null 2>&1; then
+        local ruled n nb
+        ruled=$(iptables -S DEJIMA-CI-FWD 2>/dev/null \
+                | grep -oE -- '-i [^ ]+' | awk '{print $2}' | sort -u || true)
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            nb=$(docker network inspect "$n" \
+                 --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+            [ -n "$nb" ] || continue
+            case "$nb" in "$(bridge_prefix)"*) ;; *) continue ;; esac
+            printf '%s\n' "$ruled" | grep -qx "$nb" && continue
+            say "unfiltered"
+            v_fail "$n is on $nb, which has no rules: anything on it reaches anything."
+            say "              Every rule names an interface, so a bridge with none"
+            say "              falls through to Docker's default, which accepts."
+            say "              If it is the shared network, put its bridge back:"
+            say "                set 'bridge = $nb' in $CONFIG"
+            say "                sudo dejima-ci-firewall"
+            say ""
+        done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+    fi
+
     # A bridge with rules that no pool claims. Almost always a pool removed from
     # the file while its rules and its runners kept going, which is a set of
     # jobs nothing here describes any more.
@@ -823,10 +907,62 @@ cmd_verify() {
             | grep -E "^$(bridge_prefix)[0-9]+$" \
             | grep -vxF -e "$claimed" || true) || true
         if [ -n "$stray" ]; then
-            say "unclaimed"
+            # Not "unclaimed": the shared bridge lands here and is reported ok,
+            # under a heading calling it a leftover. A heading that disagrees
+            # with the line under it is read before the line is.
+            say "bridges no pool claims"
+            local configured=" $(cfg_or_default bridge '') "
             while IFS= read -r b; do
                 [ -n "$b" ] || continue
-                v_fail "$b has rules but no pool in $f claims it"
+                local net att what
+                net=$(network_on_bridge "$b")
+                att=$(attached_count "${net:-}")
+
+                case "$configured" in
+                    *" $b "*) what="the shared network from before pools existed" ;;
+                    *)        what="a pool that was removed while its rules stayed" ;;
+                esac
+
+                # The shared network holds the resolver address every pool
+                # depends on, so it is not retirable however empty it looks.
+                # Advising `docker network rm` on it took DNS away from every
+                # pool on a live host.
+                local holds_resolver=0
+                if [ -n "${CFG[gateway]}" ] && command -v ip >/dev/null 2>&1; then
+                    [ "$(ip -o -4 addr show dev "$b" 2>/dev/null \
+                         | awk -v g="${CFG[gateway]}" '$4 ~ "^" g "/" { print "y"; exit }')" = y ] \
+                        && holds_resolver=1
+                fi
+
+                if [ "$holds_resolver" = 1 ]; then
+                    # Expected, and not something to tidy. It holds the address
+                    # every pool resolves against, and its rules are what
+                    # contains anything that lands on it - a runner made
+                    # without --pool goes here. Suggesting either half be
+                    # removed was wrong twice over.
+                    v_ok "$b is the shared network: it holds the resolver at ${CFG[gateway]}, and its rules contain anything that lands on it"
+                elif [ "${att:-0}" -gt 0 ] 2>/dev/null; then
+                    # Containers on a bridge no pool describes are jobs running
+                    # under an allowlist nothing here decided. That is a finding.
+                    v_fail "$b has ${att} container(s) and no pool claims it: $what."
+                    say "              Those jobs reach the base names only, since its rules"
+                    say "              name no pool's set. Move them onto their pool:"
+                    say "                sudo dejima-ci-runners --pool <scope>"
+                else
+                    # Rules for a bridge nothing is on. Untidy rather than unsafe,
+                    # so it does not fail the run.
+                    v_note "$b carries rules but nothing is on it: $what."
+                    say "              Nothing reaches anything through it. To retire it:"
+                    [ -n "$net" ] && say "                docker network rm $net"
+                    # Cleared, and said exactly. "Remove it from the bridge
+                    # line" leaves an empty value, and the firewall used to
+                    # refuse to start on one - a worse place to be than the
+                    # leftover rules were.
+                    say "                set 'bridge =' in $CONFIG, with nothing after it"
+                    say "                sudo dejima-ci-firewall"
+                    say "              An empty bridge is fine once every pool has a network"
+                    say "              of its own: the pools supply the interfaces."
+                fi
             done <<< "$stray"
             say ""
         fi

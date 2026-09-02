@@ -972,6 +972,20 @@ DOCKEREOF
 # getting it wrong looks like it worked.
 
 verify_stubs() {  # verify_stubs [rules-file]
+    # The resolver's address, on the shared bridge. Losing it takes DNS from
+    # every pool at once, so verify checks for it and the fixture has to have
+    # one for anything else to be exercised.
+    cat > "$T/stub/ip" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"addr show dev dejima-ci0"*) [ -n "${STUB_NO_GW:-}" ] || echo "1: dejima-ci0    inet 192.0.2.1/24 scope global" ;;
+  *"addr show dev"*) ;;
+  *"addr show"*) [ -n "${STUB_NO_GW:-}" ] || echo "1: dejima-ci0    inet 192.0.2.1/24 scope global" ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/ip"
+    grep -q '^gateway' "$T/config" || echo "gateway = 192.0.2.1" >> "$T/config"
     cat > "$T/stub/docker" <<'EOF2'
 #!/usr/bin/env bash
 case "$*" in *"network inspect dejima-ci-1"*) echo "dejima-ci1"; exit 0 ;; esac
@@ -1040,20 +1054,72 @@ EOF2
     [[ "$output" == *"problem(s)"* ]]
 }
 
-@test "verify catches a bridge no pool claims" {
-    # Almost always a pool removed from the file while its rules and its
-    # runners kept going.
+@test "a bridge with jobs on it and no pool is a failure" {
+    # Containers on a bridge no pool describes are jobs running under an
+    # allowlist nothing here decided.
     verify_stubs
+    cat > "$T/stub/docker" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"network ls"*) printf 'dejima-ci-9
+' ;;
+  *"network inspect dejima-ci-1"*) echo "dejima-ci1" ;;
+  *'{{index .Options "com.docker.network.bridge.name"}}'*) echo "dejima-ci9" ;;
+  *"{{len .Containers}}"*) echo 3 ;;
+  *) exit 1 ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/docker"
     printf -- '-A DEJIMA-CI-FWD -i dejima-ci9 -p tcp -m set --match-set ci-allow-9 dst -j ACCEPT\n' >> "$T/rules"
     run_tool verify
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no pool in"* ]]
+    [[ "$output" == *"3 container(s) and no pool claims it"* ]]
+    [[ "$output" == *"--pool"* ]]
+}
+
+@test "a bridge with nothing on it is a note, not a failure" {
+    # Rules for a bridge nothing is on are untidy rather than unsafe. A verifier
+    # that cries about leftovers is one whose real findings get skimmed past.
+    verify_stubs
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci9 -p tcp -m set --match-set ci-allow-9 dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nothing is on it"* ]]
+    [[ "$output" == *"dejima-ci-firewall"* ]]
+}
+
+@test "the shared bridge with rules is expected, not something to tidy" {
+    # It holds the address every pool resolves against, and its rules contain
+    # anything that lands on it. Suggesting either half be removed was wrong
+    # twice over: once for DNS, once for egress.
+    verify_stubs
+    echo "bridge = dejima-ci0" >> "$T/config"
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"is the shared network"* ]]
+    [[ "$output" != *"docker network rm"* ]]
+    [[ "$output" != *"set 'bridge ='"* ]]
+}
+
+@test "a resolver address on no interface is a failure, not a note" {
+    # Losing it takes DNS from every pool at once, and the symptom is jobs
+    # failing in apt rather than anything naming a resolver.
+    verify_stubs
+    STUB_NO_GW=1 run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot answer"* ]]
+    [[ "$output" == *"docker network create"* ]]
 }
 
 @test "verify refuses to pass what it could not check" {
     # A verifier that reports success when it did not look is worse than no
     # verifier, because it is the one that gets believed.
     verify_stubs
+    # No gateway either, or the check for it runs with the real `ip` and reports
+    # a genuine failure, which is a different answer from "could not look".
+    sed -i '/^gateway /d' "$T/config"
     # A PATH without /usr/sbin, rather than deleting the stubs: this container
     # has a real iptables and a real ipset, so removing the stubs finds those
     # instead of finding nothing.
@@ -1069,4 +1135,57 @@ EOF2
     run_tool verify
     [ "$status" -eq 2 ]
     [[ "$output" == *"no pools declared"* ]]
+}
+
+@test "install.sh --tools deploys programs without the setup flow" {
+    # Most upgrades change only what is in bin/, and running the whole installer
+    # to put them there means answering prompts about a network, a resolver and
+    # a token that are already correct.
+    inst="${BATS_TEST_DIRNAME}/../install.sh"
+    grep -q '\-\-tools) TOOLS_ONLY=1' "$inst"
+    grep -q '^deploy_files() {' "$inst"
+}
+
+@test "--tools on a host with no config refuses rather than half-installing" {
+    # The programs would have nothing to read, and an installer that looks like
+    # it worked is worse than one that says what it did not do.
+    grep -q 'no \$CONF_DIR/config on this host' "${BATS_TEST_DIRNAME}/../install.sh"
+}
+
+@test "a network whose bridge has no rules is a failure" {
+    # The direction that fails open. Every rule names an interface, so a bridge
+    # with none matches nothing, falls off the end of the chain and returns to
+    # Docker's default, which accepts. The network works and the jobs pass, and
+    # nothing is filtering them.
+    verify_stubs
+    cat > "$T/stub/docker" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"network ls"*) printf 'dejima-ci
+dejima-ci-1
+' ;;
+  *"inspect dejima-ci-1 --format"*) echo dejima-ci1 ;;
+  *"inspect dejima-ci --format"*) echo dejima-ci0 ;;
+  *"len .Containers"*) echo 0 ;;
+  *) exit 1 ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/docker"
+    run_tool verify
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"which has no rules"* ]]
+    [[ "$output" == *"reaches anything"* ]]
+    [[ "$output" == *"bridge = dejima-ci0"* ]]
+}
+
+@test "the heading does not call the shared bridge a leftover" {
+    # It is reported ok and described as expected, and sat under a heading
+    # saying "unclaimed". A heading that disagrees with the line under it is
+    # read before the line is.
+    verify_stubs
+    echo "bridge = dejima-ci0" >> "$T/config"
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [[ "$output" != *"unclaimed"* ]]
 }
