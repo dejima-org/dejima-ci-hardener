@@ -864,6 +864,38 @@ cmd_verify() {
     done < "$f"
     [ "$any" = 1 ] || die "no usable lines in $f"
 
+    # THE DANGEROUS DIRECTION, checked first: a network that exists whose bridge
+    # has no rules. Every rule in DEJIMA-CI-FWD names an interface, so a bridge
+    # with none matches nothing, falls off the end of the chain and returns to
+    # Docker's default, which accepts. Anything landing there has unrestricted
+    # egress - a runner made without --pool, or a container left behind.
+    #
+    # Rules without a network are the harmless direction and are reported below.
+    # This is the one that fails open, and it is invisible: the network works,
+    # the jobs pass, and nothing is filtering them.
+    if command -v docker >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 \
+       && iptables -S DEJIMA-CI-FWD >/dev/null 2>&1; then
+        local ruled n nb
+        ruled=$(iptables -S DEJIMA-CI-FWD 2>/dev/null \
+                | grep -oE -- '-i [^ ]+' | awk '{print $2}' | sort -u || true)
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            nb=$(docker network inspect "$n" \
+                 --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+            [ -n "$nb" ] || continue
+            case "$nb" in "$(bridge_prefix)"*) ;; *) continue ;; esac
+            printf '%s\n' "$ruled" | grep -qx "$nb" && continue
+            say "unfiltered"
+            v_fail "$n is on $nb, which has no rules: anything on it reaches anything."
+            say "              Every rule names an interface, so a bridge with none"
+            say "              falls through to Docker's default, which accepts."
+            say "              If it is the shared network, put its bridge back:"
+            say "                set 'bridge = $nb' in $CONFIG"
+            say "                sudo dejima-ci-firewall"
+            say ""
+        done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+    fi
+
     # A bridge with rules that no pool claims. Almost always a pool removed from
     # the file while its rules and its runners kept going, which is a set of
     # jobs nothing here describes any more.
@@ -900,12 +932,12 @@ cmd_verify() {
                 fi
 
                 if [ "$holds_resolver" = 1 ]; then
-                    v_note "$b carries rules and holds the resolver address ${CFG[gateway]}."
-                    say "              Keep the network: every pool's runners are given it as"
-                    say "              --dns, so removing it takes DNS from all of them. To stop"
-                    say "              writing rules for it, without removing it:"
-                    say "                set 'bridge =' in $CONFIG, with nothing after it"
-                    say "                sudo dejima-ci-firewall"
+                    # Expected, and not something to tidy. It holds the address
+                    # every pool resolves against, and its rules are what
+                    # contains anything that lands on it - a runner made
+                    # without --pool goes here. Suggesting either half be
+                    # removed was wrong twice over.
+                    v_ok "$b is the shared network: it holds the resolver at ${CFG[gateway]}, and its rules contain anything that lands on it"
                 elif [ "${att:-0}" -gt 0 ] 2>/dev/null; then
                     # Containers on a bridge no pool describes are jobs running
                     # under an allowlist nothing here decided. That is a finding.

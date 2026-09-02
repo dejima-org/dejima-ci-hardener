@@ -1089,17 +1089,18 @@ EOF2
     [[ "$output" == *"dejima-ci-firewall"* ]]
 }
 
-@test "the bridge holding the resolver is never advised away" {
-    # It is where dnsmasq answers, and every pool's runners are given that
-    # address as --dns. Advising `docker network rm` on it took DNS away from
-    # every pool on a live host.
+@test "the shared bridge with rules is expected, not something to tidy" {
+    # It holds the address every pool resolves against, and its rules contain
+    # anything that lands on it. Suggesting either half be removed was wrong
+    # twice over: once for DNS, once for egress.
     verify_stubs
     echo "bridge = dejima-ci0" >> "$T/config"
     printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
     run_tool verify
-    [[ "$output" == *"holds the resolver address"* ]]
-    [[ "$output" == *"Keep the network"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"is the shared network"* ]]
     [[ "$output" != *"docker network rm"* ]]
+    [[ "$output" != *"set 'bridge ='"* ]]
 }
 
 @test "a resolver address on no interface is a failure, not a note" {
@@ -1151,14 +1152,29 @@ EOF2
     grep -q 'no \$CONF_DIR/config on this host' "${BATS_TEST_DIRNAME}/../install.sh"
 }
 
-@test "the retire advice leaves a config the firewall accepts" {
-    # It said to remove the bridge from the line, which leaves an empty value,
-    # and the firewall refused to start on one. That is a worse place to be than
-    # the leftover rules were.
+@test "a network whose bridge has no rules is a failure" {
+    # The direction that fails open. Every rule names an interface, so a bridge
+    # with none matches nothing, falls off the end of the chain and returns to
+    # Docker's default, which accepts. The network works and the jobs pass, and
+    # nothing is filtering them.
     verify_stubs
-    echo "bridge = dejima-ci0" >> "$T/config"
-    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    cat > "$T/stub/docker" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *"network ls"*) printf 'dejima-ci
+dejima-ci-1
+' ;;
+  *"inspect dejima-ci-1 --format"*) echo dejima-ci1 ;;
+  *"inspect dejima-ci --format"*) echo dejima-ci0 ;;
+  *"len .Containers"*) echo 0 ;;
+  *) exit 1 ;;
+esac
+exit 0
+EOF2
+    chmod +x "$T/stub/docker"
     run_tool verify
-    [[ "$output" == *"set 'bridge ='"* ]]
-    [[ "$output" != *"remove dejima-ci0 from"* ]]
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"which has no rules"* ]]
+    [[ "$output" == *"reaches anything"* ]]
+    [[ "$output" == *"bridge = dejima-ci0"* ]]
 }
