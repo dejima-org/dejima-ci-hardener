@@ -872,8 +872,14 @@ cmd_verify() {
                     v_note "$b carries rules but nothing is on it: $what."
                     say "              Nothing reaches anything through it. To retire it:"
                     [ -n "$net" ] && say "                docker network rm $net"
-                    say "                remove $b from 'bridge' in $CONFIG"
+                    # Cleared, and said exactly. "Remove it from the bridge
+                    # line" leaves an empty value, and the firewall used to
+                    # refuse to start on one - a worse place to be than the
+                    # leftover rules were.
+                    say "                set 'bridge =' in $CONFIG, with nothing after it"
                     say "                sudo dejima-ci-firewall"
+                    say "              An empty bridge is fine once every pool has a network"
+                    say "              of its own: the pools supply the interfaces."
                 fi
             done <<< "$stray"
             say ""

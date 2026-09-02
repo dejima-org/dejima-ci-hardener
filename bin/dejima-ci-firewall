@@ -75,21 +75,35 @@ BRIDGE=$(cfg_get bridge)
 GATEWAY=$(cfg_get gateway)
 SET=$(cfg_get ipset)
 : "${SET:=ci-allow}"
-[ -n "$BRIDGE" ] || die "bridge is not set in $CONFIG - the job network's bridge name, e.g. dejima-ci0"
-
 # One or more, space-separated. The documented "a job network per runner" tier
-# needs the same rules on each bridge, and the ipset is shared either way - it
-# holds destinations, not per-bridge state.
+# needs the same rules on each bridge, and the base set is shared either way.
+#
+# EMPTY IS ALLOWED, once pools exist. `bridge` names the shared network from
+# before they did, and a host whose pools have all been given networks of their
+# own has nothing left on it. Requiring it there meant the only way to retire
+# that bridge was to leave a value naming an interface nothing uses, so the
+# rules stayed and verify kept reporting it. Whether any bridge is known at all
+# is checked below, once the pools file has had its say.
 read -r -a BRIDGES <<< "$BRIDGE"
+
+# Deferred until the pools file has been read, since either source may supply
+# them and neither is required to on its own.
+require_a_bridge() {
+    [ "${#BRIDGES[@]}" -gt 0 ] && return 0
+    die "no bridges to write rules for.
+
+$CONFIG has no 'bridge', and $POOLS declares no pool. One of them has to name
+an interface or there is nothing to apply rules to:
+
+  sudo dejima-ci-allowlist pools add <owner/repo | owner> [project-dir]
+
+or set 'bridge' in $CONFIG to the shared network's interface."
+}
 
 # The bridge has to exist before rules can name it. Applied at boot by a unit
 # ordered after docker.service, this is the case where the network has not
 # been created yet - which is a setup step that was missed rather than a
 # transient, so say which.
-for b in "${BRIDGES[@]}"; do
-    ip link show "$b" >/dev/null 2>&1 \
-        || die "no interface named $b - create the job network first, or correct 'bridge' in $CONFIG"
-done
 
 # A resolver that is bound but not answering is what a recreated bridge leaves
 # behind, and it is invisible: `ss` still lists the socket, and every job dies
@@ -133,7 +147,10 @@ ipset create "${SET}-base" hash:net -exist
 # The bridge name is derived, not configured, because it has to agree with what
 # created the network. 15 characters is the kernel's limit on an interface name,
 # which is why an id is a number rather than the scope it stands for.
-BRIDGE_PREFIX="${BRIDGES[0]%%[0-9]*}"
+# From the configured bridge when there is one, so an operator who named theirs
+# something else keeps it. Otherwise the default, since with no shared bridge
+# there is nothing to take the prefix from.
+BRIDGE_PREFIX="${BRIDGES[0]:-}"; BRIDGE_PREFIX="${BRIDGE_PREFIX%%[0-9]*}"
 : "${BRIDGE_PREFIX:=dejima-ci}"
 
 declare -A BRIDGE_SET=()
@@ -151,6 +168,22 @@ if [ -r "$POOLS" ]; then
         esac
     done < "$POOLS"
 fi
+
+require_a_bridge
+
+# Every bridge, from either source. It used to run before the pools file was
+# read, so a pool whose network had never been created got rules naming an
+# interface that was not there - which iptables accepts, and which leaves that
+# pool's jobs on a bridge with no rules at all.
+for b in ${BRIDGES[@]+"${BRIDGES[@]}"}; do
+    ip link show "$b" >/dev/null 2>&1 \
+        || die "no interface named $b - create its network first.
+
+A pool's network is made by 'dejima-ci-allowlist pools add', and the shared
+one by install.sh. If $b belongs to a pool that no longer exists, take it out
+of $POOLS; if it is the shared network you have retired, clear 'bridge' in
+$CONFIG."
+done
 
 # --- job egress: DOCKER-USER is the chain Docker jumps to first from FORWARD,
 # --- and the only one whose contents Docker will not rewrite underneath you.

@@ -1120,3 +1120,15 @@ EOF2
     # it worked is worse than one that says what it did not do.
     grep -q 'no \$CONF_DIR/config on this host' "${BATS_TEST_DIRNAME}/../install.sh"
 }
+
+@test "the retire advice leaves a config the firewall accepts" {
+    # It said to remove the bridge from the line, which leaves an empty value,
+    # and the firewall refused to start on one. That is a worse place to be than
+    # the leftover rules were.
+    verify_stubs
+    echo "bridge = dejima-ci0" >> "$T/config"
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [[ "$output" == *"set 'bridge ='"* ]]
+    [[ "$output" != *"remove dejima-ci0 from"* ]]
+}
