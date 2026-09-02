@@ -1178,3 +1178,14 @@ EOF2
     [[ "$output" == *"reaches anything"* ]]
     [[ "$output" == *"bridge = dejima-ci0"* ]]
 }
+
+@test "the heading does not call the shared bridge a leftover" {
+    # It is reported ok and described as expected, and sat under a heading
+    # saying "unclaimed". A heading that disagrees with the line under it is
+    # read before the line is.
+    verify_stubs
+    echo "bridge = dejima-ci0" >> "$T/config"
+    printf -- '-A DEJIMA-CI-FWD -i dejima-ci0 -p tcp -m set --match-set ci-allow-base dst -j ACCEPT\n' >> "$T/rules"
+    run_tool verify
+    [[ "$output" != *"unclaimed"* ]]
+}

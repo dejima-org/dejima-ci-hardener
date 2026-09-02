@@ -907,7 +907,10 @@ cmd_verify() {
             | grep -E "^$(bridge_prefix)[0-9]+$" \
             | grep -vxF -e "$claimed" || true) || true
         if [ -n "$stray" ]; then
-            say "unclaimed"
+            # Not "unclaimed": the shared bridge lands here and is reported ok,
+            # under a heading calling it a leftover. A heading that disagrees
+            # with the line under it is read before the line is.
+            say "bridges no pool claims"
             local configured=" $(cfg_or_default bridge '') "
             while IFS= read -r b; do
                 [ -n "$b" ] || continue
