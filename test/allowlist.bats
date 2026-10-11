@@ -641,7 +641,7 @@ IPSETEOF
 }
 
 @test "the flush happens before the reload, not after" {
-    # The reload is a SIGHUP, which clears dnsmasq's cache. Flushing after it
+    # The reload is a restart, which clears dnsmasq's cache. Flushing after it
     # would leave cached answers that repopulate nothing, so names still on the
     # list would be unreachable until their TTL ran out.
     stub_ipset

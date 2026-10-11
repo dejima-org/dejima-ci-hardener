@@ -787,7 +787,11 @@ say "resolver is reloaded. The defaults are right unless you have a reason."
 say
 ask_cfg out    "Generated allowlist path"           out    /etc/dnsmasq.d/ci-allow.conf
 ask_cfg ref    "Branch treated as operator-approved" ref    main
-ask_cfg reload "Command that reloads the resolver"   reload "systemctl reload dnsmasq"
+# The old default is not offered back. A reload is a SIGHUP, which does not make
+# dnsmasq re-read its config, so a host carrying it never applied a new name.
+reload="$(cfg_get reload)"
+case "$reload" in ""|"systemctl reload dnsmasq") reload="systemctl restart dnsmasq" ;; esac
+ask reload "Command that reloads the resolver" "$reload"
 say
 
 # --- write ------------------------------------------------------------------
