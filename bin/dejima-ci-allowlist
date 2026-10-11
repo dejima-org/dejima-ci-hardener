@@ -85,7 +85,7 @@ declare -A CFG=(
     [upstream]=""
     [out]="/etc/dnsmasq.d/ci-allow.conf"
     [ref]="main"
-    [reload]="systemctl reload dnsmasq"
+    [reload]="systemctl restart dnsmasq"
 )
 
 read_config() {
@@ -143,7 +143,7 @@ declare -A HINT=(
     [upstream]="the resolver dnsmasq forwards ALLOWED queries to - the one that knows the answers, not this dnsmasq and not the bridge gateway. Whatever this host already resolves with: grep nameserver /etc/resolv.conf, or - if that says 127.0.0.53 - resolvectl status"
     [out]="where the generated allowlist is written, e.g. /etc/dnsmasq.d/ci-allow.conf"
     [ref]="the branch treated as operator-approved, normally main"
-    [reload]="the command that reloads the resolver, e.g. systemctl reload dnsmasq"
+    [reload]="the command that makes the resolver read the new allowlist, e.g. systemctl restart dnsmasq - not reload, which is a SIGHUP and does not re-read config files"
     [token_file]="a file holding a read-only forge API token, mode 0600 - from the forge's Settings -> Applications page, NOT a runner registration token"
     [repos_file]="one owner/repo per line - the repositories allowed to widen this runner's allowlist"
     [base_file]="names allowed regardless of any project declaration, one per line"
@@ -1079,12 +1079,16 @@ case "$cmd" in
 
         install -m 0644 "$new" "${CFG[out]}"
 
-        # Order matters. Flush first, then reload: the reload is a SIGHUP,
-        # which clears dnsmasq's cache, so the next query for a name that is
-        # still allowed goes upstream and puts its address back. Reloading
-        # first would leave a cached answer that repopulates nothing, and names
-        # that are still on the list would be unreachable until their TTL ran
-        # out.
+        # A RESTART, NOT A SIGHUP. SIGHUP clears the cache and re-reads hosts
+        # files, but not the config: a name added to the allowlist stayed
+        # unresolvable until dnsmasq happened to restart, while show and check
+        # both reported the file on disk as up to date.
+        #
+        # Order matters. Flush first, then restart: the restart empties
+        # dnsmasq's cache, so the next query for a name that is still allowed
+        # goes upstream and puts its address back. Restarting first would
+        # leave a cached answer that repopulates nothing, and names that are
+        # still on the list would be unreachable until their TTL ran out.
         #
         # Only on a removal. Flushing whenever anything changed would empty the
         # set every time a name was added, and a job mid-run would find a

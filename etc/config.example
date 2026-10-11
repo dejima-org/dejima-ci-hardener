@@ -69,4 +69,6 @@ out = /etc/dnsmasq.d/ci-allow.conf
 # pull request can write gives up the entire point of this program.
 ref = main
 
-reload = systemctl reload dnsmasq
+# Restart, not reload. A reload is a SIGHUP, and dnsmasq does not re-read
+# its config files on one, so a newly allowed name would not resolve.
+reload = systemctl restart dnsmasq
