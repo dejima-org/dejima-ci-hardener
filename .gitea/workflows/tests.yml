@@ -42,7 +42,7 @@ name: tests
 # one.
 #
 # See dejima's docs/ci.md, "Pinning the workflow with pull_request_target":
-# https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md
+# https://github.com/dejima-org/dejima/blob/main/docs/ci.md
 on:
   pull_request_target:
 
