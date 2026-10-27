@@ -29,6 +29,14 @@ while [ $# -gt 0 ]; do
     shift
 done
 echo "$url" >> "$STUB_URLS"
+# An owner's listing: users/OWNER.N is page N, and a page with no fixture is
+# the empty one that ends it.
+if [[ "$url" =~ /users/([^/]+)/repos.*page=([0-9]+) ]]; then
+    o=${BASH_REMATCH[1]}; p=${BASH_REMATCH[2]}
+    cat "$STUB_DIR/users/$o.$p" 2>/dev/null > "$out" || echo '[]' > "$out"
+    echo -n "$(cat "$STUB_DIR/users/$o.status" 2>/dev/null || echo 200)"
+    exit 0
+fi
 repo=$(sed -E 's#.*/repos/([^/]+/[^/]+)/raw.*#\1#' <<< "$url")
 status=$(cat "$STUB_DIR/$repo.status" 2>/dev/null || echo 200)
 [ -f "$STUB_DIR/$repo.body" ] && cat "$STUB_DIR/$repo.body" > "$out" || : > "$out"
@@ -878,6 +886,109 @@ acme/two
     mkdir -p "$STUB_DIR/owner"; echo one.example.com > "$STUB_DIR/owner/repo.body"
     run_tool render
     [ "$status" -eq 2 ]
+}
+
+# --- trusting a whole owner -------------------------------------------------
+
+@test "a bare owner trusts every repository the forge lists for it" {
+    # The point: a repository created after this was configured is trusted
+    # without anyone editing a file on a host that is rolled back on a timer.
+    echo acme > "$T/repos"
+    echo "acme 1" > "$T/pools"
+    mkdir -p "$STUB_DIR/users" "$STUB_DIR/acme"
+    echo '[{"full_name":"acme/one"},{"full_name":"acme/new"}]' > "$STUB_DIR/users/acme.1"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo new.example.com > "$STUB_DIR/acme/new.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -qx 'ipset=/one.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+    grep -qx 'ipset=/new.example.com/ci-allow-1' "$T/out/ci-allow.conf"
+}
+
+@test "an owner's listing is read until an empty page, not a short one" {
+    # Gitea filters what the token cannot see after paging, so a short page
+    # can be followed by a full one.
+    echo acme > "$T/repos"
+    echo "acme 1" > "$T/pools"
+    mkdir -p "$STUB_DIR/users" "$STUB_DIR/acme"
+    echo '[{"full_name":"acme/one"}]' > "$STUB_DIR/users/acme.1"
+    echo '[{"full_name":"acme/two"}]' > "$STUB_DIR/users/acme.2"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo two.example.com > "$STUB_DIR/acme/two.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    grep -q '^server=/two.example.com/' "$T/out/ci-allow.conf"
+}
+
+@test "an owner's mirrors are not trusted with it" {
+    # A mirror's main is whatever its upstream pushed.
+    echo acme > "$T/repos"
+    echo "acme 1" > "$T/pools"
+    mkdir -p "$STUB_DIR/users" "$STUB_DIR/acme"
+    echo '[{"full_name":"acme/one"},{"full_name":"acme/copy","mirror":true}]' > "$STUB_DIR/users/acme.1"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo copy.example.com > "$STUB_DIR/acme/copy.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    ! grep -q 'copy.example.com' "$T/out/ci-allow.conf"
+    ! grep -q 'acme/copy/raw' "$T/urls"
+    [[ "$output" == *"acme/copy: a mirror"* ]]
+}
+
+@test "a listed repository no pool runs is skipped, not fatal" {
+    # Nobody asked this host to run it, so refusing the render would hold
+    # every pool's update hostage to it.
+    echo acme > "$T/repos"
+    echo "acme/one 1" > "$T/pools"
+    mkdir -p "$STUB_DIR/users" "$STUB_DIR/acme"
+    echo '[{"full_name":"acme/one"},{"full_name":"acme/other"}]' > "$STUB_DIR/users/acme.1"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    echo other.example.com > "$STUB_DIR/acme/other.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"acme/other: no pool here runs it"* ]]
+    ! grep -q 'other.example.com' "$T/out/ci-allow.conf"
+}
+
+@test "a repository both named and listed is read once" {
+    printf 'acme\nacme/one\n' > "$T/repos"
+    echo "acme 1" > "$T/pools"
+    mkdir -p "$STUB_DIR/users" "$STUB_DIR/acme"
+    echo '[{"full_name":"acme/one"}]' > "$STUB_DIR/users/acme.1"
+    echo one.example.com > "$STUB_DIR/acme/one.body"
+    run_tool render
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'acme/one/raw' "$T/urls")" -eq 1 ]
+}
+
+@test "a token that cannot list an owner names the scope it lacks" {
+    # Reading contents never needed the user scope, so an existing token meets
+    # this the first time an owner is trusted.
+    echo acme > "$T/repos"
+    mkdir -p "$STUB_DIR/users"
+    echo 403 > "$STUB_DIR/users/acme.status"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"read:user"* ]]
+    [ ! -f "$T/out/ci-allow.conf" ]
+}
+
+@test "an owner the forge does not have refuses the render" {
+    echo acme > "$T/repos"
+    mkdir -p "$STUB_DIR/users"
+    echo 404 > "$STUB_DIR/users/acme.status"
+    run_tool render
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no owner called acme"* ]]
+    [ ! -f "$T/out/ci-allow.conf" ]
+}
+
+@test "repos add takes a bare owner and says what the token needs" {
+    printf 'acme/one\n' > "$T/repos"
+    run_tool repos add acme
+    [ "$status" -eq 0 ]
+    grep -qx acme "$T/repos"
+    [[ "$output" == *"read:user"* ]]
 }
 
 # --- the migration an operator actually performs -----------------------------

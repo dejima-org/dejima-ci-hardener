@@ -1,3 +1,4 @@
 # One owner/repo per line. Adding a line trusts that repository's main branch
-# to widen this runner's egress allowlist.
+# to widen this runner's egress allowlist. A bare owner, such as `dejima`,
+# trusts every repository it has or creates, other than mirrors.
 dejima/dejima

@@ -25,7 +25,7 @@ CONFIG=${DEJIMA_CI_CONFIG:-/etc/dejima-ci/config}
 usage() {
     cat >&2 <<EOF
 Usage: $PROG [render|check|show] [--config PATH]
-       $PROG repos [list|add|remove] [owner/repo...]
+       $PROG repos [list|add|remove] [owner/repo | owner...]
        $PROG pools [list|add|remove] [owner/repo | owner] [project-dir]
        $PROG verify
 
@@ -37,8 +37,8 @@ Usage: $PROG [render|check|show] [--config PATH]
            malformed entry - never "something would change"
   show     print the allowlist currently installed
   repos    list, add to, or remove from the repositories trusted to widen this
-           allowlist. Adding one used to mean re-running install.sh and
-           retyping every entry already there
+           allowlist. A bare owner trusts every repository it has, including
+           ones created later
   verify   check that the host agrees with the pools file: every pool has its
            network, its rules name its own set and nothing else, and its
            runners are on its network. Exit 1 if they disagree, 2 if something
@@ -145,7 +145,7 @@ declare -A HINT=(
     [ref]="the branch treated as operator-approved, normally main"
     [reload]="the command that makes the resolver read the new allowlist, e.g. systemctl restart dnsmasq - not reload, which is a SIGHUP and does not re-read config files"
     [token_file]="a file holding a read-only forge API token, mode 0600 - from the forge's Settings -> Applications page, NOT a runner registration token"
-    [repos_file]="one owner/repo per line - the repositories allowed to widen this runner's allowlist"
+    [repos_file]="one owner/repo, or a bare owner for all of its repositories, per line - the repositories allowed to widen this runner's allowlist"
     [base_file]="names allowed regardless of any project declaration, one per line"
 )
 
@@ -283,6 +283,65 @@ again. Nothing has been changed; the previous allowlist is still in place." ;;
     rm -f "$body"
 }
 
+# A bare owner in repos_file trusts every repository it has, including ones
+# created after this was configured, so it is listed on every run rather than
+# once. /users/ rather than /orgs/ because it answers for both kinds of owner.
+#
+# Mirrors are left out. A mirror's main is whatever the upstream pushed, so
+# trusting it would be trusting a repository nobody here merges into. One can
+# still be named explicitly.
+LIST_PAGE_LIMIT=50
+LIST_MAX_PAGES=100
+list_owner() {  # list_owner owner token -> owner/repo, one per line
+    local owner="$1" token="$2" body http rc page=1 count
+    command -v jq >/dev/null 2>&1 \
+        || die "jq is needed to list $owner's repositories, and it is not installed"
+    body=$(mktemp)
+    while :; do
+        rc=0
+        http=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' \
+            -H "Authorization: token $token" \
+            "${CFG[forge_api]}/users/$owner/repos?limit=$LIST_PAGE_LIMIT&page=$page") || rc=$?
+        [ "$rc" -eq 0 ] || { rm -f "$body"; die "could not reach the forge listing $owner's repositories"; }
+        case "$http" in
+            200) ;;
+            401) rm -f "$body"
+                 die "the forge rejected the token (HTTP 401) listing $owner's repositories.
+It is wrong rather than missing; see the token in ${CFG[token_file]}." ;;
+            # Gitea serves this listing under the user scope, which reading
+            # repository contents never needed, so an existing token meets this
+            # the first time an owner is trusted.
+            403) rm -f "$body"
+                 die "the forge accepted the token but refused to list $owner's repositories (HTTP 403).
+
+Trusting a whole owner needs the token to have read:user as well as
+read:repository: Gitea lists an owner's repositories under the user scope.
+Give the token that scope, or name the repositories one at a time." ;;
+            404) rm -f "$body"
+                 die "the forge has no owner called $owner (HTTP 404).
+
+Renamed, or never existed. Fix the entry in ${CFG[repos_file]}. Nothing has
+been changed; the previous allowlist is still in place." ;;
+            *)   rm -f "$body"; die "unexpected HTTP $http listing $owner's repositories" ;;
+        esac
+        # Not stopped at a short page: Gitea drops entries the token cannot see
+        # after paging, so a short page is not necessarily the last.
+        count=$(jq 'length' "$body" 2>/dev/null) \
+            || { rm -f "$body"; die "the forge's listing of $owner's repositories is not JSON"; }
+        [ "$count" -gt 0 ] || break
+        # Validated, because these go into a URL and a sed expression.
+        jq -r '.[] | [.full_name, (.mirror // false)] | @tsv' "$body" | while IFS=$'\t' read -r repo mirror; do
+            if [ "$mirror" = true ]; then say "  $repo: a mirror, not trusted with $owner"
+            elif valid_repo_entry "$repo"; then printf '%s\n' "$repo"
+            else say "  $repo: not an owner/repo this can read, skipped"; fi
+        done
+        page=$((page + 1))
+        [ "$page" -le "$LIST_MAX_PAGES" ] \
+            || { rm -f "$body"; die "$owner has more than $((LIST_PAGE_LIMIT * LIST_MAX_PAGES)) repositories, or the forge is ignoring the page parameter"; }
+    done
+    rm -f "$body"
+}
+
 collect() {
     local token repo
     token=$(< "${CFG[token_file]}")
@@ -312,9 +371,30 @@ collect() {
         sed 's/#.*//' "${CFG[base_file]}" | sed "s|^|$(base_set)\t|"
     fi
 
-    while read -r repo || [ -n "$repo" ]; do
-        repo="${repo%%#*}"; repo="${repo//[[:space:]]/}"
-        [ -n "$repo" ] || continue
+    local entries owner listed
+    entries=$(repos_read)
+    declare -A IMPLIED=()
+    while IFS= read -r owner; do
+        [ -n "$owner" ] || continue
+        listed=$(list_owner "$owner" "$token") || return 1
+        while IFS= read -r repo; do
+            [ -n "$repo" ] || continue
+            printf '%s\n' "$entries" | grep -qixF "$repo" && continue
+            IMPLIED[$repo]=1
+            entries=$(printf '%s\n%s\n' "$entries" "$repo")
+        done <<< "$listed"
+    done < <(printf '%s\n' "$entries" | grep -v /)
+
+    while read -r repo; do
+        [[ "$repo" == */* ]] || continue
+        # Listed rather than named, so a repository with no pool here is one
+        # nobody asked this host to run, not a misconfiguration. Refusing the
+        # render for it would hold every pool's update hostage to a repository
+        # created somewhere under the owner.
+        if [ -n "${IMPLIED[$repo]:-}" ] && [ -z "$(sets_for_repo "$repo")" ]; then
+            say "  $repo: no pool here runs it, not read"
+            continue
+        fi
         # Tagged with the set the names belong in, because which project asked
         # for a name is the whole of what makes it scopable. Collection used to
         # return bare names and the caller had no way to tell them apart again.
@@ -344,7 +424,7 @@ collect() {
             [ -n "$one_set" ] || continue
             printf '%s\n' "$declared" | sed "s|^|$one_set\t|"
         done <<< "$sets"
-    done < "${CFG[repos_file]}"
+    done <<< "$entries"
 }
 
 # --- which runner pools a repository's names have to reach ------------------
@@ -525,7 +605,7 @@ repos_write() {  # repos_write <<< LIST
     mv "$tmp" "${CFG[repos_file]}"
 }
 
-cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo...]
+cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo | owner...]
     local action=${1:-list}; shift || true
     local current; current=$(repos_read)
 
@@ -538,10 +618,10 @@ cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo...]
         *) die "unknown repos action: $action (list, add, remove)" ;;
     esac
 
-    [ "$#" -gt 0 ] || die "$action needs at least one owner/repo"
+    [ "$#" -gt 0 ] || die "$action needs at least one owner/repo, or a bare owner"
     local r changed=0 next="$current"
     for r in "$@"; do
-        valid_repo_entry "$r" || die "not an owner/repo: $r (e.g. acme/widget)"
+        valid_scope "$r" || die "not an owner/repo or an owner: $r (e.g. acme/widget, or acme)"
         if [ "$action" = add ]; then
             if printf '%s\n' "$next" | grep -qxF "$r"; then
                 say "  already trusted: $r"
@@ -562,6 +642,12 @@ cmd_repos() {  # cmd_repos [list|add|remove] [owner/repo...]
     [ "$changed" = 1 ] || { say "nothing changed"; return 0; }
     printf '%s\n' "$next" | grep -v '^$' | repos_write
     say ""
+    if [ "$action" = add ] && printf '%s\n' "$@" | grep -qv /; then
+        say "A bare owner trusts the main branch of every repository it has or"
+        say "creates. Listing them needs the token to have read:user as well as"
+        say "read:repository."
+        say ""
+    fi
     say "Nothing is collected until the allowlist is rebuilt:"
     say "  sudo $PROG render"
 }
