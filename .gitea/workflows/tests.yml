@@ -119,8 +119,9 @@ jobs:
           # assert that the templates and the rendered files parse, and they
           # skip rather than fail when no parser is present. A skip reads as a
           # pass in the run summary, so the parser is installed here to make
-          # sure those two actually run.
-          apt-get install -y --no-install-recommends bats python3 python3-yaml ca-certificates
+          # sure those two actually run. jq because dejima-ci-allowlist reads
+          # an owner's repository listing with it.
+          apt-get install -y --no-install-recommends bats python3 python3-yaml ca-certificates jq
 
       # The code under test, named explicitly. Under pull_request_target the
       # run's ref is the base branch, so a bare checkout here would test `main`
