@@ -146,7 +146,7 @@ if you have not decided, that table is the decision.
 ```sh
 ssh <you>@<vm-ip>
 sudo apt-get update && sudo apt-get install -y git
-git clone https://gitbox.branderson.io/dejima/dejima-ci-hardener.git
+git clone https://github.com/dejima-org/dejima-ci-hardener.git
 cd dejima-ci-hardener
 
 sudo ./bin/dejima-ci-bootstrap --role confined   --mgmt <your-management-ip>
