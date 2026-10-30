@@ -10,7 +10,7 @@ What this defends, what it does not, and which options were rejected on
 purpose. The last section matters most: it exists so a decision can be
 overturned on new information rather than re-argued from nothing.
 
-The sister project, [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener),
+The sister project, [dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener),
 has a document of the same name for a machine that cannot be rolled back. The
 difference between them is the whole reason there are two projects.
 
@@ -30,7 +30,7 @@ Merging a diff without reading it is therefore not a lapse this tool
 compensates for. It is how a widened allowlist arrives, with the tool then
 serving it faithfully and correctly.
 
-dejima's [responsible-use.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/responsible-use.md#safe-and-responsible-are-not-the-same-thing)
+dejima's [responsible-use.md](https://github.com/dejima-org/dejima/blob/main/docs/responsible-use.md#safe-and-responsible-are-not-the-same-thing)
 draws the line as safe against responsible: what a session can reach is the
 sandbox's business, what you let out of it is yours. Nothing here does the
 second job, and several things here depend on it being done.
@@ -260,7 +260,7 @@ Recorded so they are not re-proposed without new information.
 **An approval gate before CI runs.** Not rejected as a weak control. There is
 no forge feature that provides one.
 
-[dejima's docs/ci.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md#why-this-document-offers-no-approval-gate)
+[dejima's docs/ci.md](https://github.com/dejima-org/dejima/blob/main/docs/ci.md#why-this-document-offers-no-approval-gate)
 works through each version and each fails mechanically rather than in
 practice: changing the trigger does not help, because the workflow file lives
 in the tree the branch controls; dispatching by hand does not, because a token
@@ -291,7 +291,7 @@ that is not being used to push to a forge should not be able to push to it - and
 the case that makes it concrete is an eager agent rather than a compromised one.
 
 dejima states that in full, including what it costs the people on the other end
-of an unsolicited pull request, at [GitHub push: blocked by default](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/security.md#github-push-blocked-by-default-optional-opt-in).
+of an unsolicited pull request, at [GitHub push: blocked by default](https://github.com/dejima-org/dejima/blob/main/docs/security.md#github-push-blocked-by-default-optional-opt-in).
 The argument is not restated here, so that there is one copy of it to keep
 right.
 
