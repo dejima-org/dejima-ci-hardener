@@ -9,9 +9,9 @@
 # compose plugin, because the thing it checks is precisely what a stub cannot:
 # whether what dejima-ci-runners emits is a compose file Docker will accept.
 #
-# Both jobs name the same runner anyway. Only one label is registered for this
-# repository, and a job that "runs anywhere" is a statement about what it needs
-# rather than about what it should be handed.
+# So only the jobs that need the daemon go to the privileged tier. Everything
+# else runs confined, which also keeps it from queueing behind them on the
+# one privileged runner.
 name: tests
 
 # `pull_request`, so the workflow is read from the head of the pull request
@@ -41,17 +41,23 @@ on:
 
 jobs:
   tests:
-    # The privileged tier, registered at organization scope so that this
-    # repository and dejima both reach it. Not a generic label: whether a job
+    # The confined tier. Everything here stubs what it would otherwise need a
+    # daemon or the network for, so a runner that grants either would be
+    # handing out a privilege nothing uses. Not a generic label: whether a job
     # container gets the Docker socket is a property of the runner's
     # config.yaml (container.docker_host), not of anything this file can ask
     # for or refuse, so naming a specific label is the only say this file has
     # in which runner that is.
     #
-    # If no runner carries this label, these jobs queue. That is the intended
-    # failure, and a better one than a green run on a host that grants
-    # everything.
-    runs-on: dejima-privileged
+    # The confined tier resolves only what .dejima/allowed-domains permits,
+    # which is deb.debian.org, which is where everything below comes from. If
+    # a future test needs something else, declare it there rather than move
+    # this job to a runner that grants everything.
+    #
+    # If no runner carries this label, this job queues. That is the intended
+    # failure, and a better one than a green run on a host that grants more
+    # than the job asked for.
+    runs-on: dejima-confined
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
       # needs to run at all, and apt-get is what everything below needs.
@@ -60,12 +66,10 @@ jobs:
       # Before apt, because apt's failure for this says "Unable to locate
       # package bats" and nothing about why.
       #
-      # This tier has no egress allowlist and no job bridge - its jobs are in
-      # the host's network namespace, which is the grant the tier exists for -
-      # so a name that does not resolve here is the host's resolver or the
-      # node firewall's DNS pinhole, never this repository's allowlist. The
-      # diagnosis below says so, rather than sending anyone to
-      # `dejima-ci-allowlist show` on a host that does not run it.
+      # This tier has an egress allowlist in front of it, so a name that fails
+      # here has one more possible cause than on the privileged tier: this
+      # repository's own .dejima/allowed-domains. The diagnosis below names
+      # that first, because it is the one thing a change here can break.
       #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
@@ -88,11 +92,15 @@ jobs:
           echo "This job's resolver:" >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           echo "" >&2
-          echo "This is the privileged tier: no allowlist and no job bridge is" >&2
-          echo "in front of this job, so nothing this repository installs can" >&2
-          echo "be the cause. Check, on the runner host and then the node:" >&2
-          echo "  cat /etc/resolv.conf         - does the VM have a nameserver?" >&2
-          echo "  getent hosts deb.debian.org  - does the VM itself resolve?" >&2
+          echo "This is the confined tier, so check in this order:" >&2
+          echo "" >&2
+          echo "1. .dejima/allowed-domains in THIS repository, on main." >&2
+          echo "   The runner reads it from main, not from this branch, so a" >&2
+          echo "   domain added on the branch under test is not yet in force." >&2
+          echo "" >&2
+          echo "2. On the runner host:" >&2
+          echo "     sudo dejima-ci-allowlist show   - what is actually served" >&2
+          echo "     cat /etc/resolv.conf            - the VM's own resolver" >&2
           echo "" >&2
           echo "If the VM cannot resolve either, the node firewall's udp/53 and" >&2
           echo "tcp/53 pinholes are the usual cause - they must name the VM's" >&2
@@ -160,8 +168,9 @@ jobs:
             fi
             sleep 3
           done
-          echo "deb.debian.org did not resolve after 6 attempts. See the same" >&2
-          echo "check in the job above for what to look at." >&2
+          echo "deb.debian.org did not resolve after 6 attempts. This tier has" >&2
+          echo "no allowlist in front of it, so this is the host's resolver or" >&2
+          echo "the node firewall's DNS pinhole - see proxmox/README.md." >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           exit 1
 
