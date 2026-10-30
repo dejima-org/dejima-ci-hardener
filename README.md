@@ -18,9 +18,15 @@
      inline and indents the image by one space. -->
 &nbsp;
 
-&nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+&nbsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/dejima-wordmark-darkmode.png"><img src="assets/dejima-wordmark-lightmode.png" alt="dejima" height="72"></picture>
 
 ---
+
+> **This is a read-only mirror.** Development happens on the forge its
+> maintainer runs, which takes no accounts, issues or pull requests;
+> [this repository](https://gitbox.branderson.io/dejima/dejima-ci-hardener) is
+> public to read there. Issues and pull requests are off here too. See
+> [CONTRIBUTING.md](https://github.com/dejima-org/dejima/blob/main/CONTRIBUTING.md).
 
 &nbsp;
 
@@ -40,7 +46,7 @@ granted, and so where the boundary containing it sits. Pick the tier first -
 only one of the two halves below applies.
 
 For *why* any of this is necessary - what a CI run adds over a sandbox, and
-why no approval gate is offered - see [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md). You do
+why no approval gate is offered - see [dejima's `docs/ci.md`](https://github.com/dejima-org/dejima/blob/main/docs/ci.md). You do
 not need it to follow this.
 
 **Already have a runner?** [Updating an existing runner](#updating-an-existing-runner)
@@ -56,7 +62,7 @@ being wrong about it would matter.
 not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
 where to report a vulnerability rather than in a public issue.
 
-[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
+[![Developed in dejima](assets/dejima-badge.svg)](https://github.com/dejima-org/dejima)
 
 ## Updating an existing runner
 
@@ -419,7 +425,7 @@ assumption is not a decision many people would make deliberately.
 | [docs/reference.md](docs/reference.md) | The two `docker.sock` settings, `CONFIG_FILE`, the `/data` volume, compose networks against job networks, sharing a job network between runners, why the privileged runner is separate, why the resolver is per-runner, the cache server |
 | [proxmox/README.md](proxmox/README.md) | Building the sacrificial VM: node firewall rules, bootstrap, snapshot, scheduled rollback |
 | [SECURITY.md](SECURITY.md) | What this software claims and where to report a vulnerability; links on to the organisation-wide policy for the rest |
-| [dejima's `docs/ci.md`](https://gitbox.branderson.io/dejima/dejima/src/branch/main/docs/ci.md) | Why a CI runner needs any of this, and why there is no approval gate |
+| [dejima's `docs/ci.md`](https://github.com/dejima-org/dejima/blob/main/docs/ci.md) | Why a CI runner needs any of this, and why there is no approval gate |
 
 ## License
 
@@ -428,4 +434,4 @@ GPL-3.0-or-later. See [LICENSE](LICENSE).
 The dejima wordmark and logo are not code and are not covered by that licence.
 They are trademarks; who holds them and what may be done with them is stated
 once for the organisation, at
-[dejima's ATTRIBUTION.md](https://gitbox.branderson.io/dejima/dejima/src/branch/main/ATTRIBUTION.md).
+[dejima's ATTRIBUTION.md](https://github.com/dejima-org/dejima/blob/main/ATTRIBUTION.md).

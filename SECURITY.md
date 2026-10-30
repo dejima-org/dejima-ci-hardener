@@ -42,4 +42,4 @@ Useful things to include:
 What is promised in return, the support position, supported versions and
 warranty are set once for the whole organisation and are not restated here:
 
-https://gitbox.branderson.io/dejima/dejima/src/branch/main/SECURITY.md
+https://github.com/dejima-org/dejima/blob/main/SECURITY.md
