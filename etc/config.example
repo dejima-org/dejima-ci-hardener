@@ -26,7 +26,9 @@ forge_api = https://gitea.example.com/api/v1
 
 # A token file, mode 0600, owned by root. A forge API token, from the forge's
 # Settings -> Applications page, with read access to repository contents and
-# nothing else - this program only ever GETs one file per repository.
+# nothing else - this program only ever GETs one file per repository. If
+# repos_file names a bare owner, it also needs read:user, which is the scope
+# Gitea lists an owner's repositories under.
 #
 # NOT a runner registration token. That is the string from Actions -> Runners
 # that registers a runner, which dejima-ci-runners asks for separately. The API
@@ -35,7 +37,8 @@ token_file = /etc/dejima-ci/forge-token
 
 # One owner/repo per line. These are the repositories whose declarations are
 # allowed to widen this runner's allowlist, so the list is itself a grant:
-# adding a line here trusts that repository's main branch.
+# adding a line here trusts that repository's main branch. A bare owner trusts
+# every repository it has, and every one it creates later, other than mirrors.
 repos_file = /etc/dejima-ci/repos
 
 # Names allowed regardless of any project declaration. Keep it short, and

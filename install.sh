@@ -278,8 +278,8 @@ read_list() {   # read_list VAR PROMPT VALIDATOR
 # typed it is still looking at it. Neither of these can tell a real repository
 # from an imagined one - only the forge can - but both catch the shape.
 valid_repo_entry() {
-    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && return 0
-    say "    not an owner/repo - e.g. acme/widget"
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]] && return 0
+    say "    not an owner/repo or an owner - e.g. acme/widget, or acme"
     return 1
 }
 valid_domain_entry() {
@@ -590,7 +590,9 @@ else
     say
     say "Give it read access to repository contents and nothing else. This only"
     say "ever GETs one file per repository, and a token that can do more is a"
-    say "token handed to a machine that runs untrusted code."
+    say "token handed to a machine that runs untrusted code. If you will trust a"
+    say "whole owner rather than single repositories, it also needs read:user,"
+    say "which is the scope Gitea lists an owner's repositories under."
     say
     say "THIS IS NOT THE RUNNER REGISTRATION TOKEN. That is a different string"
     say "from a different page - Actions -> Runners - used once to register a"
@@ -624,7 +626,8 @@ say
 # --- repositories -----------------------------------------------------------
 say "Repositories whose main branch may widen this runner's allowlist."
 say "Adding one trusts that repository's main branch. One owner/repo per line,"
-say "blank line to finish."
+say "or a bare owner to trust every repository it has or creates. Blank line to"
+say "finish."
 existing_repos=""
 [ -r "$REPOS_FILE" ] && existing_repos="$(grep -vE '^\s*(#|$)' "$REPOS_FILE" || true)"
 # KEEP, ADD or REPLACE, because the two-way version made adding one project
@@ -671,10 +674,13 @@ say
 # Probed against the first configured repository, using the same request the
 # allowlist will make. 200 and 404 both mean the token authenticated: 404 is a
 # repository with no declaration, which is ordinary.
-token_status() {  # token_status TOKEN REPO -> HTTP status, or 000 if unreachable
+# A bare owner is probed with the listing the allowlist will make for it, so a
+# token lacking read:user is caught here too.
+token_status() {  # token_status TOKEN ENTRY -> HTTP status, or 000 if unreachable
+    local url="$forge_api/repos/$2/raw/.dejima/allowed-domains?ref=main"
+    [[ "$2" == */* ]] || url="$forge_api/users/$2/repos?limit=1"
     curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
-        -H "Authorization: token $1" \
-        "$forge_api/repos/$2/raw/.dejima/allowed-domains?ref=main" 2>/dev/null \
+        -H "Authorization: token $1" "$url" 2>/dev/null \
         || printf '000'
 }
 
@@ -702,7 +708,8 @@ if command -v curl >/dev/null 2>&1 && [ -s "$TOKEN_FILE" ] && [ -n "$probe_repo"
             403) say "  The forge accepted the token but refused the read (403)."
                  say "  It authenticates, so this is scope rather than identity - a Gitea"
                  say "  token created with no scopes selected reads nothing. It needs read"
-                 say "  access to repository contents, and nothing more." ;;
+                 say "  access to repository contents, and nothing more - plus read:user"
+                 say "  if $REPOS_FILE names a bare owner." ;;
             30[1278])
                  say "  The forge redirected ($status) for $probe_repo, which is"
                  say "  about that repository rather than about the token: it has"
